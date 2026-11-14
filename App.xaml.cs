@@ -55,6 +55,9 @@ public partial class App : System.Windows.Application
         if (e.Args.Length >= 3 && string.Equals(e.Args[0], "--apply-update", StringComparison.OrdinalIgnoreCase)
             && int.TryParse(e.Args[1], out int parentPid))
         {
+            var svc = new SettingsService();
+            var cfg = svc.Load();
+            AppLogger.Initialize(cfg.EnableRuntimeLog, e.Args[2]);
             UpdateService.ApplyStagedUpdateAndRelaunch(parentPid, e.Args[2]);
             Shutdown(0);
             return;
@@ -168,6 +171,7 @@ public partial class App : System.Windows.Application
 
         DispatcherUnhandledException += (_, args) =>
         {
+            AppLogger.Error("App", "捕获到未处理 UI 异常", args.Exception);
             try
             {
                 string logDir = System.IO.Path.Combine(
@@ -184,6 +188,8 @@ public partial class App : System.Windows.Application
         _settingsService = new SettingsService();
         _characterService = new CharacterProfileService(_settingsService.SettingsFolder);
         _settings = _settingsService.Load();
+        AppLogger.Initialize(_settings.EnableRuntimeLog);
+        AppLogger.Info("App", $"主程序启动：args=[{string.Join(" ", e.Args)}], followStartup={followStartupArg}, standbyFollow=({_settings.FollowAntigravity}/{_settings.FollowGeminiApp})");
         _followService = new AppFollowService(_settingsService);
         _followService.SyncAndApply(_settings);
 
@@ -340,6 +346,15 @@ public partial class App : System.Windows.Application
             _trayService.SyncState(_settings);
             _settingsWindow?.RefreshFromSettings();
         };
+        _trayService.RuntimeLogToggled += enabled =>
+        {
+            _settings.EnableRuntimeLog = enabled;
+            AppLogger.SetEnabled(enabled);
+            _settingsService.Save(_settings);
+            _petWindow.ApplySettingsToWindow();
+            _trayService.SyncState(_settings);
+            _settingsWindow?.RefreshFromSettings();
+        };
         _trayService.OpenProfileRequested += OpenProfileWindow;
         _trayService.OpenCharacterEditorRequested += OpenCharacterEditorWindow;
         _trayService.OpenSettingsRequested += OpenSettingsWindow;
@@ -355,6 +370,7 @@ public partial class App : System.Windows.Application
 
     private void HandleFollowedAppStarted(bool followEnabled, string appKey)
     {
+        AppLogger.Info("Watcher", $"检测到目标应用启动：app={appKey}, followEnabled={followEnabled}, visible={_petWindow.IsVisible}");
         _settingsWindow?.UpdateAntigravityBadge();
         if (!followEnabled) return;
 
@@ -401,6 +417,7 @@ public partial class App : System.Windows.Application
         if (!_settings.FollowAntigravity && !_settings.FollowGeminiApp)
             SetFollowAntigravity(true);
 
+        AppLogger.Info("App", "进入托盘隐藏待机模式");
         _petWindow.Hide();
         _trayService.ShowBalloon("Gemini 娘待机中 💤", "已隐藏等待 Antigravity / Gemini 桌面 App 启动后自动唤醒（双击托盘图标可随时呼唤）。");
     }
@@ -617,6 +634,7 @@ public partial class App : System.Windows.Application
 
     private void HandleUpdateResult(UpdateCheckResult result, bool notifyUser)
     {
+        AppLogger.Info("Update", $"更新检查完成：ok={result.Succeeded}, avail={result.UpdateAvailable}, latest={result.LatestTag}, msg={result.StatusMessage}");
         _lastUpdateResult = result;
         _trayService.SetAvailableUpdate(result.Succeeded && result.UpdateAvailable ? result.LatestTag : null);
         _settingsWindow?.UpdateLatestStatusBadge(result);
@@ -663,6 +681,7 @@ public partial class App : System.Windows.Application
         if (_isExiting) return;
         _isExiting = true;
 
+        AppLogger.Info("App", "主程序优雅退出");
         _settingsService.Save(_settings);
         _wakeCts?.Cancel();
         _agWatcher.Dispose();
@@ -682,6 +701,7 @@ public partial class App : System.Windows.Application
         System.IO.Directory.CreateDirectory(outDir);
         string isolatedSettingsDir = System.IO.Path.Combine(outDir, "_smoke_settings");
         var settingsService = new SettingsService(isolatedSettingsDir);
+        AppLogger.Initialize(false, isolatedSettingsDir);
         var settings = new PetSettings();
         var sprites = new SpriteManager();
         var sound = new SoundService { Enabled = false };

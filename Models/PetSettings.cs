@@ -60,4 +60,9 @@ public sealed class PetSettings
     public string UpdateReleasesUrl { get; set; } = "https://github.com/xiaoxindada/GeminiDesktopPet/releases";
     public bool AutoCheckUpdates { get; set; } = true;
     public string SkippedUpdateVersion { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Diagnostic runtime logging switch (off by default); writes daily yyyy-MM-dd.log when enabled.
+    /// </summary>
+    public bool EnableRuntimeLog { get; set; } = false;
 }

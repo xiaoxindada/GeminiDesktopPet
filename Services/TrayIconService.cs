@@ -20,6 +20,7 @@ public sealed class TrayIconService : IDisposable
     private readonly ToolStripMenuItem _clickThroughItem;
     private readonly ToolStripMenuItem _alwaysOnTopItem;
     private readonly ToolStripMenuItem _soundItem;
+    private readonly ToolStripMenuItem _runtimeLogItem;
     private readonly ToolStripMenuItem _updateItem;
 
     public event Action? ShowAndGreetRequested;
@@ -36,6 +37,7 @@ public sealed class TrayIconService : IDisposable
     public event Action<bool>? ClickThroughToggled;
     public event Action<bool>? AlwaysOnTopToggled;
     public event Action<bool>? SoundToggled;
+    public event Action<bool>? RuntimeLogToggled;
     public event Action? OpenProfileRequested;
     public event Action? OpenCharacterEditorRequested;
     public event Action? OpenSettingsRequested;
@@ -93,6 +95,10 @@ public sealed class TrayIconService : IDisposable
         _soundItem.Click += (_, _) => SoundToggled?.Invoke(_soundItem.Checked);
         menu.Items.Add(_soundItem);
 
+        _runtimeLogItem = new ToolStripMenuItem("📝 记录运行日志（排错用）") { CheckOnClick = true };
+        _runtimeLogItem.Click += (_, _) => RuntimeLogToggled?.Invoke(_runtimeLogItem.Checked);
+        menu.Items.Add(_runtimeLogItem);
+
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("📖 角色档案与设定图鉴", null, (_, _) => OpenProfileRequested?.Invoke()));
         menu.Items.Add(new ToolStripMenuItem("✏️ 自定义角色设定...", null, (_, _) => OpenCharacterEditorRequested?.Invoke()));
@@ -126,6 +132,7 @@ public sealed class TrayIconService : IDisposable
         _alwaysOnTopItem.Checked = settings.AlwaysOnTop;
         _clickThroughItem.Checked = settings.ClickThrough;
         _soundItem.Checked = settings.SoundEnabled;
+        _runtimeLogItem.Checked = settings.EnableRuntimeLog;
     }
 
     public void SetAvailableUpdate(string? latestTag)

@@ -37,6 +37,7 @@ public sealed class GeminiChatService
             }
             catch (Exception ex)
             {
+                AppLogger.Error("Chat", $"Gemini API 调用失败 (Model={settings.GeminiModel})", ex);
                 return new ChatReply($"喵呜…连线失败了（{ex.Message}），先用本地模式陪你喵！", PetState.Oops);
             }
         }

@@ -53,13 +53,16 @@ public sealed class AppFollowService
     public void SyncAndApply(PetSettings settings)
     {
         CleanupLegacyFiles();
-        _settingsService.SetFollowWatcherRun(AnyFollowEnabled(settings));
+        bool enabled = AnyFollowEnabled(settings);
+        _settingsService.SetFollowWatcherRun(enabled);
+        AppLogger.Info("AppFollow", $"同步应用联动状态：Antigravity={settings.FollowAntigravity}, GeminiApp={settings.FollowGeminiApp}, RunEntry={enabled}");
     }
 
     public void DisableFollow()
     {
         CleanupLegacyFiles();
         _settingsService.SetFollowWatcherRun(false);
+        AppLogger.Info("AppFollow", "已停用应用跟随联动并清除开机待机入口");
     }
 
     public void CleanupLegacyFiles()

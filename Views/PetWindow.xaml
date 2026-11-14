@@ -202,6 +202,7 @@
                         <MenuItem Header="👻 开启鼠标穿透（托盘可取消）" Click="MenuClickThrough_Click"/>
                         <MenuItem Header="💤 隐藏待机（等待联动软件启动）" Click="MenuStandby_Click"/>
                         <MenuItem Header="⚙️ 偏好设置..." Click="OpenSettings_Click"/>
+                        <MenuItem x:Name="MenuRuntimeLog" Header="📝 记录运行日志（排错用）" IsCheckable="True" Click="MenuRuntimeLog_Click"/>
                         <MenuItem Header="🆕 检查更新..." Click="OpenUpdate_Click"/>
                         <Separator/>
                         <MenuItem Header="🌙 让 Gemini 娘休息（退出）" Click="MenuExit_Click"/>

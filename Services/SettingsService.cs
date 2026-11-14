@@ -55,9 +55,9 @@ public sealed class SettingsService
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Fall back to defaults on corrupted file.
+            AppLogger.Warn("Settings", $"读取设置失败，回退默认值：{ex.Message}");
         }
         return new PetSettings();
     }
@@ -69,9 +69,9 @@ public sealed class SettingsService
             string json = JsonSerializer.Serialize(settings, JsonOptions);
             File.WriteAllText(_settingsFilePath, json);
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore transient IO failures.
+            AppLogger.Error("Settings", "保存设置文件失败", ex);
         }
     }
 

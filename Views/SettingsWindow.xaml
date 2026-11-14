@@ -159,6 +159,22 @@
                 </StackPanel>
             </Border>
 
+            <!-- Diagnostics & Runtime Logging -->
+            <Border Background="#1D1836" CornerRadius="12" Padding="14" Margin="0,0,0,12" BorderBrush="#342B61" BorderThickness="1">
+                <StackPanel>
+                    <TextBlock Text="运行日志与问题排查" FontSize="14" FontWeight="SemiBold" Foreground="#C4B5FD" Margin="0,0,0,6"/>
+                    <TextBlock Text="默认关闭。遇到异常或准备提交反馈时可开启，运行过程与报错将按当天日期写入 .log 文件。"
+                               TextWrapping="Wrap" FontSize="11.5" Foreground="#9D95C8" Margin="0,0,0,8"/>
+                    <CheckBox x:Name="EnableRuntimeLogCheck" Content="开启运行日志（按当天日期写入 YYYY-MM-DD.log）"
+                              Foreground="#EAE6FF" Margin="0,2,0,8" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
+                    <TextBlock x:Name="LogPathText" Text="当天日志：&lt;主程序目录&gt;\Logs\YYYY-MM-DD.log"
+                               TextWrapping="Wrap" FontSize="11" Foreground="#A59EC9" Margin="0,0,0,8"/>
+                    <WrapPanel>
+                        <Button Content="📂 打开日志目录" Padding="10,5" FontSize="11.5" Click="OpenLogFolderBtn_Click"/>
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Tips -->
             <Border Background="#19152E" CornerRadius="10" Padding="12" BorderBrush="#2E2656" BorderThickness="1">
                 <TextBlock TextWrapping="Wrap" FontSize="11.5" LineHeight="18" Foreground="#ACA4D6"

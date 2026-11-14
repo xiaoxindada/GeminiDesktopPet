@@ -259,6 +259,7 @@ public partial class PetWindow : Window
         MenuShowSpeechBubble.IsChecked = _settings.ShowSpeechBubble;
         MenuFollowAntigravity.IsChecked = _settings.FollowAntigravity;
         MenuFollowGeminiApp.IsChecked = _settings.FollowGeminiApp;
+        MenuRuntimeLog.IsChecked = _settings.EnableRuntimeLog;
 
         QuickStyleBtn.Content = "🎀 切换形象";
         QuickStyleBtn.ToolTip = _settings.StyleMode == PetStyleMode.Standard
@@ -1530,6 +1531,22 @@ public partial class PetWindow : Window
     private void OpenUpdate_Click(object sender, RoutedEventArgs e) => OpenUpdateRequested?.Invoke();
     private void MenuStandby_Click(object sender, RoutedEventArgs e) => StandbyRequested?.Invoke();
     private void MenuExit_Click(object sender, RoutedEventArgs e) => ExitRequested?.Invoke();
+
+    private void MenuRuntimeLog_Click(object sender, RoutedEventArgs e)
+    {
+        bool enabled = MenuRuntimeLog.IsChecked;
+        _settings.EnableRuntimeLog = enabled;
+        AppLogger.SetEnabled(enabled);
+        _settingsService.Save(_settings);
+        ApplySettingsToWindow();
+        SettingsSynced?.Invoke();
+
+        ShowBubble(
+            enabled
+                ? $"已开启运行日志，将写入 Logs\\{System.IO.Path.GetFileName(AppLogger.GetDailyLogFilePath())} 📝"
+                : "已关闭运行日志记录喵～",
+            TimeSpan.FromSeconds(4));
+    }
 
     public void SyncCharacterProfile(CharacterProfile profile)
     {

@@ -76,6 +76,8 @@ public partial class SettingsWindow : Window
         VersionBadgeText.Text = $"当前版本 {AppVersion.CurrentDisplay}";
         UpstreamUrlLink.Text = $"上游追踪源：{UpdateService.NormalizeReleasesUrl(_settings.UpdateReleasesUrl)}";
         AutoCheckUpdatesCheck.IsChecked = _settings.AutoCheckUpdates;
+        EnableRuntimeLogCheck.IsChecked = _settings.EnableRuntimeLog;
+        LogPathText.Text = $"当天日志：{AppLogger.GetDailyLogFilePath()}";
 
         _initializing = false;
     }
@@ -139,6 +141,12 @@ public partial class SettingsWindow : Window
         _settings.ShowSpeechBubble = ShowSpeechBubbleCheck.IsChecked == true;
         _settings.SleepWhenAntigravityExits = SleepOnAgExitCheck.IsChecked == true;
         _settings.AutoCheckUpdates = AutoCheckUpdatesCheck.IsChecked == true;
+        bool nextRuntimeLog = EnableRuntimeLogCheck.IsChecked == true;
+        if (_settings.EnableRuntimeLog != nextRuntimeLog)
+        {
+            _settings.EnableRuntimeLog = nextRuntimeLog;
+            AppLogger.SetEnabled(nextRuntimeLog);
+        }
 
         _settingsService.Save(_settings);
         SettingsChanged?.Invoke();
@@ -223,6 +231,24 @@ public partial class SettingsWindow : Window
 
     private void OpenProfileEditorBtn_Click(object sender, RoutedEventArgs e)
         => OpenProfileEditorRequested?.Invoke();
+
+    private void OpenLogFolderBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            string logFolder = AppLogger.LogFolderPath;
+            Directory.CreateDirectory(logFolder);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{logFolder}\"")
+            {
+                WorkingDirectory = logFolder,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // Ignore explorer launch errors.
+        }
+    }
 
     private void UpstreamUrlLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {

@@ -155,6 +155,7 @@ public sealed class AntigravityQuotaService
 
         if (string.IsNullOrWhiteSpace(agyPath))
         {
+            AppLogger.Warn("Quota", "未在本机找到 agy.exe / agy.cmd");
             return new QuotaSnapshot(
                 false,
                 "未在本机找到官方 Antigravity CLI (agy.exe)。请先安装并登录 Antigravity CLI 或桌面端。",
@@ -187,6 +188,7 @@ public sealed class AntigravityQuotaService
 
         if (quotaOk)
         {
+            AppLogger.Info("Quota", $"额度查询成功：分组={groups.Count}, 模型={activeModel ?? "unknown"}, Credits={remainingCredits?.ToString() ?? "n/a"}");
             return new QuotaSnapshot(
                 true,
                 null,
@@ -205,6 +207,7 @@ public sealed class AntigravityQuotaService
                 ? qErr.Trim()
                 : $"agy 查询返回失败 (退出码 {qCode})。请确认已在 Antigravity / agy 中完成 Google 账号登录。";
 
+        AppLogger.Warn("Quota", $"额度查询失败 (agyPath={agyPath}, exitCode={qCode}): {detail}");
         return new QuotaSnapshot(
             false,
             detail,

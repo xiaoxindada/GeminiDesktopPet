@@ -137,6 +137,7 @@ public sealed class UpdateService
             }
             catch (Exception ex)
             {
+                AppLogger.Warn("Update", $"检查更新失败 ({latestPageUrl}): {ex.Message}");
                 return new UpdateCheckResult(
                     false, false, current, "", "", "", "", latestPageUrl, null, null,
                     $"检查更新失败：{ex.Message}");
@@ -474,10 +475,12 @@ public sealed class UpdateService
             if (string.Equals(sourceDir, cleanTargetDir, StringComparison.OrdinalIgnoreCase))
                 return false;
 
+            AppLogger.Info("Update", $"开始原地更新替换：parentPid={parentPid}, targetDir={cleanTargetDir}");
             WaitForProcessExit(parentPid, TimeSpan.FromSeconds(15));
             Thread.Sleep(350);
 
             CopyDirectoryWithRetry(sourceDir, cleanTargetDir);
+            AppLogger.Info("Update", $"原地文件覆盖完成，准备重新启动：{cleanTargetDir}");
 
             string targetExe = Path.Combine(cleanTargetDir, "GeminiDesktopPet.exe");
             if (File.Exists(targetExe))
@@ -490,8 +493,9 @@ public sealed class UpdateService
             }
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            AppLogger.Error("Update", "应用原地更新失败", ex);
             return false;
         }
     }
