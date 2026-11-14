@@ -4,17 +4,17 @@
 
 ## 运行效果预览
 
-![Gemini 娘双形态互动、快捷栏与骨骼漫步/贴边预览](docs/images/preview-pet-modes.png)
+![Gemini 娘双形态互动、快捷栏与骨骼漫步/贴边预览](preview/images/preview-pet-modes.png)
 
 | 角色档案与设定 | Q 版表情动作图鉴 |
 | :---: | :---: |
-| ![角色档案与设定](docs/images/preview-profile.png) | ![Q版表情动作图鉴](docs/images/preview-gallery.png) |
+| ![角色档案与设定](preview/images/preview-profile.png) | ![Q版表情动作图鉴](preview/images/preview-gallery.png) |
 
 <details>
 <summary>展开查看：偏好设置与 VBS 应用联动界面</summary>
 
 <p align="center">
-  <img src="docs/images/preview-settings.png" alt="偏好设置与 VBS 应用联动" width="380" />
+  <img src="preview/images/preview-settings.png" alt="偏好设置与 VBS 应用联动" width="380" />
 </p>
 
 </details>
@@ -35,11 +35,10 @@
 1. **开启运行日志开关**（默认关闭）：
    - 打开 **偏好设置 → 运行日志与问题排查**，勾选 **开启运行日志**；也可以在系统托盘图标或桌宠右键菜单中直接勾选 **记录运行日志（排错用）**。
 2. **复现问题并找到运行日志**：
-   - 保持开关开启并完整复现一次问题。程序会在当前主程序（`GeminiDesktopPet.exe`）目录下自动创建 `Logs` 文件夹，并将关键生命周期与报错信息按当天日期写入：
+   - 保持开关开启并完整复现一次问题。日志生成在 `Logs` 文件夹：
    - `<主程序目录>\Logs\YYYY-MM-DD.log`（可在设置窗口点击 **📂 打开日志目录** 一键打开）。
-3. **在问题描述中附带 AI 整理结果或运行 `.log` 文件**：
    - 提交 [GitHub Issues](https://github.com/xiaoxindada/GeminiDesktopPet/issues) 时，建议先让**你的其他 AI 助手**读取当天的 `.log` 文件帮你做一次问题整理（梳理出问题现象、复现步骤、环境信息与关键报错摘要）并写入**问题描述**；
-   - 或者直接在提交问题时附上简短说明，并**上传/提交主程序 `Logs` 目录下的当天 `.log` 运行日志文件**（提交前请先检查脱敏个人隐私信息），方便更快定位与修复（排查结束后可随时关闭运行日志开关）。
+   - 或者直接在提交问题时附上简短说明，或者上传 `.log` 日志文件（提交前请先检查脱敏个人隐私信息），方便更快定位与修复（排查结束后可随时关闭运行日志开关）。
 
 ```shell
 # 使用 dotnet CLI 或 Visual Studio MSBuild 构建 Release
