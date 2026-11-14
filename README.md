@@ -2,6 +2,23 @@
 
 基于 [Gender Swap AI · Gemini 娘角色档案](https://genderswapai.com/zh-CN/ai-gijinka/gemini) 设定的 Windows 原生透明桌面宠物，支持 **Q 版（默认） / 标准立绘版** 双形态切换。
 
+## 运行效果预览
+
+![Gemini 娘双形态互动、快捷栏与骨骼漫步/贴边预览](docs/images/preview-pet-modes.png)
+
+| 角色档案与设定 | Q 版表情动作图鉴 |
+| :---: | :---: |
+| ![角色档案与设定](docs/images/preview-profile.png) | ![Q版表情动作图鉴](docs/images/preview-gallery.png) |
+
+<details>
+<summary>展开查看：偏好设置与 VBS 应用联动界面</summary>
+
+<p align="center">
+  <img src="docs/images/preview-settings.png" alt="偏好设置与 VBS 应用联动" width="380" />
+</p>
+
+</details>
+
 ## 核心功能
 
 - **双形态与自然行走**：内置 55 种 Q 版动作表情与标准版全比例三视图立绘；自由漫步时启用自然骨骼步态动画，边缘停靠时自动贴边偷看。
