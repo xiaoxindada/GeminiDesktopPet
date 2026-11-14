@@ -13,7 +13,7 @@ public sealed class TrayIconService : IDisposable
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _styleModeItem;
     private readonly ToolStripMenuItem _antiGravityItem;
-    private readonly ToolStripMenuItem _autoWalkItem;
+    private readonly ToolStripMenuItem _pinOnDesktopItem;
     private readonly ToolStripMenuItem _speechBubbleItem;
     private readonly ToolStripMenuItem _followAgItem;
     private readonly ToolStripMenuItem _followGeminiItem;
@@ -29,7 +29,7 @@ public sealed class TrayIconService : IDisposable
     public event Action? StandbyForAntigravityRequested;
     public event Action? StyleToggleRequested;
     public event Action<bool>? AntiGravityToggled;
-    public event Action<bool>? AutoWalkToggled;
+    public event Action<bool>? PinOnDesktopToggled;
     public event Action<bool>? SpeechBubbleToggled;
     public event Action<bool>? FollowAntigravityToggled;
     public event Action<bool>? FollowGeminiAppToggled;
@@ -65,9 +65,9 @@ public sealed class TrayIconService : IDisposable
         _antiGravityItem.Click += (_, _) => AntiGravityToggled?.Invoke(_antiGravityItem.Checked);
         menu.Items.Add(_antiGravityItem);
 
-        _autoWalkItem = new ToolStripMenuItem("🐾 桌面自由漫步") { CheckOnClick = true };
-        _autoWalkItem.Click += (_, _) => AutoWalkToggled?.Invoke(_autoWalkItem.Checked);
-        menu.Items.Add(_autoWalkItem);
+        _pinOnDesktopItem = new ToolStripMenuItem("📌 固定在桌面（不乱跑）") { CheckOnClick = true };
+        _pinOnDesktopItem.Click += (_, _) => PinOnDesktopToggled?.Invoke(_pinOnDesktopItem.Checked);
+        menu.Items.Add(_pinOnDesktopItem);
 
         _speechBubbleItem = new ToolStripMenuItem("💭 自动弹出对话气泡") { CheckOnClick = true };
         _speechBubbleItem.Click += (_, _) => SpeechBubbleToggled?.Invoke(_speechBubbleItem.Checked);
@@ -119,7 +119,7 @@ public sealed class TrayIconService : IDisposable
             ? "🎀 切换形象：当前标准版 → 切至 Q 版"
             : "🎀 切换形象：当前 Q 版 → 切至标准版";
         _antiGravityItem.Checked = settings.AntiGravityMode;
-        _autoWalkItem.Checked = settings.AutoWalk;
+        _pinOnDesktopItem.Checked = !settings.AutoWalk;
         _speechBubbleItem.Checked = settings.ShowSpeechBubble;
         _followAgItem.Checked = settings.FollowAntigravity;
         _followGeminiItem.Checked = settings.FollowGeminiApp;

@@ -73,7 +73,7 @@
                 <StackPanel>
                     <TextBlock Text="行为与物理互动" FontSize="14" FontWeight="SemiBold" Foreground="#C4B5FD" Margin="0,0,0,8"/>
                     <CheckBox x:Name="AlwaysOnTopCheck" Content="窗口始终置顶（覆盖其他应用之上）" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
-                    <CheckBox x:Name="AutoWalkCheck" Content="桌面自由漫步（在任务栏上左右巡逻）" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
+                    <CheckBox x:Name="PinOnDesktopCheck" Content="固定在桌面（不乱跑）" ToolTip="开启后停止自由漫步，仍可鼠标拖动位置" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
                     <CheckBox x:Name="AntiGravityCheck" Content="反重力悬浮模式（Antigravity 常驻漂浮）" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
                     <CheckBox x:Name="GravityCheck" Content="松手重力下落与 Q 弹着陆" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
                     <CheckBox x:Name="EdgeDockCheck" Content="拖动到屏幕左右边缘时贴边偷看" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>

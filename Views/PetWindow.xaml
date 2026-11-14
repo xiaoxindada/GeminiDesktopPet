@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Gemini 娘"
-        Width="340" Height="420"
+        Width="380" Height="440"
         AllowsTransparency="True"
         WindowStyle="None"
         Background="Transparent"
@@ -116,14 +116,20 @@
                     BorderBrush="#4D3D8A"
                     BorderThickness="1"
                     CornerRadius="12"
-                    Padding="4,3"
+                    Padding="6,5"
                     HorizontalAlignment="Center">
-                <StackPanel Orientation="Horizontal">
-                    <Button Content="💬 对话" Click="ToggleChat_Click" Style="{StaticResource QuickPillBtn}" ToolTip="打开对话输入"/>
-                    <Button x:Name="QuickStyleBtn" Content="🎀 切换形象" Click="ToggleStyleMode_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换 Q 版 / 标准版形象"/>
-                    <Button x:Name="QuickFloatBtn" Content="✨ 悬浮" Click="ToggleAntiGravity_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换反重力悬浮"/>
-                    <Button Content="📖 档案" Click="OpenProfile_Click" Style="{StaticResource QuickPillBtn}" ToolTip="查看角色设定与三视图"/>
-                    <Button Content="🆕 更新" Click="OpenUpdate_Click" Style="{StaticResource QuickPillBtn}" ToolTip="检查 GitHub Releases 更新与更新日志"/>
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                        <Button Content="💬 对话" Click="ToggleChat_Click" Style="{StaticResource QuickPillBtn}" ToolTip="打开对话输入"/>
+                        <Button x:Name="QuickStyleBtn" Content="🎀 切换形象" Click="ToggleStyleMode_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换 Q 版 / 标准版形象"/>
+                        <Button x:Name="QuickFloatBtn" Content="✨ 悬浮" Click="ToggleAntiGravity_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换反重力悬浮"/>
+                        <Button x:Name="QuickPinBtn" Content="📌 固定(不乱跑)" Click="TogglePinOnDesktop_Click" Style="{StaticResource QuickPillBtn}" ToolTip="固定在桌面不乱跑"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,4,0,0">
+                        <Button Content="📖 档案" Click="OpenProfile_Click" Style="{StaticResource QuickPillBtn}" ToolTip="查看角色设定与三视图"/>
+                        <Button Content="✏️ 角色设定" Click="OpenCharacterEditor_Click" Style="{StaticResource QuickPillBtn}" ToolTip="可视化自定义角色设定"/>
+                        <Button Content="🆕 检查更新" Click="OpenUpdate_Click" Style="{StaticResource QuickPillBtn}" ToolTip="检查 GitHub Releases 更新与更新日志"/>
+                    </StackPanel>
                 </StackPanel>
             </Border>
         </StackPanel>
@@ -162,7 +168,7 @@
                             <MenuItem x:Name="MenuStyleStandard" Header="标准立绘形象 (Standard)" IsCheckable="True" Click="MenuStyleStandard_Click"/>
                         </MenuItem>
                         <MenuItem x:Name="MenuAntiGravity" Header="✨ 反重力悬浮模式" IsCheckable="True" Click="MenuAntiGravity_Click"/>
-                        <MenuItem x:Name="MenuAutoWalk" Header="🐾 桌面自由漫步" IsCheckable="True" Click="MenuAutoWalk_Click"/>
+                        <MenuItem x:Name="MenuPinOnDesktop" Header="📌 固定在桌面（不乱跑）" IsCheckable="True" Click="MenuPinOnDesktop_Click"/>
                         <MenuItem x:Name="MenuFollowAntigravity" Header="🚀 跟随 Antigravity 启动而启动" IsCheckable="True" Click="MenuFollowAntigravity_Click"/>
                         <MenuItem x:Name="MenuFollowGeminiApp" Header="🌟 跟随 Gemini 桌面 App 启动而启动" IsCheckable="True" Click="MenuFollowGeminiApp_Click"/>
                         <MenuItem Header="🎭 动作表现">

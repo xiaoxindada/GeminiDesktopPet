@@ -55,7 +55,7 @@ public partial class SettingsWindow : Window
         CostumeBox.SelectedValue = _settings.CostumeOverride;
 
         AlwaysOnTopCheck.IsChecked = _settings.AlwaysOnTop;
-        AutoWalkCheck.IsChecked = _settings.AutoWalk;
+        PinOnDesktopCheck.IsChecked = !_settings.AutoWalk;
         AntiGravityCheck.IsChecked = _settings.AntiGravityMode;
         GravityCheck.IsChecked = _settings.GravityEnabled;
         EdgeDockCheck.IsChecked = _settings.EdgeDockEnabled;
@@ -129,7 +129,7 @@ public partial class SettingsWindow : Window
         }
 
         _settings.AlwaysOnTop = AlwaysOnTopCheck.IsChecked == true;
-        _settings.AutoWalk = AutoWalkCheck.IsChecked == true;
+        _settings.AutoWalk = PinOnDesktopCheck.IsChecked != true;
         _settings.AntiGravityMode = AntiGravityCheck.IsChecked == true;
         _settings.GravityEnabled = GravityCheck.IsChecked == true;
         _settings.EdgeDockEnabled = EdgeDockCheck.IsChecked == true;

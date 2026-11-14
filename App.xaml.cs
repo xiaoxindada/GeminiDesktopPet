@@ -297,9 +297,9 @@ public partial class App : System.Windows.Application
             _trayService.SyncState(_settings);
             _settingsWindow?.RefreshFromSettings();
         };
-        _trayService.AutoWalkToggled += enabled =>
+        _trayService.PinOnDesktopToggled += pinned =>
         {
-            _settings.AutoWalk = enabled;
+            _settings.AutoWalk = !pinned;
             _settingsService.Save(_settings);
             _petWindow.ApplySettingsToWindow();
             _trayService.SyncState(_settings);
@@ -738,6 +738,8 @@ public partial class App : System.Windows.Application
         petChibi.Show();
         petChibi.ConfigureSmokePreview(PetStyleMode.Chibi, walking: true, animTimeSec: 0.20, DockSide.None);
         RenderWindowShot(petChibi, System.IO.Path.Combine(outDir, "pet_chibi_walk.png"));
+        petChibi.ConfigureSmokePreview(PetStyleMode.Chibi, walking: false, animTimeSec: 0.0, DockSide.None, showQuickBar: true);
+        RenderWindowShot(petChibi, System.IO.Path.Combine(outDir, "pet_quickbar.png"));
         petChibi.Hide();
 
         petStd.ShowActivated = false;

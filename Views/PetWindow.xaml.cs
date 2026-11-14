@@ -228,8 +228,8 @@ public partial class PetWindow : Window
         StdWalkRig.Height = 300.0 * s;
         StdWalkRig.Width = StdWalkRig.Height * (337.0 / 977.0);
 
-        Width = Math.Max(310.0, 340.0 * s);
-        Height = Math.Max(350.0, spriteH + 170.0);
+        Width = Math.Max(360.0, 380.0 * s);
+        Height = Math.Max(380.0, spriteH + 200.0);
 
         if (!double.IsNaN(oldBottom))
         {
@@ -248,10 +248,14 @@ public partial class PetWindow : Window
         Topmost = _settings.AlwaysOnTop;
         _sound.Enabled = _settings.SoundEnabled;
 
+        bool pinned = !_settings.AutoWalk;
+        if (pinned && _isWalking)
+            _isWalking = false;
+
         MenuStyleChibi.IsChecked = _settings.StyleMode == PetStyleMode.Chibi;
         MenuStyleStandard.IsChecked = _settings.StyleMode == PetStyleMode.Standard;
         MenuAntiGravity.IsChecked = _settings.AntiGravityMode;
-        MenuAutoWalk.IsChecked = _settings.AutoWalk;
+        MenuPinOnDesktop.IsChecked = pinned;
         MenuShowSpeechBubble.IsChecked = _settings.ShowSpeechBubble;
         MenuFollowAntigravity.IsChecked = _settings.FollowAntigravity;
         MenuFollowGeminiApp.IsChecked = _settings.FollowGeminiApp;
@@ -261,6 +265,10 @@ public partial class PetWindow : Window
             ? "当前：标准立绘版（点击切换至 Q 版）"
             : "当前：Q 版猫娘（点击切换至标准版）";
         QuickFloatBtn.Content = _settings.AntiGravityMode ? "🌟 已悬浮" : "✨ 悬浮";
+        QuickPinBtn.Content = pinned ? "📌 已固定" : "📌 固定(不乱跑)";
+        QuickPinBtn.ToolTip = pinned
+            ? "已固定在桌面（点击恢复漫步）"
+            : "固定在桌面不乱跑";
 
         BondBadgeText.Text = $" · ♥ {_settings.Favorability}";
         if (!_settings.ShowSpeechBubble && !_isChatOpen)
@@ -788,7 +796,7 @@ public partial class PetWindow : Window
         Top = Math.Clamp(Top, area.Top, Math.Max(area.Top, area.Bottom - Height));
     }
 
-    public void ConfigureSmokePreview(PetStyleMode styleMode, bool walking, double animTimeSec, DockSide dockSide)
+    public void ConfigureSmokePreview(PetStyleMode styleMode, bool walking, double animTimeSec, DockSide dockSide, bool showQuickBar = false)
     {
         _overridePose = null;
         _isDragging = false;
@@ -817,6 +825,7 @@ public partial class PetWindow : Window
         if (dockSide != DockSide.None)
             ReanchorDockedPosition();
 
+        QuickBar.Visibility = showQuickBar ? Visibility.Visible : Visibility.Collapsed;
         UpdateSpriteTransforms();
         UpdateLayout();
     }
@@ -1420,17 +1429,30 @@ public partial class PetWindow : Window
 
     private void MenuAntiGravity_Click(object sender, RoutedEventArgs e) => ToggleAntiGravity_Click(sender, e);
 
-    private void MenuAutoWalk_Click(object sender, RoutedEventArgs e)
+    private void SetPinOnDesktopEnabled(bool pinned)
     {
-        _settings.AutoWalk = MenuAutoWalk.IsChecked;
-        if (!_settings.AutoWalk && _isWalking)
-        {
+        _settings.AutoWalk = !pinned;
+        if (pinned && _isWalking)
             _isWalking = false;
-            RefreshSpriteVisual();
-        }
+
         _settingsService.Save(_settings);
+        ApplySettingsToWindow();
         SettingsSynced?.Invoke();
     }
+
+    private void TogglePinOnDesktop_Click(object sender, RoutedEventArgs e)
+    {
+        bool nextPinned = _settings.AutoWalk;
+        SetPinOnDesktopEnabled(nextPinned);
+        ShowBubble(
+            nextPinned
+                ? "已开启「固定在桌面」～乖乖待在原地陪你喵📌"
+                : "已关闭「固定在桌面」，恢复桌面自由漫步喵～✦",
+            TimeSpan.FromSeconds(3.0));
+    }
+
+    private void MenuPinOnDesktop_Click(object sender, RoutedEventArgs e)
+        => SetPinOnDesktopEnabled(MenuPinOnDesktop.IsChecked);
 
     private void MenuPose_Click(object sender, RoutedEventArgs e)
     {
