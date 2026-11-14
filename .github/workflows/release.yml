@@ -1,0 +1,87 @@
+name: CI Build & Tag Release
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Verify tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          [xml]$proj = Get-Content -Path "GeminiDesktopPet.csproj" -Encoding UTF8
+          $projVer = ($proj.Project.PropertyGroup.Version | Select-Object -First 1).Trim()
+          $tagName = $env:GITHUB_REF_NAME
+          if ("v$projVer" -ne $tagName) {
+            throw "Git tag ($tagName) does not match GeminiDesktopPet.csproj <Version> ($projVer)."
+          }
+          Write-Host "Verified tag $tagName matches csproj version $projVer."
+
+      - name: Restore and build Release
+        shell: pwsh
+        run: |
+          dotnet restore GeminiDesktopPet.slnx
+          dotnet build GeminiDesktopPet.slnx -c Release --no-restore
+
+      - name: Build self-contained Release package ZIP
+        shell: cmd
+        run: BuildRelease.bat --nopause
+
+      - name: Verify release ZIP archive
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path "publish" -Filter "GeminiDesktopPet-v*.zip" | Select-Object -First 1
+          if (-not $zip) {
+            throw "Release ZIP archive was not generated in publish/."
+          }
+          Write-Host ("Generated ZIP: {0} ({1} bytes)" -f $zip.FullName, $zip.Length)
+          tar -tf $zip.FullName | Select-Object -First 25
+
+      - name: Upload Release ZIP workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeminiDesktopPet-${{ github.ref_name }}-win-x64
+          path: publish/GeminiDesktopPet-v*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach Release ZIP to GitHub Tag Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = Get-ChildItem -Path "publish" -Filter "GeminiDesktopPet-v*.zip" | Select-Object -First 1
+          if (-not $zip) {
+            throw "Release ZIP archive not found."
+          }
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = 'Stop'
+          if ($releaseExists) {
+            gh release upload $tag $zip.FullName --clobber
+          } else {
+            gh release create $tag $zip.FullName --title "GeminiDesktopPet $tag" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release failed with exit code $LASTEXITCODE."
+          }
