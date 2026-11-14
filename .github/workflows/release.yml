@@ -51,6 +51,10 @@ jobs:
           dotnet restore GeminiDesktopPet.slnx
           dotnet build GeminiDesktopPet.slnx -c Release --no-restore
 
+      - name: Run static security check
+        shell: pwsh
+        run: ./tools/SecurityCheck.ps1 -RepoRoot "."
+
       - name: Build self-contained Release package ZIP & Git commit summary
         shell: cmd
         run: BuildRelease.bat --nopause

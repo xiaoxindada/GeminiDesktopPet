@@ -55,7 +55,7 @@ set "GIT_SUMMARY_PATH=%OUTPUT_BASE%\git-commit-summary.md"
 echo [GeminiDesktopPet] 开始编译发布独立应用包 (v%APP_VERSION%) 并生成 Git 提交摘要与 ZIP 压缩包...
 echo [1/6] Stopping any running GeminiDesktopPet instances...
 taskkill /F /IM GeminiDesktopPet.exe >nul 2>nul
-timeout /t 1 /nobreak >nul
+powershell -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 1" >nul 2>nul
 
 echo [2/6] Preparing staging folder: "%STAGE_DIR%"
 if exist "%STAGE_DIR%" (
@@ -92,6 +92,13 @@ for %%F in (
         echo [ERROR] Failed to copy "%%~F"
         goto :fail
     )
+)
+
+echo [Security] Running static ^& staged artifact security check...
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%ROOT%tools\SecurityCheck.ps1" -RepoRoot "%ROOT%." -StageDir "%STAGE_DIR%"
+if errorlevel 1 (
+    echo [ERROR] Security check failed. Aborting package creation.
+    goto :fail
 )
 
 echo [5/6] Generating git commit summary: "%GIT_SUMMARY_PATH%"
