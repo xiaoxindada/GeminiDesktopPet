@@ -125,6 +125,34 @@
                 </StackPanel>
             </Border>
 
+            <!-- Version & Updates -->
+            <Border Background="#1D1836" CornerRadius="12" Padding="14" Margin="0,0,0,12" BorderBrush="#342B61" BorderThickness="1">
+                <StackPanel>
+                    <Grid Margin="0,0,0,8">
+                        <TextBlock Text="版本与软件更新" FontSize="14" FontWeight="SemiBold" Foreground="#C4B5FD" VerticalAlignment="Center"/>
+                        <Border Background="#2D2357" CornerRadius="8" Padding="8,3" HorizontalAlignment="Right">
+                            <TextBlock x:Name="VersionBadgeText" Text="v0.1.0" FontSize="11.5" Foreground="#D8CCFF"/>
+                        </Border>
+                    </Grid>
+
+                    <TextBlock x:Name="UpstreamUrlLink"
+                               Text="上游追踪源：https://github.com/xiaoxindada/GeminiDesktopPet/releases"
+                               FontSize="11.5" Foreground="#9D95C8" TextWrapping="Wrap" Margin="0,0,0,8"
+                               Cursor="Hand" TextDecorations="Underline"
+                               MouseLeftButtonUp="UpstreamUrlLink_Click"/>
+
+                    <CheckBox x:Name="AutoCheckUpdatesCheck" Content="启动时自动检查上游最新 Release 更新" Foreground="#EAE6FF" Margin="0,0,0,8"
+                              Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
+
+                    <WrapPanel VerticalAlignment="Center">
+                        <Button x:Name="CheckUpdateBtn" Content="🆕 检查更新与 Changelog..." Padding="12,6" FontSize="12" Margin="0,0,10,4"
+                                Background="#6D4AFF" Foreground="#FFFFFF" BorderBrush="#8B6EFF" BorderThickness="1"
+                                Cursor="Hand" Click="CheckUpdateBtn_Click"/>
+                        <TextBlock x:Name="UpdateStatusLabel" Text="始终追踪上游最新版" FontSize="11.5" Foreground="#A59EC9" VerticalAlignment="Center" Margin="0,0,0,4"/>
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Tips -->
             <Border Background="#19152E" CornerRadius="10" Padding="12" BorderBrush="#2E2656" BorderThickness="1">
                 <TextBlock TextWrapping="Wrap" FontSize="11.5" LineHeight="18" Foreground="#ACA4D6"

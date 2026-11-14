@@ -100,6 +100,7 @@ public partial class PetWindow : Window
     public event Action? OpenProfileRequested;
     public event Action? OpenSettingsRequested;
     public event Action? OpenQuotaRequested;
+    public event Action? OpenUpdateRequested;
     public event Action? StandbyRequested;
     public event Action<bool>? FollowAntigravityChanged;
     public event Action<bool>? FollowGeminiAppChanged;
@@ -1491,6 +1492,7 @@ public partial class PetWindow : Window
     private void OpenProfile_Click(object sender, RoutedEventArgs e) => OpenProfileRequested?.Invoke();
     private void OpenSettings_Click(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke();
     private void OpenQuota_Click(object sender, RoutedEventArgs e) => OpenQuotaRequested?.Invoke();
+    private void OpenUpdate_Click(object sender, RoutedEventArgs e) => OpenUpdateRequested?.Invoke();
     private void MenuStandby_Click(object sender, RoutedEventArgs e) => StandbyRequested?.Invoke();
     private void MenuExit_Click(object sender, RoutedEventArgs e) => ExitRequested?.Invoke();
 

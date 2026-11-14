@@ -20,6 +20,7 @@ public sealed class TrayIconService : IDisposable
     private readonly ToolStripMenuItem _clickThroughItem;
     private readonly ToolStripMenuItem _alwaysOnTopItem;
     private readonly ToolStripMenuItem _soundItem;
+    private readonly ToolStripMenuItem _updateItem;
 
     public event Action? ShowAndGreetRequested;
     public event Action? OpenChatRequested;
@@ -38,6 +39,7 @@ public sealed class TrayIconService : IDisposable
     public event Action? OpenProfileRequested;
     public event Action? OpenSettingsRequested;
     public event Action? OpenQuotaRequested;
+    public event Action? OpenUpdateRequested;
     public event Action? ExitRequested;
 
     public TrayIconService()
@@ -93,6 +95,8 @@ public sealed class TrayIconService : IDisposable
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("📖 角色档案与设定图鉴", null, (_, _) => OpenProfileRequested?.Invoke()));
         menu.Items.Add(new ToolStripMenuItem("⚙️ 偏好设置", null, (_, _) => OpenSettingsRequested?.Invoke()));
+        _updateItem = new ToolStripMenuItem($"🆕 检查更新 ({AppVersion.CurrentDisplay})", null, (_, _) => OpenUpdateRequested?.Invoke());
+        menu.Items.Add(_updateItem);
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("🌙 让 Gemini 娘休息（退出）", null, (_, _) => ExitRequested?.Invoke()));
@@ -120,6 +124,13 @@ public sealed class TrayIconService : IDisposable
         _alwaysOnTopItem.Checked = settings.AlwaysOnTop;
         _clickThroughItem.Checked = settings.ClickThrough;
         _soundItem.Checked = settings.SoundEnabled;
+    }
+
+    public void SetAvailableUpdate(string? latestTag)
+    {
+        _updateItem.Text = !string.IsNullOrWhiteSpace(latestTag)
+            ? $"🆕 发现新版本 {latestTag}（点击查看更新）"
+            : $"🆕 检查更新 ({AppVersion.CurrentDisplay})";
     }
 
     public void ShowBalloon(string title, string text)

@@ -53,4 +53,11 @@ public sealed class PetSettings
     /// </summary>
     public string GeminiApiKey { get; set; } = string.Empty;
     public string GeminiModel { get; set; } = "gemini-2.5-flash";
+
+    /// <summary>
+    /// Upstream GitHub Releases tracking source (always resolves latest release).
+    /// </summary>
+    public string UpdateReleasesUrl { get; set; } = "https://github.com/xiaoxindada/GeminiDesktopPet/releases";
+    public bool AutoCheckUpdates { get; set; } = true;
+    public string SkippedUpdateVersion { get; set; } = string.Empty;
 }

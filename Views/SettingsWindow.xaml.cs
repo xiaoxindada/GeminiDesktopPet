@@ -18,6 +18,7 @@ public partial class SettingsWindow : Window
 
     public event Action? SettingsChanged;
     public event Action? FollowSettingsChanged;
+    public event Action? OpenUpdateRequested;
 
     public sealed record OptionItem(string Id, string Label);
 
@@ -71,7 +72,19 @@ public partial class SettingsWindow : Window
         ApiKeyBox.Password = _settings.GeminiApiKey;
         ModelBox.Text = _settings.GeminiModel;
 
+        VersionBadgeText.Text = $"当前版本 {AppVersion.CurrentDisplay}";
+        UpstreamUrlLink.Text = $"上游追踪源：{UpdateService.NormalizeReleasesUrl(_settings.UpdateReleasesUrl)}";
+        AutoCheckUpdatesCheck.IsChecked = _settings.AutoCheckUpdates;
+
         _initializing = false;
+    }
+
+    public void UpdateLatestStatusBadge(UpdateCheckResult? result)
+    {
+        if (result == null) return;
+        UpdateStatusLabel.Text = result.StatusMessage;
+        UpdateStatusLabel.Foreground = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(
+            result.UpdateAvailable ? "#6EE7B7" : "#A59EC9"));
     }
 
     public void UpdateAntigravityBadge()
@@ -124,6 +137,7 @@ public partial class SettingsWindow : Window
         _settings.SystemMonitorEnabled = SysMonCheck.IsChecked == true;
         _settings.ShowSpeechBubble = ShowSpeechBubbleCheck.IsChecked == true;
         _settings.SleepWhenAntigravityExits = SleepOnAgExitCheck.IsChecked == true;
+        _settings.AutoCheckUpdates = AutoCheckUpdatesCheck.IsChecked == true;
 
         _settingsService.Save(_settings);
         SettingsChanged?.Invoke();
@@ -201,6 +215,24 @@ public partial class SettingsWindow : Window
         _settings.GeminiApiKey = ApiKeyBox.Password;
         _settings.GeminiModel = string.IsNullOrWhiteSpace(ModelBox.Text) ? "gemini-2.5-flash" : ModelBox.Text.Trim();
         _settingsService.Save(_settings);
+    }
+
+    private void CheckUpdateBtn_Click(object sender, RoutedEventArgs e)
+        => OpenUpdateRequested?.Invoke();
+
+    private void UpstreamUrlLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(UpdateService.GetLatestTrackingUrl(_settings.UpdateReleasesUrl))
+            {
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // Ignore shell launch error.
+        }
     }
 
     /// <summary>

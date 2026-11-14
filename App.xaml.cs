@@ -35,6 +35,7 @@ public partial class App : System.Windows.Application
     private GeminiChatService _chatService = null!;
     private AntigravityWatcherService _agWatcher = null!;
     private AntigravityQuotaService _quotaService = null!;
+    private UpdateService _updateService = null!;
     private AppFollowService _followService = null!;
     private TrayIconService _trayService = null!;
     private PetWindow _petWindow = null!;
@@ -42,10 +43,20 @@ public partial class App : System.Windows.Application
     private ProfileWindow? _profileWindow;
     private SettingsWindow? _settingsWindow;
     private QuotaWindow? _quotaWindow;
+    private UpdateWindow? _updateWindow;
+    private UpdateCheckResult? _lastUpdateResult;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        if (e.Args.Length >= 3 && string.Equals(e.Args[0], "--apply-update", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(e.Args[1], out int parentPid))
+        {
+            UpdateService.ApplyStagedUpdateAndRelaunch(parentPid, e.Args[2]);
+            Shutdown(0);
+            return;
+        }
 
         if (e.Args.Length >= 2 && e.Args[0] == "--smoke-render")
         {
@@ -194,6 +205,8 @@ public partial class App : System.Windows.Application
         _chatService = new GeminiChatService();
         _agWatcher = new AntigravityWatcherService();
         _quotaService = new AntigravityQuotaService();
+        _updateService = new UpdateService();
+        UpdateService.CleanupOldStagingFolders();
 
         _petWindow = new PetWindow(
             _settings,
@@ -208,6 +221,8 @@ public partial class App : System.Windows.Application
 
         WireEvents();
         _agWatcher.Start();
+        if (_settings.AutoCheckUpdates && _wakeCts != null)
+            _ = ScheduleBackgroundUpdateCheckAsync(_wakeCts.Token);
 
         if (followStartupArg && !AntigravityWatcherService.CheckAnyFollowedTargetRunning(_settings))
         {
@@ -227,6 +242,7 @@ public partial class App : System.Windows.Application
         _petWindow.OpenProfileRequested += OpenProfileWindow;
         _petWindow.OpenSettingsRequested += OpenSettingsWindow;
         _petWindow.OpenQuotaRequested += OpenQuotaWindow;
+        _petWindow.OpenUpdateRequested += OpenUpdateWindow;
         _petWindow.StandbyRequested += EnterStandbyMode;
         _petWindow.FollowAntigravityChanged += SetFollowAntigravity;
         _petWindow.FollowGeminiAppChanged += SetFollowGeminiApp;
@@ -317,6 +333,7 @@ public partial class App : System.Windows.Application
         _trayService.OpenProfileRequested += OpenProfileWindow;
         _trayService.OpenSettingsRequested += OpenSettingsWindow;
         _trayService.OpenQuotaRequested += OpenQuotaWindow;
+        _trayService.OpenUpdateRequested += OpenUpdateWindow;
         _trayService.ExitRequested += GracefullyExit;
 
         _agWatcher.AntigravityStarted += () => HandleFollowedAppStarted(_settings.FollowAntigravity, "antigravity");
@@ -517,11 +534,69 @@ public partial class App : System.Windows.Application
                 _petWindow.ApplySettingsToWindow();
                 _trayService.SyncState(_settings);
             };
+            _settingsWindow.OpenUpdateRequested += OpenUpdateWindow;
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
         _settingsWindow.RefreshFromSettings();
+        _settingsWindow.UpdateLatestStatusBadge(_lastUpdateResult);
         _settingsWindow.Show();
         _settingsWindow.Activate();
+    }
+
+    private void OpenUpdateWindow()
+    {
+        bool created = false;
+        if (_updateWindow == null || !_updateWindow.IsLoaded)
+        {
+            _updateWindow = new UpdateWindow(
+                _updateService,
+                _settings,
+                _settingsService,
+                GracefullyExit,
+                _lastUpdateResult,
+                beforeExitCleanup: () => _followService.CleanupLegacyFiles());
+            _updateWindow.CheckCompleted += result => HandleUpdateResult(result, notifyUser: false);
+            _updateWindow.Closed += (_, _) => _updateWindow = null;
+            created = true;
+        }
+        _updateWindow.Show();
+        _updateWindow.Activate();
+
+        if (!created)
+            _ = _updateWindow.RunCheckAsync();
+    }
+
+    private async Task ScheduleBackgroundUpdateCheckAsync(CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(4), token);
+            var result = await _updateService.CheckForUpdateAsync(_settings.UpdateReleasesUrl, token);
+            if (!token.IsCancellationRequested && !Dispatcher.HasShutdownStarted)
+                await Dispatcher.InvokeAsync(() => HandleUpdateResult(result, notifyUser: true));
+        }
+        catch
+        {
+            // Startup check is strictly silent on cancellation or offline network.
+        }
+    }
+
+    private void HandleUpdateResult(UpdateCheckResult result, bool notifyUser)
+    {
+        _lastUpdateResult = result;
+        _trayService.SetAvailableUpdate(result.Succeeded && result.UpdateAvailable ? result.LatestTag : null);
+        _settingsWindow?.UpdateLatestStatusBadge(result);
+
+        if (notifyUser
+            && result.Succeeded
+            && result.UpdateAvailable
+            && !string.IsNullOrWhiteSpace(result.LatestTag)
+            && !string.Equals(result.LatestTag, _settings.SkippedUpdateVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            _trayService.ShowBalloon(
+                $"发现新版本 {result.LatestTag} ✦",
+                "上游 GitHub Releases 已发布新版本，点击托盘菜单「发现新版本」即可查看 Changelog 并更新。");
+        }
     }
 
     private void OpenQuotaWindow()
@@ -561,6 +636,7 @@ public partial class App : System.Windows.Application
         try { _profileWindow?.Close(); } catch { }
         try { _settingsWindow?.ForceClose(); } catch { }
         try { _quotaWindow?.Close(); } catch { }
+        try { _updateWindow?.Close(); } catch { }
         try { _petWindow.Close(); } catch { }
 
         Shutdown(0);
