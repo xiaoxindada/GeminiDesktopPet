@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Threading;
 using System.Windows;
 using GeminiDesktopPet.Models;
@@ -10,13 +12,20 @@ public partial class App : System.Windows.Application
 {
     private const string MutexName = "GeminiDesktopPet_SingleInstance_Mutex";
     private const string WakeEventName = "GeminiDesktopPet_WakeSignal_Event";
+    private const string WakeAgEventName = "GeminiDesktopPet_WakeAgSignal_Event";
+    private const string WakeGeminiEventName = "GeminiDesktopPet_WakeGeminiSignal_Event";
+    private const string ReloadFollowEventName = "GeminiDesktopPet_ReloadFollowSignal_Event";
     private const string CloseEventName = "GeminiDesktopPet_CloseSignal_Event";
 
     private Mutex? _instanceMutex;
     private bool _ownsMutex;
     private EventWaitHandle? _wakeEvent;
+    private EventWaitHandle? _wakeAgEvent;
+    private EventWaitHandle? _wakeGeminiEvent;
+    private EventWaitHandle? _reloadFollowEvent;
     private EventWaitHandle? _closeEvent;
     private CancellationTokenSource? _wakeCts;
+    private bool _isExiting;
 
     private SettingsService _settingsService = null!;
     private PetSettings _settings = null!;
@@ -26,7 +35,7 @@ public partial class App : System.Windows.Application
     private GeminiChatService _chatService = null!;
     private AntigravityWatcherService _agWatcher = null!;
     private AntigravityQuotaService _quotaService = null!;
-    private VbsFollowService _vbsFollowService = null!;
+    private AppFollowService _followService = null!;
     private TrayIconService _trayService = null!;
     private PetWindow _petWindow = null!;
 
@@ -58,7 +67,8 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        if (e.Args.Any(a => string.Equals(a, "--follow-flag:on", StringComparison.OrdinalIgnoreCase)))
+        if (e.Args.Any(a => string.Equals(a, "--enable-follow", StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(a, "--follow-flag:on", StringComparison.OrdinalIgnoreCase)))
         {
             var svc = new SettingsService();
             var cfg = svc.Load();
@@ -68,17 +78,43 @@ public partial class App : System.Windows.Application
                 cfg.FollowGeminiApp = true;
                 svc.Save(cfg);
             }
+
+            var followSvc = new AppFollowService(svc);
+            followSvc.SyncAndApply(cfg);
+
+            bool signaledRunning = TrySignalNamedEvent(ReloadFollowEventName);
+            if (!signaledRunning && !string.IsNullOrWhiteSpace(Environment.ProcessPath))
+            {
+                try
+                {
+                    string exePath = Environment.ProcessPath!;
+                    Process.Start(new ProcessStartInfo(exePath, "--follow-antigravity")
+                    {
+                        WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory,
+                        UseShellExecute = true
+                    });
+                }
+                catch
+                {
+                    Shutdown(2);
+                    return;
+                }
+            }
+
             Shutdown(0);
             return;
         }
 
-        if (e.Args.Any(a => string.Equals(a, "--follow-flag:off", StringComparison.OrdinalIgnoreCase)))
+        if (e.Args.Any(a => string.Equals(a, "--disable-follow", StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(a, "--follow-flag:off", StringComparison.OrdinalIgnoreCase)))
         {
             var svc = new SettingsService();
             var cfg = svc.Load();
             cfg.FollowAntigravity = false;
             cfg.FollowGeminiApp = false;
             svc.Save(cfg);
+            new AppFollowService(svc).DisableFollow();
+            TrySignalNamedEvent(ReloadFollowEventName);
             Shutdown(0);
             return;
         }
@@ -99,10 +135,13 @@ public partial class App : System.Windows.Application
             {
                 try
                 {
-                    if (!string.IsNullOrWhiteSpace(wokenByArg))
-                        new VbsFollowService(new SettingsService()).WriteWakeReason(wokenByArg);
-
-                    using var ev = EventWaitHandle.OpenExisting(WakeEventName);
+                    string targetEventName = wokenByArg switch
+                    {
+                        "antigravity" => WakeAgEventName,
+                        "gemini" => WakeGeminiEventName,
+                        _ => WakeEventName
+                    };
+                    using var ev = EventWaitHandle.OpenExisting(targetEventName);
                     ev.Set();
                 }
                 catch
@@ -131,8 +170,8 @@ public partial class App : System.Windows.Application
 
         _settingsService = new SettingsService();
         _settings = _settingsService.Load();
-        _vbsFollowService = new VbsFollowService(_settingsService);
-        _vbsFollowService.SyncAndApply(_settings);
+        _followService = new AppFollowService(_settingsService);
+        _followService.SyncAndApply(_settings);
 
         if (followStartupArg && !_settings.FollowAntigravity && !_settings.FollowGeminiApp && !_settingsService.IsFollowWatcherRunEnabled())
         {
@@ -141,6 +180,9 @@ public partial class App : System.Windows.Application
         }
 
         _wakeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeEventName);
+        _wakeAgEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeAgEventName);
+        _wakeGeminiEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeGeminiEventName);
+        _reloadFollowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ReloadFollowEventName);
         _closeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, CloseEventName);
         _wakeCts = new CancellationTokenSource();
         StartWakeListener(_wakeCts.Token);
@@ -175,8 +217,7 @@ public partial class App : System.Windows.Application
         }
 
         _petWindow.Show();
-        string? wakeReason = wokenByArg ?? _vbsFollowService.ConsumeWakeReason();
-        string? wakeGreeting = FormatWakeGreeting(wakeReason, followStartupArg);
+        string? wakeGreeting = FormatWakeGreeting(wokenByArg, followStartupArg);
         if (!string.IsNullOrEmpty(wakeGreeting))
             _petWindow.ShowAndGreet(wakeGreeting);
     }
@@ -194,6 +235,8 @@ public partial class App : System.Windows.Application
             _trayService.SyncState(_settings);
             _settingsWindow?.RefreshFromSettings();
         };
+        _petWindow.Closed += (_, _) => GracefullyExit();
+        SessionEnding += (_, _) => GracefullyExit();
         _petWindow.ExitRequested += GracefullyExit;
 
         _trayService.ShowAndGreetRequested += () => _petWindow.ShowAndGreet();
@@ -305,8 +348,7 @@ public partial class App : System.Windows.Application
             && _petWindow.IsVisible
             && !AntigravityWatcherService.CheckAnyFollowedTargetRunning(_settings))
         {
-            if (!_vbsFollowService.IsWatcherRunning())
-                EnterStandbyMode();
+            EnterStandbyMode();
         }
     }
 
@@ -320,7 +362,7 @@ public partial class App : System.Windows.Application
     {
         apply();
         _settingsService.Save(_settings);
-        _vbsFollowService.SyncAndApply(_settings, forceRestart: true);
+        _followService.SyncAndApply(_settings);
         _petWindow.ApplySettingsToWindow();
         _trayService.SyncState(_settings);
         _settingsWindow?.RefreshFromSettings();
@@ -335,23 +377,81 @@ public partial class App : System.Windows.Application
         _trayService.ShowBalloon("Gemini 娘待机中 💤", "已隐藏等待 Antigravity / Gemini 桌面 App 启动后自动唤醒（双击托盘图标可随时呼唤）。");
     }
 
+    private static bool TrySignalNamedEvent(string eventName)
+    {
+        try
+        {
+            using var ev = EventWaitHandle.OpenExisting(eventName);
+            ev.Set();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void StartWakeListener(CancellationToken token)
     {
+        if (_wakeEvent == null || _wakeAgEvent == null || _wakeGeminiEvent == null || _reloadFollowEvent == null) return;
+        WaitHandle[] handles = [_wakeEvent, _wakeAgEvent, _wakeGeminiEvent, _reloadFollowEvent, token.WaitHandle];
         Task.Run(() =>
         {
             while (!token.IsCancellationRequested)
             {
-                if (_wakeEvent?.WaitOne(400) == true && !token.IsCancellationRequested)
+                int idx = WaitHandle.WaitAny(handles, 400);
+                if (idx == WaitHandle.WaitTimeout || idx == 4 || token.IsCancellationRequested)
+                    continue;
+
+                if (idx == 3)
                 {
-                    string? reason = _vbsFollowService.ConsumeWakeReason();
-                    string? greeting = FormatWakeGreeting(reason, false);
-                    Dispatcher.Invoke(() =>
+                    try
                     {
-                        if (!string.IsNullOrEmpty(greeting))
-                            _petWindow.ShowAndGreet(greeting);
-                        else
-                            _petWindow.ShowAndGreet();
-                    });
+                        if (!Dispatcher.HasShutdownStarted)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                var reloaded = _settingsService.Load();
+                                _settings.FollowAntigravity = reloaded.FollowAntigravity;
+                                _settings.FollowGeminiApp = reloaded.FollowGeminiApp;
+                                _followService.SyncAndApply(_settings);
+                                _petWindow.ApplySettingsToWindow();
+                                _trayService.SyncState(_settings);
+                                _settingsWindow?.RefreshFromSettings();
+                            });
+                        }
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                string? reason = idx switch
+                {
+                    1 => "antigravity",
+                    2 => "gemini",
+                    _ => null
+                };
+
+                try
+                {
+                    if (!Dispatcher.HasShutdownStarted)
+                    {
+                        Dispatcher.Invoke(() =>
+                        {
+                            string? greeting = FormatWakeGreeting(reason, false);
+                            if (!string.IsNullOrEmpty(greeting))
+                                _petWindow.ShowAndGreet(greeting);
+                            else
+                                _petWindow.ShowAndGreet();
+                        });
+                    }
+                }
+                catch
+                {
+                    break;
                 }
             }
         }, token);
@@ -359,15 +459,25 @@ public partial class App : System.Windows.Application
 
     private void StartCloseListener(CancellationToken token)
     {
+        if (_closeEvent == null) return;
+        WaitHandle[] handles = [_closeEvent, token.WaitHandle];
         Task.Run(() =>
         {
             while (!token.IsCancellationRequested)
             {
-                if (_closeEvent?.WaitOne(400) == true && !token.IsCancellationRequested)
+                if (WaitHandle.WaitAny(handles, 400) != 0 || token.IsCancellationRequested)
+                    continue;
+
+                try
                 {
-                    Dispatcher.Invoke(GracefullyExit);
+                    if (!Dispatcher.HasShutdownStarted)
+                        Dispatcher.Invoke(GracefullyExit);
+                }
+                catch
+                {
                     break;
                 }
+                break;
             }
         }, token);
     }
@@ -376,8 +486,8 @@ public partial class App : System.Windows.Application
     {
         return reason switch
         {
-            "antigravity" => "检测到 Antigravity 启动！Gemini 娘已由 Startup VBS + bat 同步拉起喵✦",
-            "gemini" => "检测到 Gemini 桌面 App 启动！Gemini 娘已由 Startup VBS + bat 同步拉起喵✦",
+            "antigravity" => "检测到 Antigravity 启动！Gemini 娘已同步拉起喵✦",
+            "gemini" => "检测到 Gemini 桌面 App 启动！Gemini 娘已同步拉起喵✦",
             _ => followStartupArg ? "检测到联动软件已启动！Gemini 娘同步上线喵✦" : null
         };
     }
@@ -391,6 +501,7 @@ public partial class App : System.Windows.Application
                 if (!_petWindow.IsVisible) _petWindow.Show();
                 _petWindow.TriggerExternalSpritePreview(key);
             });
+            _profileWindow.Closed += (_, _) => _profileWindow = null;
         }
         _profileWindow.Show();
         _profileWindow.Activate();
@@ -400,12 +511,13 @@ public partial class App : System.Windows.Application
     {
         if (_settingsWindow == null || !_settingsWindow.IsLoaded)
         {
-            _settingsWindow = new SettingsWindow(_settings, _settingsService, _vbsFollowService);
+            _settingsWindow = new SettingsWindow(_settings, _settingsService, _followService);
             _settingsWindow.SettingsChanged += () =>
             {
                 _petWindow.ApplySettingsToWindow();
                 _trayService.SyncState(_settings);
             };
+            _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
         _settingsWindow.RefreshFromSettings();
         _settingsWindow.Show();
@@ -419,6 +531,7 @@ public partial class App : System.Windows.Application
         {
             _quotaWindow = new QuotaWindow(_quotaService, autoFetch: true);
             _quotaWindow.PrepareForFirstRenderReveal(_petWindow);
+            _quotaWindow.Closed += (_, _) => _quotaWindow = null;
             created = true;
         }
         else
@@ -438,15 +551,19 @@ public partial class App : System.Windows.Application
 
     private void GracefullyExit()
     {
+        if (_isExiting) return;
+        _isExiting = true;
+
         _settingsService.Save(_settings);
         _wakeCts?.Cancel();
         _agWatcher.Dispose();
         _trayService.Dispose();
-        _profileWindow?.Close();
-        _settingsWindow?.Close();
-        _quotaWindow?.Close();
-        _petWindow.Close();
-        Shutdown();
+        try { _profileWindow?.Close(); } catch { }
+        try { _settingsWindow?.ForceClose(); } catch { }
+        try { _quotaWindow?.Close(); } catch { }
+        try { _petWindow.Close(); } catch { }
+
+        Shutdown(0);
     }
 
     private void RunSmokeRender(string outDir)
@@ -464,7 +581,7 @@ public partial class App : System.Windows.Application
         var stdSettings = new PetSettings { StyleMode = PetStyleMode.Standard };
         var petStd = new PetWindow(stdSettings, settingsService, sprites, sound, monitor, chat);
         var profile = new ProfileWindow(sprites, settings);
-        var vbsFollow = new VbsFollowService(settingsService);
+        var vbsFollow = new AppFollowService(settingsService);
         var settingsWin = new SettingsWindow(settings, settingsService, vbsFollow);
         var quotaSvc = new AntigravityQuotaService();
         var quotaWin = new QuotaWindow(quotaSvc, autoFetch: false, enableAutoClose: false);
@@ -542,11 +659,16 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         _wakeCts?.Cancel();
+        _wakeCts?.Dispose();
         _wakeEvent?.Dispose();
+        _wakeAgEvent?.Dispose();
+        _wakeGeminiEvent?.Dispose();
+        _reloadFollowEvent?.Dispose();
         _closeEvent?.Dispose();
         if (_ownsMutex)
         {
             try { _instanceMutex?.ReleaseMutex(); } catch { }
+            _ownsMutex = false;
         }
         _instanceMutex?.Dispose();
         base.OnExit(e);

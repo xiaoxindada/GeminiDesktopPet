@@ -85,16 +85,20 @@ public sealed class SettingsService
     }
 
     public bool IsFollowWatcherRunEnabled()
-        => HasRunValue(FollowWatcherRunValueName)
-           || File.Exists(Path.Combine(
-               Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-               "GeminiDesktopPet_FollowWatcher.vbs"));
+        => HasRunValue(FollowWatcherRunValueName);
 
-    public void SetFollowWatcherRun(bool enabled, string? vbsScriptPath)
+    /// <summary>
+    /// Registers or removes the standard HKCU Run standby entry (--follow-antigravity)
+    /// without dropping external scripts into the Startup folder.
+    /// </summary>
+    public void SetFollowWatcherRun(bool enabled)
     {
-        // Clean up legacy HKCU Run watcher entries; Startup VBS is dynamically managed by EnableFollow.bat / DisableFollow.bat.
         SetRunValue(LegacyAntigravityFollowRunValueName, null);
-        SetRunValue(FollowWatcherRunValueName, null);
+        string? exePath = Environment.ProcessPath;
+        string? command = enabled && !string.IsNullOrWhiteSpace(exePath)
+            ? $"\"{exePath}\" --follow-antigravity"
+            : null;
+        SetRunValue(FollowWatcherRunValueName, command);
     }
 
     private static bool HasRunValue(string valueName)

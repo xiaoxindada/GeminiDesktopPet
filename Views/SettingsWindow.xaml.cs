@@ -12,20 +12,21 @@ public partial class SettingsWindow : Window
 {
     private readonly PetSettings _settings;
     private readonly SettingsService _settingsService;
-    private readonly VbsFollowService _vbsFollowService;
+    private readonly AppFollowService _followService;
     private bool _initializing = true;
+    private bool _allowClose;
 
     public event Action? SettingsChanged;
     public event Action? FollowSettingsChanged;
 
     public sealed record OptionItem(string Id, string Label);
 
-    public SettingsWindow(PetSettings settings, SettingsService settingsService, VbsFollowService vbsFollowService)
+    public SettingsWindow(PetSettings settings, SettingsService settingsService, AppFollowService followService)
     {
         InitializeComponent();
         _settings = settings;
         _settingsService = settingsService;
-        _vbsFollowService = vbsFollowService;
+        _followService = followService;
 
         StyleModeBox.ItemsSource = new[]
         {
@@ -77,15 +78,15 @@ public partial class SettingsWindow : Window
     {
         ApplyStatusBadge(AgStatusText, AntigravityWatcherService.CheckProcessRunning(), "● Antigravity 运行中", "○ 未检测到 Antigravity");
         ApplyStatusBadge(GeminiStatusText, AntigravityWatcherService.CheckGeminiAppRunning(), "● Gemini App 运行中", "○ 未检测到 Gemini App");
-        bool running = _vbsFollowService.IsWatcherRunning();
-        bool inStartup = _vbsFollowService.IsStartupScriptPresent();
-        string vbsText = (running, inStartup) switch
+        bool active = AppFollowService.AnyFollowEnabled(_settings);
+        bool logonEnabled = _followService.IsFollowLogonEnabled();
+        string followText = (active, logonEnabled) switch
         {
-            (true, true) => "● Startup VBS 守护运行中",
-            (false, true) => "◐ Startup 脚本已生成",
-            _ => "○ Startup 脚本已停用/删除"
+            (true, true) => "● 原生联动守护运行中（已同步开机待机）",
+            (true, false) => "◐ 原生联动守护运行中",
+            _ => "○ 应用联动已停用"
         };
-        ApplyStatusBadge(VbsStatusText, running, vbsText, vbsText);
+        ApplyStatusBadge(VbsStatusText, active, followText, followText);
     }
 
     private static void ApplyStatusBadge(TextBlock label, bool active, string activeText, string inactiveText)
@@ -140,13 +141,13 @@ public partial class SettingsWindow : Window
         _settings.FollowAntigravity = FollowAntigravityCheck.IsChecked == true;
         _settings.FollowGeminiApp = FollowGeminiAppCheck.IsChecked == true;
         _settingsService.Save(_settings);
-        _vbsFollowService.SyncAndApply(_settings, forceRestart: true);
+        _followService.SyncAndApply(_settings);
         UpdateAntigravityBadge();
         FollowSettingsChanged?.Invoke();
         SettingsChanged?.Invoke();
     }
 
-    private async void RestartVbsBtn_Click(object sender, RoutedEventArgs e)
+    private void RestartVbsBtn_Click(object sender, RoutedEventArgs e)
     {
         if (!_settings.FollowAntigravity && !_settings.FollowGeminiApp)
         {
@@ -158,12 +159,11 @@ public partial class SettingsWindow : Window
             SettingsChanged?.Invoke();
         }
 
-        _vbsFollowService.SyncAndApply(_settings, forceRestart: true);
-        await Task.Delay(350);
+        _followService.SyncAndApply(_settings);
         UpdateAntigravityBadge();
     }
 
-    private async void StopDeleteVbsBtn_Click(object sender, RoutedEventArgs e)
+    private void StopDeleteVbsBtn_Click(object sender, RoutedEventArgs e)
     {
         _settings.FollowAntigravity = false;
         _settings.FollowGeminiApp = false;
@@ -172,8 +172,7 @@ public partial class SettingsWindow : Window
         FollowSettingsChanged?.Invoke();
         SettingsChanged?.Invoke();
 
-        _vbsFollowService.SyncAndApply(_settings);
-        await Task.Delay(250);
+        _followService.DisableFollow();
         UpdateAntigravityBadge();
     }
 
@@ -181,9 +180,14 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            _vbsFollowService.EnsureScriptsGenerated(_settings);
-            string folder = _vbsFollowService.StartupFolderPath;
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"") { UseShellExecute = true });
+            _followService.CleanupLegacyFiles();
+            string folder = _settingsService.SettingsFolder;
+            Directory.CreateDirectory(folder);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"")
+            {
+                WorkingDirectory = folder,
+                UseShellExecute = true
+            });
         }
         catch
         {
@@ -199,9 +203,23 @@ public partial class SettingsWindow : Window
         _settingsService.Save(_settings);
     }
 
+    /// <summary>
+    /// Allows App shutdown to close the hidden settings window instead of cancelling Shutdown().
+    /// </summary>
+    public void ForceClose()
+    {
+        _allowClose = true;
+        Close();
+    }
+
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        e.Cancel = true;
-        Hide();
+        if (!_allowClose)
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
+        base.OnClosing(e);
     }
 }

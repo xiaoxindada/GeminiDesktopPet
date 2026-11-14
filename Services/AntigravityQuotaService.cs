@@ -231,9 +231,9 @@ public sealed class AntigravityQuotaService
             {
                 FileName = isCmd ? "cmd.exe" : agyPath,
                 Arguments = isCmd ? $"/d /c \"\"{agyPath}\" {arguments}\"" : arguments,
+                WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

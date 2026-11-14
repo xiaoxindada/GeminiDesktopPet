@@ -1534,7 +1534,7 @@ public partial class PetWindow : Window
         FollowAntigravityChanged?.Invoke(enabled);
         ShowBubble(
             enabled
-                ? "已开启「跟随 Antigravity 启动而启动」(VBS 守护已上线) 喵✦"
+                ? "已开启「跟随 Antigravity 启动而启动」(原生守护已上线) 喵✦"
                 : "已关闭跟随 Antigravity 启动喵～",
             TimeSpan.FromSeconds(4));
     }
@@ -1545,7 +1545,7 @@ public partial class PetWindow : Window
         FollowGeminiAppChanged?.Invoke(enabled);
         ShowBubble(
             enabled
-                ? "已开启「跟随 Gemini 桌面 App 启动而启动」(VBS 守护已上线) 喵✦"
+                ? "已开启「跟随 Gemini 桌面 App 启动而启动」(原生守护已上线) 喵✦"
                 : "已关闭跟随 Gemini 桌面 App 启动喵～",
             TimeSpan.FromSeconds(4));
     }

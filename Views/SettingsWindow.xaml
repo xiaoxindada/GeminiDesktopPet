@@ -79,10 +79,10 @@
                 </StackPanel>
             </Border>
 
-            <!-- App Follow Launch (VBS Daemon) -->
+            <!-- App Follow Launch (Native Daemon) -->
             <Border Background="#1D1836" CornerRadius="12" Padding="14" Margin="0,0,0,12" BorderBrush="#342B61" BorderThickness="1">
                 <StackPanel>
-                    <TextBlock Text="应用启动联动（VBS 后台守护）" FontSize="14" FontWeight="SemiBold" Foreground="#C4B5FD" Margin="0,0,0,8"/>
+                    <TextBlock Text="应用启动联动（原生后台待机守护）" FontSize="14" FontWeight="SemiBold" Foreground="#C4B5FD" Margin="0,0,0,8"/>
 
                     <WrapPanel Margin="0,0,0,8">
                         <Border Background="#252048" CornerRadius="8" Padding="8,3" Margin="0,0,6,4">
@@ -92,20 +92,20 @@
                             <TextBlock x:Name="GeminiStatusText" Text="检测中..." FontSize="11" Foreground="#C4B5FD"/>
                         </Border>
                         <Border Background="#252048" CornerRadius="8" Padding="8,3" Margin="0,0,0,4">
-                            <TextBlock x:Name="VbsStatusText" Text="VBS 状态检测中..." FontSize="11" Foreground="#C4B5FD"/>
+                            <TextBlock x:Name="VbsStatusText" Text="联动状态检测中..." FontSize="11" Foreground="#C4B5FD"/>
                         </Border>
                     </WrapPanel>
 
-                    <TextBlock Text="勾选后将通过 EnableFollow.bat 在 shell:startup 动态生成 GeminiDesktopPet_FollowWatcher.vbs；当 Antigravity.exe 或 Gemini.exe 启动/关闭时通过 StartPet.bat / StopPet.bat 拉起与关闭桌宠；关闭守护时自动删除 Startup 脚本。"
+                    <TextBlock Text="勾选后由主程序在系统托盘原生监听 Antigravity.exe / Gemini.exe，并注册当前用户开机静默待机入口，不写入外部 VBS 脚本。"
                                TextWrapping="Wrap" FontSize="11.5" Foreground="#9D95C8" Margin="0,0,0,8"/>
                     <CheckBox x:Name="FollowAntigravityCheck" Content="跟随 Antigravity 启动而启动" Foreground="#EAE6FF" Margin="0,4" Checked="FollowOptions_Changed" Unchecked="FollowOptions_Changed"/>
                     <CheckBox x:Name="FollowGeminiAppCheck" Content="跟随 Gemini 桌面 App 启动而启动" Foreground="#EAE6FF" Margin="0,4" Checked="FollowOptions_Changed" Unchecked="FollowOptions_Changed"/>
-                    <CheckBox x:Name="SleepOnAgExitCheck" Content="被跟随应用全部关闭时用 bat 自动关闭桌宠（下次开启软件时再拉起）" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
+                    <CheckBox x:Name="SleepOnAgExitCheck" Content="被跟随应用全部关闭时自动隐藏待机（下次开启软件时再唤醒）" Foreground="#EAE6FF" Margin="0,4" Checked="AnyOption_Changed" Unchecked="AnyOption_Changed"/>
 
                     <WrapPanel Margin="0,8,0,0">
-                        <Button x:Name="RestartVbsBtn" Content="🔄 启用 / 重建 Startup 脚本" Padding="10,5" FontSize="11.5" Margin="0,0,8,4" Click="RestartVbsBtn_Click"/>
-                        <Button x:Name="StopDeleteVbsBtn" Content="⏹ 停止并删除 Startup 脚本" Padding="10,5" FontSize="11.5" Margin="0,0,8,4" Click="StopDeleteVbsBtn_Click"/>
-                        <Button x:Name="OpenVbsFolderBtn" Content="📂 打开 Startup 目录" Padding="10,5" FontSize="11.5" Margin="0,0,0,4" Click="OpenVbsFolderBtn_Click"/>
+                        <Button x:Name="RestartVbsBtn" Content="🔄 启用并同步开机联动" Padding="10,5" FontSize="11.5" Margin="0,0,8,4" Click="RestartVbsBtn_Click"/>
+                        <Button x:Name="StopDeleteVbsBtn" Content="⏹ 停用联动与开机待机" Padding="10,5" FontSize="11.5" Margin="0,0,8,4" Click="StopDeleteVbsBtn_Click"/>
+                        <Button x:Name="OpenVbsFolderBtn" Content="📂 打开配置目录" Padding="10,5" FontSize="11.5" Margin="0,0,0,4" Click="OpenVbsFolderBtn_Click"/>
                     </WrapPanel>
                 </StackPanel>
             </Border>

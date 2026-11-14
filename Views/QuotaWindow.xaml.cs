@@ -553,10 +553,17 @@ public partial class QuotaWindow : Window
         {
             System.Windows.Clipboard.SetText(_lastSnapshot.FormatClipboardText());
             CopyBtn.Content = "✓ 已复制";
-            Task.Delay(1500).ContinueWith(_ => Dispatcher.Invoke(() =>
+            Task.Delay(1500).ContinueWith(_ =>
             {
-                if (IsLoaded) CopyBtn.Content = "复制";
-            }));
+                try
+                {
+                    if (!Dispatcher.HasShutdownStarted)
+                        Dispatcher.Invoke(() => { if (IsLoaded) CopyBtn.Content = "复制"; });
+                }
+                catch
+                {
+                }
+            });
         }
         catch
         {
