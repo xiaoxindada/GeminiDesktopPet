@@ -19,6 +19,7 @@ public partial class SettingsWindow : Window
     public event Action? SettingsChanged;
     public event Action? FollowSettingsChanged;
     public event Action? OpenUpdateRequested;
+    public event Action? OpenProfileEditorRequested;
 
     public sealed record OptionItem(string Id, string Label);
 
@@ -219,6 +220,9 @@ public partial class SettingsWindow : Window
 
     private void CheckUpdateBtn_Click(object sender, RoutedEventArgs e)
         => OpenUpdateRequested?.Invoke();
+
+    private void OpenProfileEditorBtn_Click(object sender, RoutedEventArgs e)
+        => OpenProfileEditorRequested?.Invoke();
 
     private void UpstreamUrlLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {

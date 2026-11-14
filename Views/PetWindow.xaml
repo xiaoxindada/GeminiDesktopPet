@@ -76,7 +76,7 @@
                     <Grid Margin="0,0,0,3">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBlock Text="✦" Foreground="#A78BFA" FontSize="11" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                            <TextBlock Text="Gemini 娘" FontSize="11" FontWeight="Bold" Foreground="#C4B5FD" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="BubbleCharacterNameText" Text="Gemini 娘" FontSize="11" FontWeight="Bold" Foreground="#C4B5FD" VerticalAlignment="Center"/>
                             <TextBlock x:Name="BondBadgeText" Text=" · ♥ 20" FontSize="10.5" Foreground="#F472B6" VerticalAlignment="Center"/>
                         </StackPanel>
                         <Button Content="✕" Click="CloseBubble_Click" HorizontalAlignment="Right" Width="18" Height="18"
@@ -180,6 +180,7 @@
                         <MenuItem x:Name="CostumeSubMenu" Header="🎊 节日换装"/>
                         <Separator/>
                         <MenuItem Header="📖 角色档案与三视图" Click="OpenProfile_Click"/>
+                        <MenuItem Header="✏️ 自定义角色设定..." Click="OpenCharacterEditor_Click"/>
                         <Separator/>
                         <MenuItem Header="📏 缩放尺寸">
                             <MenuItem Header="小巧 (0.75x)" Tag="0.75" Click="MenuScale_Click"/>

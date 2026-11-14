@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using GeminiDesktopPet.Models;
@@ -13,26 +12,67 @@ public partial class ProfileWindow : Window
     public sealed record TraitItem(string Title, string Detail);
     public sealed record SpriteCardItem(string Key, BitmapSource Image);
 
+    private readonly SpriteManager _spriteManager;
+    private readonly PetSettings _settings;
+    private readonly CharacterProfileService _characterService;
     private readonly Action<string>? _previewSpriteCallback;
 
-    public ProfileWindow(SpriteManager spriteManager, PetSettings settings, Action<string>? previewSpriteCallback = null)
+    private string _activeSourceUrl = CharacterLore.SourcePageUrl;
+
+    public event Action? OpenCharacterEditorRequested;
+
+    public ProfileWindow(
+        SpriteManager spriteManager,
+        PetSettings settings,
+        CharacterProfileService characterService,
+        Action<string>? previewSpriteCallback = null)
     {
         InitializeComponent();
+        _spriteManager = spriteManager;
+        _settings = settings;
+        _characterService = characterService;
         _previewSpriteCallback = previewSpriteCallback;
 
-        BondText.Text = $"好感度 {settings.Favorability} ✦ 累计摸头 {settings.TotalPats} 次";
-        TraitsList.ItemsSource = CharacterLore.AppearanceTraits
-            .Select(t => new TraitItem(t.Title, t.Detail))
-            .ToArray();
+        ApplyProfile(_characterService.Current);
 
-        StandeeImage.Source = spriteManager.GetProfileImage("gemini_standee.png");
-        TurnaroundImage.Source = spriteManager.GetProfileImage("gemini_turnaround.png");
-
-        var cards = spriteManager.ListAvailableSpriteKeys()
-            .Select(key => new SpriteCardItem(key, spriteManager.GetSprite(key)))
+        var cards = _spriteManager.ListAvailableSpriteKeys()
+            .Select(key => new SpriteCardItem(key, _spriteManager.GetSprite(key)))
             .ToArray();
         SpritesGallery.ItemsSource = cards;
     }
+
+    public void RefreshBondDisplay()
+    {
+        BondText.Text = $"好感度 {_settings.Favorability} ✦ 累计摸头 {_settings.TotalPats} 次";
+    }
+
+    public void ApplyProfile(CharacterProfile profile)
+    {
+        Title = $"{profile.Name} · 角色档案与设定图鉴";
+        ProfileNameText.Text = $"✦ {profile.Name}";
+        ProfileAliasText.Text = profile.Alias;
+        ProfileBadgeTagText.Text = profile.BadgeTag;
+        ProfileSubtitleText.Text = profile.Subtitle;
+        ProfileBioText.Text = profile.Bio;
+        StandeeCaptionText.Text = profile.StandeeCaption;
+        TurnaroundCaptionText.Text = profile.TurnaroundCaption;
+        ProfileFooterText.Text = profile.FooterAttribution;
+        _activeSourceUrl = profile.SourcePageUrl;
+        SourceLinkText.Text = string.IsNullOrWhiteSpace(profile.SourcePageUrl)
+            ? string.Empty
+            : $"来源：{profile.SourcePageUrl.Replace("https://", "", StringComparison.OrdinalIgnoreCase)}";
+
+        RefreshBondDisplay();
+        TraitsList.ItemsSource = profile.AppearanceTraits
+            .Select(t => new TraitItem(t.Title, t.Detail))
+            .ToArray();
+
+        StandeeImage.Source = _spriteManager.LoadCustomOrProfileImage(profile.CustomStandeePath, "gemini_standee.png");
+        TurnaroundImage.Source = _spriteManager.LoadCustomOrProfileImage(profile.CustomTurnaroundPath, "gemini_turnaround.png");
+    }
+
+    private void EditProfileBtn_Click(object sender, RoutedEventArgs e)
+        => OpenCharacterEditorRequested?.Invoke();
 
     private void SpriteCard_Click(object sender, RoutedEventArgs e)
     {
@@ -42,9 +82,10 @@ public partial class ProfileWindow : Window
 
     private void SourceLink_Click(object sender, MouseButtonEventArgs e)
     {
+        if (string.IsNullOrWhiteSpace(_activeSourceUrl)) return;
         try
         {
-            Process.Start(new ProcessStartInfo(CharacterLore.SourcePageUrl) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(_activeSourceUrl) { UseShellExecute = true });
         }
         catch
         {

@@ -98,6 +98,7 @@ public partial class PetWindow : Window
 
     // Events handled by App coordinator
     public event Action? OpenProfileRequested;
+    public event Action? OpenCharacterEditorRequested;
     public event Action? OpenSettingsRequested;
     public event Action? OpenQuotaRequested;
     public event Action? OpenUpdateRequested;
@@ -172,6 +173,7 @@ public partial class PetWindow : Window
 
     private void PetWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        SyncCharacterProfile(CharacterLore.ActiveProfile);
         ApplySettingsToWindow();
         RestoreOrInitPosition();
         _sysMonitor.Sample(); // prime baseline
@@ -200,6 +202,16 @@ public partial class PetWindow : Window
         _settings.LastLeft = Left;
         _settings.LastTop = Top;
         _settingsService.Save(_settings);
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _frameTimer.Stop();
+        _aiTimer.Stop();
+        _bubbleTimer.Stop();
+        _monitorTimer.Stop();
+        _hoverGraceTimer.Stop();
+        base.OnClosed(e);
     }
 
     public void ApplySettingsToWindow()
@@ -1490,11 +1502,18 @@ public partial class PetWindow : Window
     }
 
     private void OpenProfile_Click(object sender, RoutedEventArgs e) => OpenProfileRequested?.Invoke();
+    private void OpenCharacterEditor_Click(object sender, RoutedEventArgs e) => OpenCharacterEditorRequested?.Invoke();
     private void OpenSettings_Click(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke();
     private void OpenQuota_Click(object sender, RoutedEventArgs e) => OpenQuotaRequested?.Invoke();
     private void OpenUpdate_Click(object sender, RoutedEventArgs e) => OpenUpdateRequested?.Invoke();
     private void MenuStandby_Click(object sender, RoutedEventArgs e) => StandbyRequested?.Invoke();
     private void MenuExit_Click(object sender, RoutedEventArgs e) => ExitRequested?.Invoke();
+
+    public void SyncCharacterProfile(CharacterProfile profile)
+    {
+        Title = profile.Name;
+        BubbleCharacterNameText.Text = profile.Name;
+    }
 
     public void ToggleStyleMode()
     {

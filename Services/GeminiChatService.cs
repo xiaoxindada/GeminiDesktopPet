@@ -17,11 +17,6 @@ public sealed class GeminiChatService
         Timeout = TimeSpan.FromSeconds(25)
     };
 
-    private const string SystemPrompt =
-        "你是桌面宠物「Gemini 娘」（双子娘），是 Google Gemini 的女性拟人化猫娘形象（蓝紫渐变长卷发、双丸子发髻与呆毛、猫耳与猫尾、左玫红右琥珀金异色瞳、四芒星虹彩发饰）。" +
-        "你的特点包括：反重力悬浮模块（Antigravity）、百万上下文、极其猫化的反应（爱被摸头、会呼噜呼噜、晃久了会炸毛）。" +
-        "请用活泼可爱、俏皮略带猫娘口癖（「喵～」「✦」）的简体中文简短回复用户，通常 1 到 3 句话，不要太长，以便在桌面气泡里阅读。";
-
     public async Task<ChatReply> AskAsync(string userInput, PetSettings settings, SystemHealthSnapshot? health)
     {
         string text = userInput.Trim();
@@ -105,9 +100,12 @@ public sealed class GeminiChatService
         }
         if (ContainsAny(lower, "你是谁", "设定", "形象", "异色瞳", "猫耳", "介绍"))
         {
-            reply = new ChatReply(
-                "我是 Gemini 娘（双子娘）喵！留着蓝紫渐变长卷发和猫耳，左眼玫红、右眼琥珀金，最喜欢戴四芒星发饰在桌面上陪你工作聊天啦✦",
-                PetState.Proud);
+            var profile = CharacterLore.ActiveProfile;
+            string intro = string.Equals(profile.Name, CharacterLore.CharacterName, StringComparison.Ordinal)
+                && string.Equals(profile.Bio, CharacterLore.DefaultBio, StringComparison.Ordinal)
+                ? "我是 Gemini 娘（双子娘）喵！留着蓝紫渐变长卷发和猫耳，左眼玫红、右眼琥珀金，最喜欢戴四芒星发饰在桌面上陪你工作聊天啦✦"
+                : $"我是「{profile.Name}」（{profile.Alias}）！{profile.Bio}";
+            reply = new ChatReply(intro, PetState.Proud);
             return true;
         }
 
@@ -145,7 +143,7 @@ public sealed class GeminiChatService
         {
             systemInstruction = new
             {
-                parts = new[] { new { text = SystemPrompt } }
+                parts = new[] { new { text = CharacterLore.BuildEffectiveSystemPrompt() } }
             },
             contents = new[]
             {

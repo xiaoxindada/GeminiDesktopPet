@@ -3,8 +3,8 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Gemini 娘 · 角色档案与设定图鉴"
         Icon="pack://application:,,,/Assets/AppIcon.ico"
-        Width="860" Height="640"
-        MinWidth="700" MinHeight="520"
+        Width="880" Height="660"
+        MinWidth="720" MinHeight="540"
         WindowStartupLocation="CenterScreen"
         Background="#131024"
         Foreground="#F4F2FF"
@@ -13,8 +13,8 @@
         <Style TargetType="TabItem">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="#B9B2DE"/>
-            <Setter Property="Padding" Value="16,9"/>
-            <Setter Property="FontSize" Value="13.5"/>
+            <Setter Property="Padding" Value="14,9"/>
+            <Setter Property="FontSize" Value="13"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
@@ -54,26 +54,34 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="✦ Gemini 娘" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF"/>
+                        <TextBlock x:Name="ProfileNameText" Text="✦ Gemini 娘" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF"/>
                         <Border Background="#3B2B72" CornerRadius="8" Padding="8,3" Margin="10,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="双子娘 · Q版猫娘桌宠" FontSize="11.5" Foreground="#D8CCFF"/>
+                            <TextBlock x:Name="ProfileAliasText" Text="双子娘 · Q版猫娘桌宠" FontSize="11.5" Foreground="#D8CCFF"/>
                         </Border>
                         <Border Background="#3B1A3A" CornerRadius="8" Padding="8,3" Margin="6,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="左玫红 × 右琥珀金 异色瞳" FontSize="11.5" Foreground="#F9A8D4"/>
+                            <TextBlock x:Name="ProfileBadgeTagText" Text="左玫红 × 右琥珀金 异色瞳" FontSize="11.5" Foreground="#F9A8D4"/>
                         </Border>
                     </StackPanel>
-                    <TextBlock Text="Google Gemini 同人拟人形象 · 蓝紫渐变长卷发 / 粉色内耳猫耳 / 虹彩四芒星发饰" FontSize="12.5" Foreground="#B5AED8" Margin="0,6,0,0"/>
+                    <TextBlock x:Name="ProfileSubtitleText"
+                               Text="Google Gemini 同人拟人形象 · 蓝紫渐变长卷发 / 粉色内耳猫耳 / 虹彩四芒星发饰"
+                               FontSize="12.5" Foreground="#B5AED8" Margin="0,6,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
 
-                <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="12,0,0,0">
                     <TextBlock x:Name="BondText" Text="好感度 20 ✦ 累计摸头 0 次" FontSize="13" FontWeight="SemiBold" Foreground="#FBBF24" HorizontalAlignment="Right"/>
-                    <TextBlock Text="来源：genderswapai.com/zh-CN/ai-gijinka/gemini" FontSize="11" Foreground="#8E86BA" Margin="0,4,0,0" HorizontalAlignment="Right" Cursor="Hand" MouseLeftButtonUp="SourceLink_Click" TextDecorations="Underline"/>
+                    <TextBlock x:Name="SourceLinkText"
+                               Text="来源：genderswapai.com/zh-CN/ai-gijinka/gemini"
+                               FontSize="11" Foreground="#8E86BA" Margin="0,4,0,0" HorizontalAlignment="Right"
+                               Cursor="Hand" MouseLeftButtonUp="SourceLink_Click" TextDecorations="Underline"/>
+                    <Button Content="✏️ 自定义角色设定..." Click="EditProfileBtn_Click"
+                            HorizontalAlignment="Right" Margin="0,8,0,0" Padding="10,4" FontSize="11.5"
+                            Background="#32285E" Foreground="#FFFFFF" BorderBrush="#5B49A8" BorderThickness="1" Cursor="Hand"/>
                 </StackPanel>
             </Grid>
         </Border>
 
         <!-- Content Tabs -->
-        <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
+        <TabControl x:Name="MainTabs" Grid.Row="1" Background="Transparent" BorderThickness="0">
             <!-- Tab 1: Character Profile -->
             <TabItem Header="✦ 角色档案与设定">
                 <Grid Margin="0,12,0,0">
@@ -96,7 +104,7 @@
                                     </Image.Effect>
                                 </Image>
                             </Border>
-                            <TextBlock Grid.Row="1" Text="Gemini 娘 · 原案立绘参考（ZipZipPipe）" FontSize="11.5" Foreground="#A59EC9" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                            <TextBlock x:Name="StandeeCaptionText" Grid.Row="1" Text="Gemini 娘 · 原案立绘参考（ZipZipPipe）" FontSize="11.5" Foreground="#A59EC9" HorizontalAlignment="Center" Margin="0,8,0,0" TextWrapping="Wrap"/>
                         </Grid>
                     </Border>
 
@@ -105,8 +113,8 @@
                             <Border Background="#1B1633" CornerRadius="12" Padding="14" BorderBrush="#342A60" BorderThickness="1" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="角色简介" FontSize="15" FontWeight="Bold" Foreground="#E9E4FF" Margin="0,0,0,6"/>
-                                    <TextBlock TextWrapping="Wrap" LineHeight="21" FontSize="13" Foreground="#CFC8EE"
-                                               Text="Gemini 娘是 Google 旗下 AI 模型 Gemini 的女性拟人化角色。ZipZipPipe 版采用猫娘设定，留蓝紫色长卷发，具有猫耳、猫尾与极具辨识度的异色双瞳。衍生二创中常搭配「反重力悬浮模块」「Nano Banana 香蕉画笔」以及极度猫化的日常反应。"/>
+                                    <TextBlock x:Name="ProfileBioText" TextWrapping="Wrap" LineHeight="21" FontSize="13" Foreground="#CFC8EE"
+                                               Text="Gemini 娘是 Google 旗下 AI 模型 Gemini 的女性拟人化角色。"/>
                                 </StackPanel>
                             </Border>
 
@@ -141,7 +149,7 @@
                                 <DropShadowEffect BlurRadius="18" ShadowDepth="2" Opacity="0.35" Color="#7C5CFF"/>
                             </Image.Effect>
                         </Image>
-                        <TextBlock Grid.Row="1" Text="正面 · 侧面 · 背面 三视图（GenderSwapAI 基于 ZipZipPipe 设定制作）" FontSize="12" Foreground="#B5AED8" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                        <TextBlock x:Name="TurnaroundCaptionText" Grid.Row="1" Text="正面 · 侧面 · 背面 三视图（GenderSwapAI 基于 ZipZipPipe 设定制作）" FontSize="12" Foreground="#B5AED8" HorizontalAlignment="Center" Margin="0,8,0,0" TextWrapping="Wrap"/>
                     </Grid>
                 </Border>
             </TabItem>
@@ -174,7 +182,7 @@
 
         <!-- Footer attribution -->
         <Border Grid.Row="2" Background="#1A1530" CornerRadius="10" Padding="12,8" Margin="0,12,0,0" BorderBrush="#2E2554" BorderThickness="1">
-            <TextBlock FontSize="11.5" Foreground="#9B93C4" TextWrapping="Wrap"
+            <TextBlock x:Name="ProfileFooterText" FontSize="11.5" Foreground="#9B93C4" TextWrapping="Wrap"
                        Text="美术署名：原作形象设定 ZipZipPipe（Bilibili）；Q 版猫娘立绘与表情素材由 CrossPet (lokicorvus) 基于 CC BY-NC-SA 4.0 协议发布（非商业使用、保留署名、相同方式共享）。"/>
         </Border>
     </Grid>

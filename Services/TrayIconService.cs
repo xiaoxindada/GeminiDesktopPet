@@ -37,6 +37,7 @@ public sealed class TrayIconService : IDisposable
     public event Action<bool>? AlwaysOnTopToggled;
     public event Action<bool>? SoundToggled;
     public event Action? OpenProfileRequested;
+    public event Action? OpenCharacterEditorRequested;
     public event Action? OpenSettingsRequested;
     public event Action? OpenQuotaRequested;
     public event Action? OpenUpdateRequested;
@@ -94,6 +95,7 @@ public sealed class TrayIconService : IDisposable
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("📖 角色档案与设定图鉴", null, (_, _) => OpenProfileRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem("✏️ 自定义角色设定...", null, (_, _) => OpenCharacterEditorRequested?.Invoke()));
         menu.Items.Add(new ToolStripMenuItem("⚙️ 偏好设置", null, (_, _) => OpenSettingsRequested?.Invoke()));
         _updateItem = new ToolStripMenuItem($"🆕 检查更新 ({AppVersion.CurrentDisplay})", null, (_, _) => OpenUpdateRequested?.Invoke());
         menu.Items.Add(_updateItem);

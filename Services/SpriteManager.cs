@@ -132,6 +132,24 @@ public sealed class SpriteManager
         return LoadFrozenBitmap(path);
     }
 
+    public BitmapSource? LoadCustomOrProfileImage(string? customPath, string fallbackProfileFileName)
+    {
+        if (!string.IsNullOrWhiteSpace(customPath))
+        {
+            try
+            {
+                string trimmed = customPath.Trim().Trim('"');
+                if (File.Exists(trimmed))
+                    return LoadFrozenBitmap(trimmed);
+            }
+            catch
+            {
+                // Fall back cleanly to built-in image on invalid/corrupted custom file.
+            }
+        }
+        return GetProfileImage(fallbackProfileFileName);
+    }
+
     public IReadOnlyList<string> ListAvailableSpriteKeys()
     {
         if (!Directory.Exists(_spritesDir))
@@ -146,11 +164,14 @@ public sealed class SpriteManager
 
     private static BitmapImage LoadFrozenBitmap(string path)
     {
+        // Decode from memory buffer so WPF never keeps file handles or URI cache locks on Assets/*.png.
+        byte[] bytes = File.ReadAllBytes(path);
+        using var ms = new MemoryStream(bytes);
         var bmp = new BitmapImage();
         bmp.BeginInit();
         bmp.CacheOption = BitmapCacheOption.OnLoad;
         bmp.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-        bmp.UriSource = new Uri(path, UriKind.Absolute);
+        bmp.StreamSource = ms;
         bmp.EndInit();
         bmp.Freeze();
         return bmp;

@@ -50,7 +50,7 @@
                         <TextBlock x:Name="OpacityLabel" Grid.Column="2" Text="100%" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#A78BFA"/>
                     </Grid>
 
-                    <Grid>
+                    <Grid Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="105"/>
                             <ColumnDefinition Width="*"/>
@@ -59,6 +59,12 @@
                         <ComboBox x:Name="CostumeBox" Grid.Column="1" DisplayMemberPath="Label" SelectedValuePath="Id"
                                   SelectionChanged="AnyOption_Changed"/>
                     </Grid>
+
+                    <WrapPanel>
+                        <Button Content="✏️ 自定义角色设定 / 台词 / 人设..." Padding="11,6" FontSize="11.5"
+                                Background="#2B2252" Foreground="#EAE6FF" BorderBrush="#4E3F8D" BorderThickness="1"
+                                Cursor="Hand" Click="OpenProfileEditorBtn_Click"/>
+                    </WrapPanel>
                 </StackPanel>
             </Border>
 

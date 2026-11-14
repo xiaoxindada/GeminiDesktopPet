@@ -28,6 +28,7 @@ public partial class App : System.Windows.Application
     private bool _isExiting;
 
     private SettingsService _settingsService = null!;
+    private CharacterProfileService _characterService = null!;
     private PetSettings _settings = null!;
     private SpriteManager _spriteManager = null!;
     private SoundService _soundService = null!;
@@ -41,6 +42,7 @@ public partial class App : System.Windows.Application
     private PetWindow _petWindow = null!;
 
     private ProfileWindow? _profileWindow;
+    private CharacterEditorWindow? _characterEditorWindow;
     private SettingsWindow? _settingsWindow;
     private QuotaWindow? _quotaWindow;
     private UpdateWindow? _updateWindow;
@@ -180,6 +182,7 @@ public partial class App : System.Windows.Application
         };
 
         _settingsService = new SettingsService();
+        _characterService = new CharacterProfileService(_settingsService.SettingsFolder);
         _settings = _settingsService.Load();
         _followService = new AppFollowService(_settingsService);
         _followService.SyncAndApply(_settings);
@@ -239,7 +242,14 @@ public partial class App : System.Windows.Application
 
     private void WireEvents()
     {
+        _characterService.ProfileChanged += profile =>
+        {
+            _petWindow.SyncCharacterProfile(profile);
+            _profileWindow?.ApplyProfile(profile);
+        };
+
         _petWindow.OpenProfileRequested += OpenProfileWindow;
+        _petWindow.OpenCharacterEditorRequested += OpenCharacterEditorWindow;
         _petWindow.OpenSettingsRequested += OpenSettingsWindow;
         _petWindow.OpenQuotaRequested += OpenQuotaWindow;
         _petWindow.OpenUpdateRequested += OpenUpdateWindow;
@@ -331,6 +341,7 @@ public partial class App : System.Windows.Application
             _settingsWindow?.RefreshFromSettings();
         };
         _trayService.OpenProfileRequested += OpenProfileWindow;
+        _trayService.OpenCharacterEditorRequested += OpenCharacterEditorWindow;
         _trayService.OpenSettingsRequested += OpenSettingsWindow;
         _trayService.OpenQuotaRequested += OpenQuotaWindow;
         _trayService.OpenUpdateRequested += OpenUpdateWindow;
@@ -513,15 +524,37 @@ public partial class App : System.Windows.Application
     {
         if (_profileWindow == null || !_profileWindow.IsLoaded)
         {
-            _profileWindow = new ProfileWindow(_spriteManager, _settings, key =>
+            _profileWindow = new ProfileWindow(_spriteManager, _settings, _characterService, key =>
             {
                 if (!_petWindow.IsVisible) _petWindow.Show();
                 _petWindow.TriggerExternalSpritePreview(key);
             });
+            _profileWindow.OpenCharacterEditorRequested += OpenCharacterEditorWindow;
             _profileWindow.Closed += (_, _) => _profileWindow = null;
         }
+        else
+        {
+            _profileWindow.ApplyProfile(_characterService.Current);
+        }
+
         _profileWindow.Show();
         _profileWindow.Activate();
+    }
+
+    private void OpenCharacterEditorWindow()
+    {
+        if (_characterEditorWindow == null || !_characterEditorWindow.IsLoaded)
+        {
+            _characterEditorWindow = new CharacterEditorWindow(_spriteManager, _characterService);
+            _characterEditorWindow.Closed += (_, _) => _characterEditorWindow = null;
+        }
+        else
+        {
+            _characterEditorWindow.RefreshFromService();
+        }
+
+        _characterEditorWindow.Show();
+        _characterEditorWindow.Activate();
     }
 
     private void OpenSettingsWindow()
@@ -535,6 +568,7 @@ public partial class App : System.Windows.Application
                 _trayService.SyncState(_settings);
             };
             _settingsWindow.OpenUpdateRequested += OpenUpdateWindow;
+            _settingsWindow.OpenProfileEditorRequested += OpenCharacterEditorWindow;
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
         _settingsWindow.RefreshFromSettings();
@@ -634,6 +668,7 @@ public partial class App : System.Windows.Application
         _agWatcher.Dispose();
         _trayService.Dispose();
         try { _profileWindow?.Close(); } catch { }
+        try { _characterEditorWindow?.Close(); } catch { }
         try { _settingsWindow?.ForceClose(); } catch { }
         try { _quotaWindow?.Close(); } catch { }
         try { _updateWindow?.Close(); } catch { }
@@ -656,7 +691,9 @@ public partial class App : System.Windows.Application
         var petChibi = new PetWindow(settings, settingsService, sprites, sound, monitor, chat);
         var stdSettings = new PetSettings { StyleMode = PetStyleMode.Standard };
         var petStd = new PetWindow(stdSettings, settingsService, sprites, sound, monitor, chat);
-        var profile = new ProfileWindow(sprites, settings);
+        var characterSvc = new CharacterProfileService(isolatedSettingsDir);
+        var profile = new ProfileWindow(sprites, settings, characterSvc);
+        var editor = new CharacterEditorWindow(sprites, characterSvc);
         var vbsFollow = new AppFollowService(settingsService);
         var settingsWin = new SettingsWindow(settings, settingsService, vbsFollow);
         var quotaSvc = new AntigravityQuotaService();
@@ -679,8 +716,8 @@ public partial class App : System.Windows.Application
         {
         }
 
-        Window[] windows = [petChibi, petStd, profile, settingsWin, quotaWin];
-        string[] names = ["pet_chibi.png", "pet_standard.png", "profile.png", "settings.png", "quota.png"];
+        Window[] windows = [petChibi, petStd, profile, editor, settingsWin, quotaWin];
+        string[] names = ["pet_chibi.png", "pet_standard.png", "profile.png", "editor.png", "settings.png", "quota.png"];
 
         for (int i = 0; i < windows.Length; i++)
         {
