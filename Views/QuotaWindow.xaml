@@ -1,0 +1,237 @@
+<Window x:Class="GeminiDesktopPet.Views.QuotaWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="✦ Antigravity 剩余额度"
+        Icon="pack://application:,,,/Assets/AppIcon.ico"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        SizeToContent="WidthAndHeight"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        FontFamily="Microsoft YaHei UI, Segoe UI">
+    <Window.Resources>
+        <!-- Compact icon action button (refresh / close) -->
+        <Style x:Key="GhostIconBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#9B92C7"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#2D2454"/>
+                                <Setter Property="Foreground" Value="#F6F3FF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4B3A8F"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Quiet inline text action button (copy) -->
+        <Style x:Key="GhostTextBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#9B92C7"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#2A214E"/>
+                                <Setter Property="Foreground" Value="#D6CCFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4B3A8F"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Error retry pill button -->
+        <Style x:Key="RetryPillBtn" TargetType="Button">
+            <Setter Property="Background" Value="#2D2454"/>
+            <Setter Property="Foreground" Value="#F4F0FF"/>
+            <Setter Property="BorderBrush" Value="#5B47A6"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4B3A8F"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#6D4AFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Subtle cosmic scrollbar -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Width" Value="5"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Track x:Name="PART_Track" IsDirectionReversed="True">
+                            <Track.Thumb>
+                                <Thumb>
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border Background="#4E3F8E" CornerRadius="2.5" Margin="1,2"/>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                        </Track>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <!-- Layered vector halo replaces DropShadowEffect to prevent WPF first-frame black box flashes (total inset = 14 DIP) -->
+    <Border Margin="9" Background="#1A080514" CornerRadius="22" Padding="3">
+        <Border Background="#30080514" CornerRadius="20" Padding="2">
+            <Border x:Name="CardBorder"
+                    Background="#F217132D"
+                    BorderBrush="#7C5CFF"
+                    BorderThickness="1.25"
+                    CornerRadius="18"
+                    Padding="16,13"
+                    MouseLeftButtonDown="CardBorder_MouseLeftButtonDown">
+
+            <Grid>
+                <!-- Compact Loading Bubble View -->
+                <Grid x:Name="LoadingPanel" Visibility="Visible" MinWidth="222" MaxWidth="300">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="✦" Foreground="#A78BFA" FontSize="12" VerticalAlignment="Center" Margin="0,0,7,0"/>
+                    <TextBlock x:Name="LoadingMessageText"
+                               Grid.Column="1"
+                               Text="让我看看额度还有多少。。。。。。"
+                               FontSize="13"
+                               Foreground="#F6F3FF"
+                               VerticalAlignment="Center"
+                               Margin="0,0,10,0"/>
+                    <Button Grid.Column="2"
+                            Content="✕"
+                            Click="CloseBtn_Click"
+                            Style="{StaticResource GhostIconBtn}"
+                            Width="22" Height="22"
+                            FontSize="11"
+                            ToolTip="关闭"/>
+                </Grid>
+
+                <!-- Loaded / Error Compact Popover Card -->
+                <StackPanel x:Name="QuotaPanel" Visibility="Collapsed" Width="264">
+                    <!-- Header -->
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="✦" Foreground="#A78BFA" FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="HeaderTitleText"
+                                       Text="Antigravity 剩余额度"
+                                       FontSize="14.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="#F6F3FF"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button x:Name="RefreshBtn"
+                                    Content="↻"
+                                    Click="RefreshBtn_Click"
+                                    Style="{StaticResource GhostIconBtn}"
+                                    Width="24" Height="24"
+                                    FontSize="13.5"
+                                    Margin="0,0,2,0"
+                                    ToolTip="刷新额度"/>
+                            <Button Content="✕"
+                                    Click="CloseBtn_Click"
+                                    Style="{StaticResource GhostIconBtn}"
+                                    Width="24" Height="24"
+                                    FontSize="11.5"
+                                    ToolTip="关闭"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Scrollable Quota Buckets -->
+                    <ScrollViewer x:Name="ContentScroll"
+                                  MaxHeight="390"
+                                  VerticalScrollBarVisibility="Auto"
+                                  Padding="0,0,2,0">
+                        <StackPanel x:Name="ContentHost"/>
+                    </ScrollViewer>
+
+                    <!-- Quiet Micro-Footer -->
+                    <Grid x:Name="FooterGrid" Margin="0,2,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="MetaText"
+                                   Text="AI Credits: -  ·  --:--"
+                                   FontSize="10.5"
+                                   Foreground="#877DB7"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <Button x:Name="CopyBtn"
+                                Grid.Column="1"
+                                Content="复制"
+                                Click="CopyBtn_Click"
+                                Style="{StaticResource GhostTextBtn}"
+                                Padding="6,2"
+                                FontSize="10.5"
+                                ToolTip="复制额度摘要"/>
+                    </Grid>
+                </StackPanel>
+            </Grid>
+            </Border>
+        </Border>
+    </Border>
+</Window>
