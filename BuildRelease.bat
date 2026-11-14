@@ -88,14 +88,33 @@ for %%F in (
 )
 
 echo [5/5] Creating release ZIP archive: "%ZIP_PATH%"
+set "SEVEN_ZIP="
+if exist "%ProgramFiles%\7-Zip\7z.exe" set "SEVEN_ZIP=%ProgramFiles%\7-Zip\7z.exe"
+if not defined SEVEN_ZIP (
+    for /f "delims=" %%Z in ('where 7z.exe 2^>nul') do if not defined SEVEN_ZIP set "SEVEN_ZIP=%%Z"
+)
+if not defined SEVEN_ZIP goto :zip_try_tar
 pushd "%STAGE_DIR%"
-tar -a -cf "%ZIP_PATH%" *
-set "TAR_EXIT=%errorlevel%"
+"%SEVEN_ZIP%" a -tzip -mcu=on "%ZIP_PATH%" * >nul
+set "ZIP_EXIT=%errorlevel%"
 popd
-if not "%TAR_EXIT%"=="0" (
-    echo [ERROR] tar archive creation failed with exit code %TAR_EXIT%.
+if "%ZIP_EXIT%"=="0" if exist "%ZIP_PATH%" goto :zip_done
+if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%" >nul 2>nul
+
+:zip_try_tar
+pushd "%STAGE_DIR%"
+"%SystemRoot%\System32\tar.exe" -a -cf "%ZIP_PATH%" *
+set "ZIP_EXIT=%errorlevel%"
+popd
+if "%ZIP_EXIT%"=="0" if exist "%ZIP_PATH%" goto :zip_done
+if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%" >nul 2>nul
+
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:STAGE_DIR, $env:ZIP_PATH, [System.IO.Compression.CompressionLevel]::Optimal, $false, [System.Text.Encoding]::UTF8)"
+if errorlevel 1 (
+    echo [ERROR] Release ZIP archive creation failed.
     goto :fail
 )
+:zip_done
 
 echo.
 echo === Publish ^& Package Complete ===
