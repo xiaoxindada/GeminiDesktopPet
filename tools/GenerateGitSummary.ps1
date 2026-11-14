@@ -32,22 +32,18 @@ try {
 
     $normalizedVer = $Version.Trim().TrimStart('v', 'V')
     $currentTag = "v$normalizedVer"
-    $generatedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')
 
     $checkGit = Invoke-Git @('rev-parse', '--is-inside-work-tree')
     if ($checkGit.ExitCode -ne 0 -or ($checkGit.Lines -join '').Trim() -ne 'true') {
         $fallbackMd = @(
-            "## Git 提交摘要 ($currentTag)"
+            "## 变更日志 ($currentTag)"
             ""
-            "- 生成时间：$generatedAt"
-            "- 提交记录：当前目录不是 Git 仓库，无法采集提交摘要。"
+            "- 版本：``$currentTag``"
+            "- 更新内容：当前目录不是 Git 仓库，无法采集变更列表。"
         ) -join "`n"
         [System.IO.File]::WriteAllText($OutputPath, $fallbackMd + "`n", $utf8NoBom)
         exit 0
     }
-
-    $headRes = Invoke-Git @('rev-parse', '--short', 'HEAD')
-    $headShort = if ($headRes.ExitCode -eq 0 -and $headRes.Lines.Count -gt 0) { $headRes.Lines[0].Trim() } else { 'unknown' }
 
     $tagsRes = Invoke-Git @('tag', '--merged', 'HEAD', '--sort=-v:refname')
     $mergedTags = @($tagsRes.Lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
@@ -57,7 +53,7 @@ try {
     $rangeDesc = ""
     if (-not [string]::IsNullOrWhiteSpace($prevTag)) {
         $rangeArgs = @("$prevTag..HEAD")
-        $rangeDesc = "``$prevTag..$headShort``"
+        $rangeDesc = "``$prevTag...$currentTag``"
     }
     elseif ($mergedTags -contains $currentTag) {
         $sinceCurr = Invoke-Git @('rev-list', '--count', "$currentTag..HEAD")
@@ -67,54 +63,45 @@ try {
         }
         if ($countAfterCurr -gt 0) {
             $rangeArgs = @("$currentTag..HEAD")
-            $rangeDesc = "``$currentTag..$headShort``"
+            $rangeDesc = "自 ``$currentTag`` 起的新增变更"
         }
         else {
             $rangeArgs = @('-n', '30', 'HEAD')
-            $rangeDesc = "最近 30 条提交（截至 ``$headShort``）"
+            $rangeDesc = "最近 30 条更新内容"
         }
     }
     else {
         $rangeArgs = @('-n', '30', 'HEAD')
-        $rangeDesc = "最近 30 条提交（截至 ``$headShort``）"
+        $rangeDesc = "最近 30 条更新内容"
     }
 
-    $logArgs = @('log') + $rangeArgs + @('--no-merges', '--pretty=format:%h%x09%an%x09%ad%x09%s', '--date=short')
+    # Only collect concise commit subjects without commit IDs or timestamps.
+    $logArgs = @('log') + $rangeArgs + @('--no-merges', '--pretty=format:%s')
     $logRes = Invoke-Git $logArgs
     if ($logRes.ExitCode -ne 0 -or $logRes.Lines.Count -eq 0) {
-        $logArgs = @('log') + $rangeArgs + @('--pretty=format:%h%x09%an%x09%ad%x09%s', '--date=short')
+        $logArgs = @('log') + $rangeArgs + @('--pretty=format:%s')
         $logRes = Invoke-Git $logArgs
     }
 
     $commitLines = New-Object System.Collections.Generic.List[string]
     foreach ($line in $logRes.Lines) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $parts = $line -split "`t", 4
-        if ($parts.Length -eq 4) {
-            $hash = $parts[0].Trim()
-            $author = $parts[1].Trim()
-            $date = $parts[2].Trim()
-            $subject = $parts[3].Trim()
-            $commitLines.Add("- ``$hash`` $subject ($author, $date)")
-        }
-        else {
-            $commitLines.Add("- $($line.Trim())")
-        }
+        $subject = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($subject)) { continue }
+        $commitLines.Add("- $subject")
     }
 
     $mdLines = New-Object System.Collections.Generic.List[string]
-    $mdLines.Add("## Git 提交摘要 ($currentTag)")
+    $mdLines.Add("## 变更日志 ($currentTag)")
     $mdLines.Add("")
     $mdLines.Add("- 版本：``$currentTag``")
-    $mdLines.Add("- 提交范围：$rangeDesc")
-    $mdLines.Add("- 生成时间：$generatedAt")
-    $mdLines.Add("- 提交数量：$($commitLines.Count) 条")
+    $mdLines.Add("- 对比范围：$rangeDesc")
+    $mdLines.Add("- 变更条目：$($commitLines.Count) 条")
     $mdLines.Add("")
     if ($commitLines.Count -eq 0) {
-        $mdLines.Add("- 暂无新增提交记录。")
+        $mdLines.Add("- 暂无新增变更记录。")
     }
     else {
-        $mdLines.Add("### 提交列表")
+        $mdLines.Add("### 更新内容")
         foreach ($item in $commitLines) {
             $mdLines.Add($item)
         }
