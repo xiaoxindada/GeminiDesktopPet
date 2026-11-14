@@ -4,6 +4,7 @@ setlocal EnableExtensions
 
 set "ROOT=%~dp0"
 set "CSPROJ=%ROOT%GeminiDesktopPet.csproj"
+set "VERSION_FILE=%ROOT%VERSION"
 set "RUNTIME=win-x64"
 set "SELF_CONTAINED=true"
 set "NO_PAUSE=0"
@@ -29,13 +30,16 @@ if not exist "%CSPROJ%" (
 )
 
 set "APP_VERSION=0.1.0"
-for /f "tokens=1,2 delims=<> " %%A in ('findstr /i "<Version>" "%CSPROJ%"') do (
-    if /i "%%A"=="Version" (
-        set "APP_VERSION=%%B"
-        goto :version_done
+if exist "%VERSION_FILE%" (
+    for /f "usebackq tokens=* delims= " %%V in ("%VERSION_FILE%") do (
+        if not "%%~V"=="" (
+            set "APP_VERSION=%%~V"
+            goto :version_done
+        )
     )
 )
 :version_done
+if /i "%APP_VERSION:~0,1%"=="v" set "APP_VERSION=%APP_VERSION:~1%"
 
 if /i "%SELF_CONTAINED%"=="true" (
     set "MODE_TAG=%RUNTIME%"
@@ -46,35 +50,38 @@ if /i "%SELF_CONTAINED%"=="true" (
 set "OUTPUT_BASE=%ROOT%publish"
 set "STAGE_DIR=%OUTPUT_BASE%\GeminiDesktopPet"
 set "ZIP_PATH=%OUTPUT_BASE%\GeminiDesktopPet-v%APP_VERSION%-%MODE_TAG%.zip"
+set "GIT_SUMMARY_PATH=%OUTPUT_BASE%\git-commit-summary.md"
 
-echo [GeminiDesktopPet] 开始编译发布独立应用包并生成 ZIP 压缩包...
-echo [1/5] Stopping any running GeminiDesktopPet instances...
+echo [GeminiDesktopPet] 开始编译发布独立应用包 (v%APP_VERSION%) 并生成 Git 提交摘要与 ZIP 压缩包...
+echo [1/6] Stopping any running GeminiDesktopPet instances...
 taskkill /F /IM GeminiDesktopPet.exe >nul 2>nul
-ping -n 2 127.0.0.1 >nul
+timeout /t 1 /nobreak >nul
 
-echo [2/5] Preparing staging folder: "%STAGE_DIR%"
+echo [2/6] Preparing staging folder: "%STAGE_DIR%"
 if exist "%STAGE_DIR%" (
     del /f /s /q "%STAGE_DIR%\*" >nul 2>nul
     rmdir /s /q "%STAGE_DIR%" >nul 2>nul
 )
 if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
+if exist "%GIT_SUMMARY_PATH%" del /f /q "%GIT_SUMMARY_PATH%"
 if not exist "%OUTPUT_BASE%" mkdir "%OUTPUT_BASE%"
 if not exist "%STAGE_DIR%" mkdir "%STAGE_DIR%"
 
-echo [3/5] Running dotnet publish (Release / %RUNTIME% / SelfContained=%SELF_CONTAINED%)...
+echo [3/6] Running dotnet publish (Release / %RUNTIME% / SelfContained=%SELF_CONTAINED%)...
 dotnet publish "%CSPROJ%" -c Release -r %RUNTIME% --self-contained %SELF_CONTAINED% -p:DebugType=none -p:DebugSymbols=false -o "%STAGE_DIR%"
 if errorlevel 1 (
     echo [ERROR] dotnet publish failed.
     goto :fail
 )
 
-echo [4/5] Placing user scripts ^& docs together with GeminiDesktopPet.exe...
+echo [4/6] Placing user scripts ^& docs together with GeminiDesktopPet.exe...
 for %%F in (
     "启动Gemini娘桌宠.bat"
     "关闭Gemini娘桌宠.bat"
     "开启跟随应用联动.bat"
     "关闭跟随应用联动.bat"
     "README.md"
+    "VERSION"
 ) do (
     if not exist "%ROOT%%%~F" (
         echo [ERROR] Required file missing: "%ROOT%%%~F"
@@ -87,7 +94,14 @@ for %%F in (
     )
 )
 
-echo [5/5] Creating release ZIP archive: "%ZIP_PATH%"
+echo [5/6] Generating git commit summary: "%GIT_SUMMARY_PATH%"
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%ROOT%tools\GenerateGitSummary.ps1" -RepoRoot "%ROOT%." -Version "%APP_VERSION%" -OutputPath "%GIT_SUMMARY_PATH%"
+if errorlevel 1 (
+    echo [ERROR] Failed to generate git commit summary.
+    goto :fail
+)
+
+echo [6/6] Creating release ZIP archive: "%ZIP_PATH%"
 set "SEVEN_ZIP="
 if exist "%ProgramFiles%\7-Zip\7z.exe" set "SEVEN_ZIP=%ProgramFiles%\7-Zip\7z.exe"
 if not defined SEVEN_ZIP (
@@ -118,7 +132,9 @@ if errorlevel 1 (
 
 echo.
 echo === Publish ^& Package Complete ===
+echo Version   : v%APP_VERSION%
 echo Stage Dir : %STAGE_DIR%
+echo Summary   : %GIT_SUMMARY_PATH%
 for %%Z in ("%ZIP_PATH%") do echo ZIP File  : %%~fZ ^(%%~zZ bytes^)
 echo Root entries in package:
 dir /b "%STAGE_DIR%"
