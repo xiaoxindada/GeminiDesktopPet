@@ -75,7 +75,20 @@ try {
         $rangeDesc = "最近 30 条更新内容"
     }
 
-    # Only collect concise commit subjects without commit IDs or timestamps.
+    function Test-IsReleaseVersionCommit {
+        param([string]$Subject)
+
+        if ([string]::IsNullOrWhiteSpace($Subject)) { return $false }
+        $s = $Subject.Trim()
+
+        # Exclude version-bump/release-marker subjects so release notes only list real changes.
+        if ($s -match '^(?:发布|发版|版本发布)\s*(?:版本\s*)?v?\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.\-]+)?(?:\s*版本)?$') { return $true }
+        if ($s -match '(?i)^(?:(?:chore|build|ci|docs)(?:\([^)]+\))?\s*:\s*)?(?:release|bump(?:\s+version)?|version\s+bump)\s*(?:to\s+)?v?\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.\-]+)?$') { return $true }
+
+        return $false
+    }
+
+    # Only collect concise non-release commit subjects without commit IDs or timestamps.
     $logArgs = @('log') + $rangeArgs + @('--no-merges', '--pretty=format:%s')
     $logRes = Invoke-Git $logArgs
     if ($logRes.ExitCode -ne 0 -or $logRes.Lines.Count -eq 0) {
@@ -87,6 +100,7 @@ try {
     foreach ($line in $logRes.Lines) {
         $subject = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($subject)) { continue }
+        if (Test-IsReleaseVersionCommit -Subject $subject) { continue }
         $commitLines.Add("- $subject")
     }
 
