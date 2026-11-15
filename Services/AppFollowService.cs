@@ -4,9 +4,22 @@ using GeminiDesktopPet.Models;
 
 namespace GeminiDesktopPet.Services;
 
+public sealed class FollowWatcherOptions
+{
+    public bool FromExit { get; init; }
+    public string? CustomSettingsFolder { get; init; }
+    public string MainMutexName { get; init; } = AppFollowService.MainMutexName;
+    public string WatcherMutexName { get; init; } = AppFollowService.WatcherMutexName;
+    public string StopWatcherEventName { get; init; } = AppFollowService.StopWatcherEventName;
+    public int PollIntervalMs { get; init; } = 1200;
+    public Func<AppActivitySnapshot>? SampleAntigravity { get; init; }
+    public Func<AppActivitySnapshot>? SampleGemini { get; init; }
+    public Func<string, bool>? CustomWakeLauncher { get; init; }
+}
+
 /// <summary>
 /// Manages native process-based app-follow standby mode, background cold-start watcher handoff,
-/// and HKCU Run registration, removing any legacy Startup VBScript or auxiliary files.
+/// and HKCU Run registration.
 /// </summary>
 public sealed class AppFollowService
 {
@@ -15,41 +28,17 @@ public sealed class AppFollowService
     public const string WakeEventName = "GeminiDesktopPet_WakeSignal_Event";
     public const string WakeAgEventName = "GeminiDesktopPet_WakeAgSignal_Event";
     public const string WakeGeminiEventName = "GeminiDesktopPet_WakeGeminiSignal_Event";
-    public const string ReloadFollowEventName = "GeminiDesktopPet_ReloadFollowSignal_Event";
     public const string CloseEventName = "GeminiDesktopPet_CloseSignal_Event";
     public const string StopWatcherEventName = "GeminiDesktopPet_StopFollowWatcher_Event";
 
-    private const string LegacyStartupScriptName = "GeminiDesktopPet_FollowWatcher.vbs";
     private const int WatcherPollIntervalMs = 1200;
 
-    private static readonly string[] LegacyAuxiliaryFiles =
-    [
-        "pet_path.txt",
-        "start_bat_path.txt",
-        "stop_bat_path.txt",
-        "watcher_token.txt",
-        "watcher.lock",
-        "wake_reason.txt",
-        "FollowAppsWatcher.vbs",
-        "StopFollowWatcher.vbs"
-    ];
-
     private readonly SettingsService _settingsService;
-
-    public string StartupFolderPath { get; }
 
     public AppFollowService(SettingsService settingsService)
     {
         _settingsService = settingsService;
         Directory.CreateDirectory(settingsService.SettingsFolder);
-
-        StartupFolderPath = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
-        if (string.IsNullOrWhiteSpace(StartupFolderPath))
-        {
-            StartupFolderPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
-        }
     }
 
     public static bool AnyFollowEnabled(PetSettings settings)
@@ -58,22 +47,24 @@ public sealed class AppFollowService
     public bool IsFollowLogonEnabled()
         => _settingsService.IsFollowWatcherRunEnabled() || _settingsService.IsAutoStartEnabled();
 
-    /// <summary>
-    /// Syncs standard HKCU Run standby registration with settings and removes any legacy VBS/txt files.
-    /// </summary>
     public void SyncAndApply(PetSettings settings)
     {
-        CleanupLegacyFiles();
         bool enabled = AnyFollowEnabled(settings);
         _settingsService.SetFollowWatcherRun(enabled);
-        if (!enabled)
+        if (enabled)
+        {
+            if (!IsFollowWatcherRunning())
+                SpawnFollowWatcher(fromExit: true);
+        }
+        else
+        {
             SignalStopFollowWatcher();
+        }
         AppLogger.Info("AppFollow", $"同步应用联动状态：Antigravity={settings.FollowAntigravity}, GeminiApp={settings.FollowGeminiApp}, RunEntry={enabled}");
     }
 
     public void DisableFollow()
     {
-        CleanupLegacyFiles();
         _settingsService.SetFollowWatcherRun(false);
         SignalStopFollowWatcher();
         AppLogger.Info("AppFollow", "已停用应用跟随联动并清除开机待机入口");
@@ -93,14 +84,14 @@ public sealed class AppFollowService
         }
     }
 
-    public static bool SignalStopFollowWatcher()
-        => TrySignalNamedEvent(StopWatcherEventName);
+    public static bool SignalStopFollowWatcher(string? stopEventName = null)
+        => TrySignalNamedEvent(stopEventName ?? StopWatcherEventName);
 
-    public static bool IsMainInstanceRunning()
+    public static bool IsMainInstanceRunning(string? mainMutexName = null)
     {
         try
         {
-            if (Mutex.TryOpenExisting(MainMutexName, out var mainMutex))
+            if (Mutex.TryOpenExisting(mainMutexName ?? MainMutexName, out var mainMutex))
             {
                 mainMutex.Dispose();
                 return true;
@@ -112,9 +103,24 @@ public sealed class AppFollowService
         return false;
     }
 
+    public static bool IsFollowWatcherRunning(string? watcherMutexName = null)
+    {
+        try
+        {
+            if (Mutex.TryOpenExisting(watcherMutexName ?? WatcherMutexName, out var watcherMutex))
+            {
+                watcherMutex.Dispose();
+                return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
     /// <summary>
     /// Spawns the lightweight native follow-watcher process (--follow-watcher).
-    /// Must be called after the main GUI releases MainMutexName when handing off on exit.
     /// </summary>
     public static bool SpawnFollowWatcher(bool fromExit)
     {
@@ -132,14 +138,17 @@ public sealed class AppFollowService
 
     /// <summary>
     /// Runs the UI-free managed watcher loop so cold-starting Antigravity or Gemini
-    /// still wakes the pet even after the user exited the main window/tray.
+    /// always wakes the pet whenever the main GUI is not currently running.
     /// </summary>
     public static int RunFollowWatcher(bool fromExit)
+        => RunFollowWatcherCore(new FollowWatcherOptions { FromExit = fromExit, PollIntervalMs = WatcherPollIntervalMs });
+
+    public static int RunFollowWatcherCore(FollowWatcherOptions options)
     {
-        var settingsService = new SettingsService();
+        var settingsService = new SettingsService(options.CustomSettingsFolder);
         var settings = settingsService.Load();
-        AppLogger.Initialize(settings.EnableRuntimeLog);
-        new AppFollowService(settingsService).CleanupLegacyFiles();
+        if (string.IsNullOrWhiteSpace(options.CustomSettingsFolder))
+            AppLogger.Initialize(settings.EnableRuntimeLog);
 
         if (!AnyFollowEnabled(settings))
         {
@@ -147,69 +156,59 @@ public sealed class AppFollowService
             return 0;
         }
 
-        using var watcherMutex = new Mutex(true, WatcherMutexName, out bool ownsWatcherMutex);
+        using var watcherMutex = new Mutex(true, options.WatcherMutexName, out bool ownsWatcherMutex);
         if (!ownsWatcherMutex)
         {
             AppLogger.Info("FollowWatcher", "已有后台监听实例在运行，当前进程退出");
             return 0;
         }
 
-        using var stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, StopWatcherEventName, out bool createdStopEvent);
+        using var stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, options.StopWatcherEventName, out bool createdStopEvent);
         if (!createdStopEvent)
             stopEvent.Reset();
 
-        // Exit immediately if the main GUI already acquired the single-instance mutex.
-        if (IsMainInstanceRunning())
-        {
-            AppLogger.Info("FollowWatcher", "主程序已运行，后台监听让位退出");
-            return 0;
-        }
+        Func<AppActivitySnapshot> sampleAg = options.SampleAntigravity ?? AntigravityWatcherService.SampleAntigravityActivity;
+        Func<AppActivitySnapshot> sampleGem = options.SampleGemini ?? AntigravityWatcherService.SampleGeminiActivity;
 
-        if (!fromExit)
+        if (!options.FromExit && !IsMainInstanceRunning(options.MainMutexName))
         {
-            string? alreadyRunningKey = AntigravityWatcherService.DetectRunningFollowedAppKey(settings);
+            string? alreadyRunningKey = AntigravityWatcherService.DetectRunningFollowedAppKey(settings, sampleAg, sampleGem);
             if (!string.IsNullOrEmpty(alreadyRunningKey))
             {
                 AppLogger.Info("FollowWatcher", $"冷启动监听检测到目标已运行，立即唤醒主程序：{alreadyRunningKey}");
-                using var spawned = TryLaunchPetWithArgs($"--woken-by:{alreadyRunningKey}");
-                if (spawned != null)
-                    WaitForMainTakeoverOrStop(spawned, stopEvent);
-                return 0;
+                if (LaunchWakeTarget(options, $"--woken-by:{alreadyRunningKey}", stopEvent))
+                    return 0;
             }
         }
 
-        // Baseline current active app processes on exit-handoff so closing the pet while an app
-        // is already open waits for the next fresh app launch rather than immediately reopening.
-        var initialAg = fromExit ? AntigravityWatcherService.SampleAntigravityActivity() : new AppActivitySnapshot(false, [], []);
-        var initialGem = fromExit ? AntigravityWatcherService.SampleGeminiActivity() : new AppActivitySnapshot(false, [], []);
+        // Baseline current active app processes so already-open apps do not immediately trigger
+        // until the next fresh launch or primary process creation.
+        var initialAg = sampleAg();
+        var initialGem = sampleGem();
         bool wasAgRunning = initialAg.IsRunning;
         bool wasGeminiRunning = initialGem.IsRunning;
-        HashSet<int> knownAgPids = initialAg.ActivePids;
-        HashSet<int> knownGeminiPids = initialGem.ActivePids;
-        DateTime lastAgStartUtc = DateTime.MinValue;
-        DateTime lastGeminiStartUtc = DateTime.MinValue;
+        HashSet<int> knownAgPids = new(initialAg.ActivePids);
+        HashSet<int> knownGeminiPids = new(initialGem.ActivePids);
+        DateTime lastAgStartUtc = initialAg.IsRunning ? DateTime.UtcNow : DateTime.MinValue;
+        DateTime lastGeminiStartUtc = initialGem.IsRunning ? DateTime.UtcNow : DateTime.MinValue;
 
-        string settingsFilePath = Path.Combine(settingsService.SettingsFolder, "settings.json");
+        string settingsFilePath = settingsService.SettingsFilePath;
         DateTime lastSettingsWriteUtc = GetFileLastWriteUtcSafe(settingsFilePath);
+        int pollMs = Math.Max(15, options.PollIntervalMs);
 
         AppLogger.Info(
             "FollowWatcher",
-            $"后台冷启动监听已启动：fromExit={fromExit}, baseline=(AG:{wasAgRunning}[{knownAgPids.Count}], Gemini:{wasGeminiRunning}[{knownGeminiPids.Count}]), follow=(AG:{settings.FollowAntigravity}, Gemini:{settings.FollowGeminiApp})");
+            $"后台冷启动监听已启动：fromExit={options.FromExit}, baseline=(AG:{wasAgRunning}[{knownAgPids.Count}], Gemini:{wasGeminiRunning}[{knownGeminiPids.Count}]), follow=(AG:{settings.FollowAntigravity}, Gemini:{settings.FollowGeminiApp})");
 
-        while (!stopEvent.WaitOne(WatcherPollIntervalMs))
+        while (!stopEvent.WaitOne(pollMs))
         {
-            if (IsMainInstanceRunning())
-            {
-                AppLogger.Info("FollowWatcher", "检测到主程序启动，后台监听自动退出");
-                break;
-            }
-
             DateTime currentWriteUtc = GetFileLastWriteUtcSafe(settingsFilePath);
             if (currentWriteUtc != lastSettingsWriteUtc)
             {
                 lastSettingsWriteUtc = currentWriteUtc;
                 settings = settingsService.Load();
-                AppLogger.SetEnabled(settings.EnableRuntimeLog);
+                if (string.IsNullOrWhiteSpace(options.CustomSettingsFolder))
+                    AppLogger.SetEnabled(settings.EnableRuntimeLog);
                 if (!AnyFollowEnabled(settings))
                 {
                     AppLogger.Info("FollowWatcher", "检测到设置已关闭全部跟随联动，后台监听退出");
@@ -217,8 +216,8 @@ public sealed class AppFollowService
                 }
             }
 
-            var agSnap = AntigravityWatcherService.SampleAntigravityActivity();
-            var gemSnap = AntigravityWatcherService.SampleGeminiActivity();
+            var agSnap = sampleAg();
+            var gemSnap = sampleGem();
 
             AntigravityWatcherService.EvaluateTransition(
                 agSnap, ref wasAgRunning, ref knownAgPids, ref lastAgStartUtc, out bool agStarted, out _);
@@ -231,19 +230,33 @@ public sealed class AppFollowService
             if (!wakeByAg && !wakeByGemini)
                 continue;
 
+            if (IsMainInstanceRunning(options.MainMutexName))
+                continue;
+
             string appKey = wakeByAg ? "antigravity" : "gemini";
             AppLogger.Info("FollowWatcher", $"检测到冷启动目标应用：{appKey}，正在唤醒桌宠主程序");
 
-            using var spawned = TryLaunchPetWithArgs($"--woken-by:{appKey}");
-            if (spawned == null)
-                continue;
-
-            if (WaitForMainTakeoverOrStop(spawned, stopEvent))
+            if (LaunchWakeTarget(options, $"--woken-by:{appKey}", stopEvent))
                 return 0;
         }
 
         AppLogger.Info("FollowWatcher", "后台冷启动监听已收到停止信号并退出");
         return 0;
+    }
+
+    private static bool LaunchWakeTarget(FollowWatcherOptions options, string arguments, EventWaitHandle stopEvent)
+    {
+        if (options.CustomWakeLauncher != null)
+        {
+            options.CustomWakeLauncher(arguments);
+            return stopEvent.WaitOne(0);
+        }
+
+        using var spawned = TryLaunchPetWithArgs(arguments);
+        if (spawned == null)
+            return false;
+
+        return WaitForMainTakeoverOrStop(spawned, stopEvent, options.MainMutexName);
     }
 
     private static Process? TryLaunchPetWithArgs(string arguments)
@@ -254,10 +267,12 @@ public sealed class AppFollowService
 
         try
         {
-            return Process.Start(new ProcessStartInfo(exePath, arguments)
+            return Process.Start(new ProcessStartInfo
             {
+                FileName = exePath,
+                Arguments = arguments,
                 WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory,
-                UseShellExecute = true
+                UseShellExecute = false
             });
         }
         catch (Exception ex)
@@ -267,23 +282,25 @@ public sealed class AppFollowService
         }
     }
 
-    private static bool WaitForMainTakeoverOrStop(Process spawned, EventWaitHandle stopEvent)
+    private static bool WaitForMainTakeoverOrStop(Process spawned, EventWaitHandle stopEvent, string mainMutexName)
     {
         for (int i = 0; i < 60; i++)
         {
-            if (stopEvent.WaitOne(120) || IsMainInstanceRunning())
+            if (stopEvent.WaitOne(120))
                 return true;
+            if (IsMainInstanceRunning(mainMutexName))
+                return false;
 
             try
             {
                 if (spawned.HasExited)
-                    return stopEvent.WaitOne(0) || IsMainInstanceRunning();
+                    return stopEvent.WaitOne(0);
             }
             catch
             {
             }
         }
-        return stopEvent.WaitOne(0) || IsMainInstanceRunning();
+        return stopEvent.WaitOne(0);
     }
 
     private static DateTime GetFileLastWriteUtcSafe(string path)
@@ -295,37 +312,6 @@ public sealed class AppFollowService
         catch
         {
             return DateTime.MinValue;
-        }
-    }
-
-    public void CleanupLegacyFiles()
-    {
-        try
-        {
-            if (Directory.Exists(StartupFolderPath))
-            {
-                string legacyStartupVbs = Path.Combine(StartupFolderPath, LegacyStartupScriptName);
-                if (File.Exists(legacyStartupVbs))
-                    File.Delete(legacyStartupVbs);
-            }
-        }
-        catch
-        {
-            // Ignore transient IO or permission errors during legacy cleanup.
-        }
-
-        string folder = _settingsService.SettingsFolder;
-        if (!Directory.Exists(folder))
-            return;
-
-        foreach (string fileName in LegacyAuxiliaryFiles)
-        {
-            string fullPath = Path.Combine(folder, fileName);
-            if (File.Exists(fullPath))
-            {
-                try { File.Delete(fullPath); }
-                catch { }
-            }
         }
     }
 }

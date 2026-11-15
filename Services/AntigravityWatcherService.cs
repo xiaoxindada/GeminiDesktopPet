@@ -3,6 +3,11 @@ using System.Windows.Threading;
 
 namespace GeminiDesktopPet.Services;
 
+public readonly record struct ProcessProbeInfo(
+    int Pid,
+    bool HasMainWindow,
+    int ThreadCount);
+
 public readonly record struct AppActivitySnapshot(
     bool IsRunning,
     HashSet<int> ActivePids,
@@ -16,17 +21,17 @@ public sealed class AntigravityWatcherService : IDisposable
     private const string AntigravityProcessName = "Antigravity";
     private const string GeminiProcessName = "Gemini";
 
-    // Orphaned headless Node/MCP worker processes (e.g. Antigravity.exe --import=...) keep ~10-11 threads
+    // Orphaned headless Node/MCP worker processes (e.g. Antigravity.exe --import=...) keep ~10-12 threads
     // and MainWindowHandle == 0 after the IDE closes. Active Electron app instances have a main window
     // or >= 22 Chromium threads, and the primary Electron browser process has >= 38 threads.
-    private const int MinActiveElectronThreadCount = 22;
-    private const int MinPrimaryBrowserThreadCount = 38;
+    public const int MinActiveElectronThreadCount = 22;
+    public const int MinPrimaryBrowserThreadCount = 38;
 
     private readonly DispatcherTimer _timer;
     private bool _wasAgRunning;
     private bool _wasGeminiRunning;
-    private HashSet<int> _knownAgActivePids = [];
-    private HashSet<int> _knownGeminiActivePids = [];
+    private HashSet<int> _knownAgPids = [];
+    private HashSet<int> _knownGeminiPids = [];
     private DateTime _lastAgStartUtc = DateTime.MinValue;
     private DateTime _lastGeminiStartUtc = DateTime.MinValue;
     private bool _initialized;
@@ -55,8 +60,10 @@ public sealed class AntigravityWatcherService : IDisposable
         var gem = SampleGeminiActivity();
         _wasAgRunning = ag.IsRunning;
         _wasGeminiRunning = gem.IsRunning;
-        _knownAgActivePids = ag.ActivePids;
-        _knownGeminiActivePids = gem.ActivePids;
+        _knownAgPids = new HashSet<int>(ag.ActivePids);
+        _knownGeminiPids = new HashSet<int>(gem.ActivePids);
+        _lastAgStartUtc = ag.IsRunning ? DateTime.UtcNow : DateTime.MinValue;
+        _lastGeminiStartUtc = gem.IsRunning ? DateTime.UtcNow : DateTime.MinValue;
         _initialized = true;
         _timer.Start();
     }
@@ -73,11 +80,14 @@ public sealed class AntigravityWatcherService : IDisposable
 
     public static bool CheckGeminiAppRunning() => SampleGeminiActivity().IsRunning;
 
-    public static string? DetectRunningFollowedAppKey(Models.PetSettings settings)
+    public static string? DetectRunningFollowedAppKey(
+        Models.PetSettings settings,
+        Func<AppActivitySnapshot>? sampleAg = null,
+        Func<AppActivitySnapshot>? sampleGemini = null)
     {
-        if (settings.FollowAntigravity && CheckProcessRunning())
+        if (settings.FollowAntigravity && (sampleAg?.Invoke() ?? SampleAntigravityActivity()).IsRunning)
             return "antigravity";
-        if (settings.FollowGeminiApp && CheckGeminiAppRunning())
+        if (settings.FollowGeminiApp && (sampleGemini?.Invoke() ?? SampleGeminiActivity()).IsRunning)
             return "gemini";
         return null;
     }
@@ -85,10 +95,36 @@ public sealed class AntigravityWatcherService : IDisposable
     public static bool CheckAnyFollowedTargetRunning(Models.PetSettings settings)
         => DetectRunningFollowedAppKey(settings) != null;
 
-    public static AppActivitySnapshot SampleAppActivity(string processName)
+    /// <summary>
+    /// Classifies a candidate process based on its main window handle and thread count,
+    /// filtering out low-thread orphaned headless Node workers.
+    /// </summary>
+    public static bool ClassifyProcessCandidate(bool hasMainWindow, int threadCount, out bool isPrimary)
+    {
+        bool isActive = hasMainWindow || threadCount >= MinActiveElectronThreadCount;
+        isPrimary = isActive && (hasMainWindow || threadCount >= MinPrimaryBrowserThreadCount);
+        return isActive;
+    }
+
+    public static AppActivitySnapshot BuildSnapshotFromProbes(IEnumerable<ProcessProbeInfo> probes)
     {
         var activePids = new HashSet<int>();
         var primaryPids = new HashSet<int>();
+        foreach (var probe in probes)
+        {
+            if (ClassifyProcessCandidate(probe.HasMainWindow, probe.ThreadCount, out bool isPrimary))
+            {
+                activePids.Add(probe.Pid);
+                if (isPrimary)
+                    primaryPids.Add(probe.Pid);
+            }
+        }
+        return new AppActivitySnapshot(activePids.Count > 0, activePids, primaryPids);
+    }
+
+    public static AppActivitySnapshot SampleAppActivity(string processName)
+    {
+        var probes = new List<ProcessProbeInfo>();
         Process[]? procs = null;
         try
         {
@@ -99,12 +135,7 @@ public sealed class AntigravityWatcherService : IDisposable
                 {
                     bool hasWindow = p.MainWindowHandle != IntPtr.Zero;
                     int threadCount = p.Threads.Count;
-                    if (hasWindow || threadCount >= MinActiveElectronThreadCount)
-                    {
-                        activePids.Add(p.Id);
-                        if (hasWindow || threadCount >= MinPrimaryBrowserThreadCount)
-                            primaryPids.Add(p.Id);
-                    }
+                    probes.Add(new ProcessProbeInfo(p.Id, hasWindow, threadCount));
                 }
                 catch
                 {
@@ -125,37 +156,56 @@ public sealed class AntigravityWatcherService : IDisposable
             }
         }
 
-        return new AppActivitySnapshot(activePids.Count > 0, activePids, primaryPids);
+        return BuildSnapshotFromProbes(probes);
     }
 
+    /// <summary>
+    /// Evaluates start/exit state transitions while preventing duplicate triggers during
+    /// multi-stage Electron startup or child GPU/renderer thread spikes.
+    /// </summary>
     public static void EvaluateTransition(
         AppActivitySnapshot current,
         ref bool wasRunning,
-        ref HashSet<int> knownActivePids,
+        ref HashSet<int> knownPids,
         ref DateTime lastStartUtc,
         out bool started,
-        out bool exited)
+        out bool exited,
+        DateTime? nowUtc = null)
     {
-        DateTime now = DateTime.UtcNow;
+        DateTime now = nowUtc ?? DateTime.UtcNow;
+        knownPids.IntersectWith(current.ActivePids);
+
+        bool hasKnownPrimaryAlive = current.PrimaryPids.Overlaps(knownPids);
         bool hasBrandNewPrimary = false;
         foreach (int pid in current.PrimaryPids)
         {
-            if (!knownActivePids.Contains(pid))
+            if (!knownPids.Contains(pid))
             {
                 hasBrandNewPrimary = true;
                 break;
             }
         }
 
-        bool cooldownElapsed = (now - lastStartUtc).TotalSeconds >= 4.0;
-        started = (current.IsRunning && !wasRunning) || (hasBrandNewPrimary && cooldownElapsed);
+        bool cooldownElapsed = (now - lastStartUtc).TotalSeconds >= 6.0;
+        started = (current.IsRunning && !wasRunning)
+            || (hasBrandNewPrimary && (!hasKnownPrimaryAlive || cooldownElapsed));
         exited = !current.IsRunning && wasRunning;
 
         if (started)
+        {
             lastStartUtc = now;
+            knownPids = new HashSet<int>(current.ActivePids);
+        }
+        else if (current.PrimaryPids.Count > 0)
+        {
+            knownPids.UnionWith(current.ActivePids);
+        }
+        else if (!current.IsRunning)
+        {
+            knownPids.Clear();
+        }
 
         wasRunning = current.IsRunning;
-        knownActivePids = current.ActivePids;
     }
 
     private void Poll()
@@ -167,17 +217,19 @@ public sealed class AntigravityWatcherService : IDisposable
         {
             _wasAgRunning = ag.IsRunning;
             _wasGeminiRunning = gem.IsRunning;
-            _knownAgActivePids = ag.ActivePids;
-            _knownGeminiActivePids = gem.ActivePids;
+            _knownAgPids = new HashSet<int>(ag.ActivePids);
+            _knownGeminiPids = new HashSet<int>(gem.ActivePids);
+            _lastAgStartUtc = ag.IsRunning ? DateTime.UtcNow : DateTime.MinValue;
+            _lastGeminiStartUtc = gem.IsRunning ? DateTime.UtcNow : DateTime.MinValue;
             _initialized = true;
             return;
         }
 
-        EvaluateTransition(ag, ref _wasAgRunning, ref _knownAgActivePids, ref _lastAgStartUtc, out bool agStarted, out bool agExited);
+        EvaluateTransition(ag, ref _wasAgRunning, ref _knownAgPids, ref _lastAgStartUtc, out bool agStarted, out bool agExited);
         if (agStarted) AntigravityStarted?.Invoke();
         else if (agExited) AntigravityExited?.Invoke();
 
-        EvaluateTransition(gem, ref _wasGeminiRunning, ref _knownGeminiActivePids, ref _lastGeminiStartUtc, out bool gemStarted, out bool gemExited);
+        EvaluateTransition(gem, ref _wasGeminiRunning, ref _knownGeminiPids, ref _lastGeminiStartUtc, out bool gemStarted, out bool gemExited);
         if (gemStarted) GeminiAppStarted?.Invoke();
         else if (gemExited) GeminiAppExited?.Invoke();
     }

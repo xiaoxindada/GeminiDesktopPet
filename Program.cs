@@ -23,39 +23,29 @@ internal static class Program
 
         if (args.Any(a => string.Equals(a, "--close-pet", StringComparison.OrdinalIgnoreCase)))
         {
-            bool closedMainGui = AppFollowService.TrySignalNamedEvent(AppFollowService.CloseEventName);
-            if (!closedMainGui)
-            {
-                var svc = new SettingsService();
-                var cfg = svc.Load();
-                if (AppFollowService.AnyFollowEnabled(cfg))
-                    AppFollowService.SpawnFollowWatcher(fromExit: true);
-                else
-                    AppFollowService.SignalStopFollowWatcher();
-            }
-            return 0;
-        }
-
-        if (args.Any(a => string.Equals(a, "--enable-follow", StringComparison.OrdinalIgnoreCase)
-                       || string.Equals(a, "--follow-flag:on", StringComparison.OrdinalIgnoreCase)))
-        {
-            return HandleEnableFollowCommand();
-        }
-
-        if (args.Any(a => string.Equals(a, "--disable-follow", StringComparison.OrdinalIgnoreCase)
-                       || string.Equals(a, "--follow-flag:off", StringComparison.OrdinalIgnoreCase)))
-        {
             var svc = new SettingsService();
             var cfg = svc.Load();
-            cfg.FollowAntigravity = false;
-            cfg.FollowGeminiApp = false;
-            svc.Save(cfg);
-            new AppFollowService(svc).DisableFollow();
-            AppFollowService.TrySignalNamedEvent(AppFollowService.ReloadFollowEventName);
+            bool followEnabled = AppFollowService.AnyFollowEnabled(cfg);
+            if (!followEnabled)
+                AppFollowService.SignalStopFollowWatcher();
+
+            AppFollowService.TrySignalNamedEvent(AppFollowService.CloseEventName);
+
+            for (int i = 0; i < 30; i++)
+            {
+                if (!AppFollowService.IsMainInstanceRunning())
+                    break;
+                Thread.Sleep(50);
+            }
+
+            if (followEnabled && !AppFollowService.IsFollowWatcherRunning())
+                AppFollowService.SpawnFollowWatcher(fromExit: true);
+
             return 0;
         }
 
-        if (args.Any(a => string.Equals(a, "--follow-watcher", StringComparison.OrdinalIgnoreCase)))
+        if (args.Any(a => string.Equals(a, "--follow-watcher", StringComparison.OrdinalIgnoreCase)
+                       || string.Equals(a, "--follow-antigravity", StringComparison.OrdinalIgnoreCase)))
         {
             bool fromExit = args.Any(a => string.Equals(a, "--from-exit", StringComparison.OrdinalIgnoreCase));
             return AppFollowService.RunFollowWatcher(fromExit);
@@ -64,41 +54,5 @@ internal static class Program
         var app = new App();
         app.InitializeComponent();
         return app.Run();
-    }
-
-    private static int HandleEnableFollowCommand()
-    {
-        var svc = new SettingsService();
-        var cfg = svc.Load();
-        if (!cfg.FollowAntigravity && !cfg.FollowGeminiApp)
-        {
-            cfg.FollowAntigravity = true;
-            cfg.FollowGeminiApp = true;
-            svc.Save(cfg);
-        }
-
-        var followSvc = new AppFollowService(svc);
-        followSvc.SyncAndApply(cfg);
-
-        bool signaledRunning = AppFollowService.TrySignalNamedEvent(AppFollowService.ReloadFollowEventName);
-        if (!signaledRunning && !string.IsNullOrWhiteSpace(Environment.ProcessPath))
-        {
-            try
-            {
-                AppFollowService.SignalStopFollowWatcher();
-                string exePath = Environment.ProcessPath!;
-                Process.Start(new ProcessStartInfo(exePath, "--follow-antigravity")
-                {
-                    WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory,
-                    UseShellExecute = true
-                });
-            }
-            catch
-            {
-                return 2;
-            }
-        }
-
-        return 0;
     }
 }

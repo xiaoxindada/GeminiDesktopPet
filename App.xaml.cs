@@ -15,7 +15,6 @@ public partial class App : System.Windows.Application
     private EventWaitHandle? _wakeEvent;
     private EventWaitHandle? _wakeAgEvent;
     private EventWaitHandle? _wakeGeminiEvent;
-    private EventWaitHandle? _reloadFollowEvent;
     private EventWaitHandle? _closeEvent;
     private CancellationTokenSource? _wakeCts;
     private bool _isExiting;
@@ -46,12 +45,6 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
-        if (e.Args.Length >= 2 && e.Args[0] == "--smoke-render")
-        {
-            RunSmokeRender(e.Args[1]);
-            return;
-        }
-
         bool followStartupArg = e.Args.Any(a => string.Equals(a, "--follow-antigravity", StringComparison.OrdinalIgnoreCase));
         string? wokenByArg = e.Args
             .FirstOrDefault(a => a.StartsWith("--woken-by:", StringComparison.OrdinalIgnoreCase))
@@ -73,14 +66,10 @@ public partial class App : System.Windows.Application
                     _ => AppFollowService.WakeEventName
                 };
                 AppFollowService.TrySignalNamedEvent(targetEventName);
-                AppFollowService.SignalStopFollowWatcher();
             }
             Shutdown();
             return;
         }
-
-        // Main GUI instance now owns follow detection; yield any headless cold-start watcher.
-        AppFollowService.SignalStopFollowWatcher();
 
         DispatcherUnhandledException += (_, args) =>
         {
@@ -115,7 +104,6 @@ public partial class App : System.Windows.Application
         _wakeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.WakeEventName);
         _wakeAgEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.WakeAgEventName);
         _wakeGeminiEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.WakeGeminiEventName);
-        _reloadFollowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.ReloadFollowEventName);
         _closeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.CloseEventName);
         _wakeCts = new CancellationTokenSource();
         StartWakeListener(_wakeCts.Token);
@@ -344,40 +332,15 @@ public partial class App : System.Windows.Application
 
     private void StartWakeListener(CancellationToken token)
     {
-        if (_wakeEvent == null || _wakeAgEvent == null || _wakeGeminiEvent == null || _reloadFollowEvent == null) return;
-        WaitHandle[] handles = [_wakeEvent, _wakeAgEvent, _wakeGeminiEvent, _reloadFollowEvent, token.WaitHandle];
+        if (_wakeEvent == null || _wakeAgEvent == null || _wakeGeminiEvent == null) return;
+        WaitHandle[] handles = [_wakeEvent, _wakeAgEvent, _wakeGeminiEvent, token.WaitHandle];
         Task.Run(() =>
         {
             while (!token.IsCancellationRequested)
             {
                 int idx = WaitHandle.WaitAny(handles, 400);
-                if (idx == WaitHandle.WaitTimeout || idx == 4 || token.IsCancellationRequested)
+                if (idx == WaitHandle.WaitTimeout || idx == 3 || token.IsCancellationRequested)
                     continue;
-
-                if (idx == 3)
-                {
-                    try
-                    {
-                        if (!Dispatcher.HasShutdownStarted)
-                        {
-                            Dispatcher.Invoke(() =>
-                            {
-                                var reloaded = _settingsService.Load();
-                                _settings.FollowAntigravity = reloaded.FollowAntigravity;
-                                _settings.FollowGeminiApp = reloaded.FollowGeminiApp;
-                                _followService.SyncAndApply(_settings);
-                                _petWindow.ApplySettingsToWindow();
-                                _trayService.SyncState(_settings);
-                                _settingsWindow?.RefreshFromSettings();
-                            });
-                        }
-                    }
-                    catch
-                    {
-                        break;
-                    }
-                    continue;
-                }
 
                 string? reason = idx switch
                 {
@@ -515,7 +478,6 @@ public partial class App : System.Windows.Application
                 {
                     _suppressWatcherOnExit = true;
                     AppFollowService.SignalStopFollowWatcher();
-                    _followService.CleanupLegacyFiles();
                 });
             _updateWindow.CheckCompleted += result => HandleUpdateResult(result, notifyUser: false);
             _updateWindow.Closed += (_, _) => _updateWindow = null;
@@ -604,9 +566,9 @@ public partial class App : System.Windows.Application
         try { _updateWindow?.Close(); } catch { }
         try { _petWindow.Close(); } catch { }
 
-        bool handoffFollowWatcher = !_suppressWatcherOnExit && AppFollowService.AnyFollowEnabled(_settings);
-        // Release the single-instance mutex before spawning the headless watcher so
-        // the watcher does not immediately exit upon seeing MainMutexName held.
+        bool handoffFollowWatcher = !_suppressWatcherOnExit
+            && AppFollowService.AnyFollowEnabled(_settings)
+            && !AppFollowService.IsFollowWatcherRunning();
         ReleaseSingleInstanceMutex();
         if (handoffFollowWatcher)
             AppFollowService.SpawnFollowWatcher(fromExit: true);
@@ -625,101 +587,6 @@ public partial class App : System.Windows.Application
         _instanceMutex = null;
     }
 
-    private void RunSmokeRender(string outDir)
-    {
-        System.IO.Directory.CreateDirectory(outDir);
-        string isolatedSettingsDir = System.IO.Path.Combine(outDir, "_smoke_settings");
-        var settingsService = new SettingsService(isolatedSettingsDir);
-        AppLogger.Initialize(false, isolatedSettingsDir);
-        var settings = new PetSettings();
-        var sprites = new SpriteManager();
-        var sound = new SoundService { Enabled = false };
-        var monitor = new SystemMonitorService();
-        var chat = new GeminiChatService();
-
-        var petChibi = new PetWindow(settings, settingsService, sprites, sound, monitor, chat);
-        var stdSettings = new PetSettings { StyleMode = PetStyleMode.Standard };
-        var petStd = new PetWindow(stdSettings, settingsService, sprites, sound, monitor, chat);
-        var characterSvc = new CharacterProfileService(isolatedSettingsDir);
-        var profile = new ProfileWindow(sprites, settings, characterSvc);
-        var editor = new CharacterEditorWindow(sprites, characterSvc);
-        var vbsFollow = new AppFollowService(settingsService);
-        var settingsWin = new SettingsWindow(settings, settingsService, vbsFollow);
-        var quotaSvc = new AntigravityQuotaService();
-        var quotaWin = new QuotaWindow(quotaSvc, autoFetch: false, enableAutoClose: false);
-        quotaWin.ShowActivated = false;
-        quotaWin.Left = -2000;
-        quotaWin.Top = 100;
-        quotaWin.Show();
-        quotaWin.UpdateLayout();
-        RenderWindowShot(quotaWin, System.IO.Path.Combine(outDir, "quota_loading.png"));
-        quotaWin.Hide();
-
-        try
-        {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
-            var liveSnap = quotaSvc.FetchQuotaAsync(cts.Token).GetAwaiter().GetResult();
-            quotaWin.ApplySnapshot(liveSnap);
-        }
-        catch
-        {
-        }
-
-        Window[] windows = [petChibi, petStd, profile, editor, settingsWin, quotaWin];
-        string[] names = ["pet_chibi.png", "pet_standard.png", "profile.png", "editor.png", "settings.png", "quota.png"];
-
-        for (int i = 0; i < windows.Length; i++)
-        {
-            var win = windows[i];
-            win.ShowActivated = false;
-            win.Left = -2000;
-            win.Top = 100;
-            win.Show();
-            win.UpdateLayout();
-            RenderWindowShot(win, System.IO.Path.Combine(outDir, names[i]));
-            win.Hide();
-        }
-
-        // Additional visual regression shots for walk rigs and Standard edge docking
-        petChibi.ShowActivated = false;
-        petChibi.Left = -2000;
-        petChibi.Top = 100;
-        petChibi.Show();
-        petChibi.ConfigureSmokePreview(PetStyleMode.Chibi, walking: true, animTimeSec: 0.20, DockSide.None);
-        RenderWindowShot(petChibi, System.IO.Path.Combine(outDir, "pet_chibi_walk.png"));
-        petChibi.ConfigureSmokePreview(PetStyleMode.Chibi, walking: false, animTimeSec: 0.0, DockSide.None, showQuickBar: true);
-        RenderWindowShot(petChibi, System.IO.Path.Combine(outDir, "pet_quickbar.png"));
-        petChibi.Hide();
-
-        petStd.ShowActivated = false;
-        petStd.Left = -2000;
-        petStd.Top = 100;
-        petStd.Show();
-        petStd.ConfigureSmokePreview(PetStyleMode.Standard, walking: true, animTimeSec: 0.25, DockSide.None);
-        RenderWindowShot(petStd, System.IO.Path.Combine(outDir, "pet_std_walk.png"));
-
-        petStd.ConfigureSmokePreview(PetStyleMode.Standard, walking: false, animTimeSec: 0.0, DockSide.Left);
-        RenderWindowShot(petStd, System.IO.Path.Combine(outDir, "pet_std_left.png"));
-
-        petStd.ConfigureSmokePreview(PetStyleMode.Standard, walking: false, animTimeSec: 0.0, DockSide.Right);
-        RenderWindowShot(petStd, System.IO.Path.Combine(outDir, "pet_std_right.png"));
-        petStd.Hide();
-
-        Shutdown(0);
-    }
-
-    private static void RenderWindowShot(Window win, string filePath)
-    {
-        int w = Math.Max(1, (int)Math.Ceiling(win.ActualWidth));
-        int h = Math.Max(1, (int)Math.Ceiling(win.ActualHeight));
-        var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(w, h, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
-        rtb.Render(win);
-        var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
-        enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
-        using var fs = System.IO.File.Create(filePath);
-        enc.Save(fs);
-    }
-
     protected override void OnExit(ExitEventArgs e)
     {
         _wakeCts?.Cancel();
@@ -727,7 +594,6 @@ public partial class App : System.Windows.Application
         _wakeEvent?.Dispose();
         _wakeAgEvent?.Dispose();
         _wakeGeminiEvent?.Dispose();
-        _reloadFollowEvent?.Dispose();
         _closeEvent?.Dispose();
         ReleaseSingleInstanceMutex();
         base.OnExit(e);
