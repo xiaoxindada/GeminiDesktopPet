@@ -10,5 +10,7 @@ TestResults/
 *.sln.docstates
 *.log
 *.tmp
+Logs/
+config.ini
 Thumbs.db
 Desktop.ini

@@ -32,8 +32,8 @@ public sealed class PetSettings
     public bool SystemMonitorEnabled { get; set; } = true;
     public bool ShowSpeechBubble { get; set; } = false;
     public bool AutoFestivalCostume { get; set; } = true;
-    public bool FollowAntigravity { get; set; } = false;
-    public bool FollowGeminiApp { get; set; } = false;
+    public bool FollowAntigravity { get; set; } = true;
+    public bool FollowGeminiApp { get; set; } = true;
     public bool SleepWhenAntigravityExits { get; set; } = false;
 
     /// <summary>

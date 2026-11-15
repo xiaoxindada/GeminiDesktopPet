@@ -170,7 +170,8 @@
                     <TextBlock x:Name="LogPathText" Text="当天日志：&lt;主程序目录&gt;\Logs\YYYY-MM-DD.log"
                                TextWrapping="Wrap" FontSize="11" Foreground="#A59EC9" Margin="0,0,0,8"/>
                     <WrapPanel>
-                        <Button Content="📂 打开日志目录" Padding="10,5" FontSize="11.5" Click="OpenLogFolderBtn_Click"/>
+                        <Button Content="📂 打开日志目录" Padding="10,5" FontSize="11.5" Margin="0,0,8,0" Click="OpenLogFolderBtn_Click"/>
+                        <Button Content="📄 打开 config.ini 配置" Padding="10,5" FontSize="11.5" Click="OpenConfigFileBtn_Click"/>
                     </WrapPanel>
                 </StackPanel>
             </Border>

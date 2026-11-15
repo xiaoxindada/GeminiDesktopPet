@@ -203,8 +203,7 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            _followService.CleanupLegacyFiles();
-            string folder = _settingsService.SettingsFolder;
+            string folder = Path.GetDirectoryName(_settingsService.SettingsFilePath) ?? _settingsService.SettingsFolder;
             Directory.CreateDirectory(folder);
             Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"")
             {
@@ -247,6 +246,24 @@ public partial class SettingsWindow : Window
         catch
         {
             // Ignore explorer launch errors.
+        }
+    }
+
+    private void OpenConfigFileBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (!File.Exists(_settingsService.SettingsFilePath))
+                _settingsService.Save(_settings);
+
+            Process.Start(new ProcessStartInfo("notepad.exe", $"\"{_settingsService.SettingsFilePath}\"")
+            {
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // Ignore launch errors.
         }
     }
 
