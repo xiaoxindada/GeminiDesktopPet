@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "启动桌宠 (main.py)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "联动跟随启动 (--follow-antigravity)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--follow-antigravity"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "配置清理工具 (clean_config.py)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/clean_config.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "清理工具版本检查 (clean_config.py --version)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/clean_config.py",
+      "args": ["--version"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "GeminiDesktopPet"
+dynamic = ["version"]
+description = "Gemini 桌面萌宠"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "CC-BY-NC-SA-4.0" }
+dependencies = [
+    "PySide6-Essentials>=6.7.0",
+    "google-genai>=3.2.0",
+    "psutil>=6.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.10.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[dependency-groups]
+build = [
+    "pyinstaller>=6.10.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.gui-scripts]
+gemini-desktop-pet = "cli:main"
+
+[project.scripts]
+gemini-desktop-pet-cli = "cli:main"
+gemini-desktop-pet-clean = "clean_config:main"
+
+[tool.setuptools]
+py-modules = ["app", "clean_config", "cli", "main"]
+
+[tool.setuptools.dynamic]
+version = { attr = "models.app_version.APP_VERSION" }
+
+[tool.setuptools.packages.find]
+include = ["models*", "services*", "themes*", "views*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

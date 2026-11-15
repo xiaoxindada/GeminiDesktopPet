@@ -1,16 +1,31 @@
-.vs/
-bin/
-obj/
+# Python / Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# PyInstaller / Build / Release
+build/
+dist/
+out/
 publish/
-PublishProfiles/
-TestResults/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
+*.spec
+!GeminiDesktopPet.spec
+
+# Runtime & OS
 *.log
 *.tmp
 Logs/
+user_config.json
+settings.json
+!.vscode/settings.json
 config.ini
+apikey.dat
+character.json
 Thumbs.db
 Desktop.ini
