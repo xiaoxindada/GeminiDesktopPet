@@ -35,7 +35,7 @@ def get_bundled_resource_dir() -> str:
     return str(base)
 
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.3.0"
 
 
 class AppVersion:
