@@ -10,13 +10,6 @@ namespace GeminiDesktopPet;
 
 public partial class App : System.Windows.Application
 {
-    private const string MutexName = "GeminiDesktopPet_SingleInstance_Mutex";
-    private const string WakeEventName = "GeminiDesktopPet_WakeSignal_Event";
-    private const string WakeAgEventName = "GeminiDesktopPet_WakeAgSignal_Event";
-    private const string WakeGeminiEventName = "GeminiDesktopPet_WakeGeminiSignal_Event";
-    private const string ReloadFollowEventName = "GeminiDesktopPet_ReloadFollowSignal_Event";
-    private const string CloseEventName = "GeminiDesktopPet_CloseSignal_Event";
-
     private Mutex? _instanceMutex;
     private bool _ownsMutex;
     private EventWaitHandle? _wakeEvent;
@@ -26,6 +19,7 @@ public partial class App : System.Windows.Application
     private EventWaitHandle? _closeEvent;
     private CancellationTokenSource? _wakeCts;
     private bool _isExiting;
+    private bool _suppressWatcherOnExit;
 
     private SettingsService _settingsService = null!;
     private CharacterProfileService _characterService = null!;
@@ -52,86 +46,9 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
-        if (e.Args.Length >= 3 && string.Equals(e.Args[0], "--apply-update", StringComparison.OrdinalIgnoreCase)
-            && int.TryParse(e.Args[1], out int parentPid))
-        {
-            var svc = new SettingsService();
-            var cfg = svc.Load();
-            AppLogger.Initialize(cfg.EnableRuntimeLog, e.Args[2]);
-            UpdateService.ApplyStagedUpdateAndRelaunch(parentPid, e.Args[2]);
-            Shutdown(0);
-            return;
-        }
-
         if (e.Args.Length >= 2 && e.Args[0] == "--smoke-render")
         {
             RunSmokeRender(e.Args[1]);
-            return;
-        }
-
-        if (e.Args.Any(a => string.Equals(a, "--close-pet", StringComparison.OrdinalIgnoreCase)))
-        {
-            try
-            {
-                using var closeEv = EventWaitHandle.OpenExisting(CloseEventName);
-                closeEv.Set();
-            }
-            catch
-            {
-            }
-            Shutdown(0);
-            return;
-        }
-
-        if (e.Args.Any(a => string.Equals(a, "--enable-follow", StringComparison.OrdinalIgnoreCase)
-                         || string.Equals(a, "--follow-flag:on", StringComparison.OrdinalIgnoreCase)))
-        {
-            var svc = new SettingsService();
-            var cfg = svc.Load();
-            if (!cfg.FollowAntigravity && !cfg.FollowGeminiApp)
-            {
-                cfg.FollowAntigravity = true;
-                cfg.FollowGeminiApp = true;
-                svc.Save(cfg);
-            }
-
-            var followSvc = new AppFollowService(svc);
-            followSvc.SyncAndApply(cfg);
-
-            bool signaledRunning = TrySignalNamedEvent(ReloadFollowEventName);
-            if (!signaledRunning && !string.IsNullOrWhiteSpace(Environment.ProcessPath))
-            {
-                try
-                {
-                    string exePath = Environment.ProcessPath!;
-                    Process.Start(new ProcessStartInfo(exePath, "--follow-antigravity")
-                    {
-                        WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory,
-                        UseShellExecute = true
-                    });
-                }
-                catch
-                {
-                    Shutdown(2);
-                    return;
-                }
-            }
-
-            Shutdown(0);
-            return;
-        }
-
-        if (e.Args.Any(a => string.Equals(a, "--disable-follow", StringComparison.OrdinalIgnoreCase)
-                         || string.Equals(a, "--follow-flag:off", StringComparison.OrdinalIgnoreCase)))
-        {
-            var svc = new SettingsService();
-            var cfg = svc.Load();
-            cfg.FollowAntigravity = false;
-            cfg.FollowGeminiApp = false;
-            svc.Save(cfg);
-            new AppFollowService(svc).DisableFollow();
-            TrySignalNamedEvent(ReloadFollowEventName);
-            Shutdown(0);
             return;
         }
 
@@ -143,31 +60,27 @@ public partial class App : System.Windows.Application
             ?.Trim()
             .ToLowerInvariant();
 
-        _instanceMutex = new Mutex(true, MutexName, out bool createdNew);
+        _instanceMutex = new Mutex(true, AppFollowService.MainMutexName, out bool createdNew);
         _ownsMutex = createdNew;
         if (!createdNew)
         {
             if (!followStartupArg)
             {
-                try
+                string targetEventName = wokenByArg switch
                 {
-                    string targetEventName = wokenByArg switch
-                    {
-                        "antigravity" => WakeAgEventName,
-                        "gemini" => WakeGeminiEventName,
-                        _ => WakeEventName
-                    };
-                    using var ev = EventWaitHandle.OpenExisting(targetEventName);
-                    ev.Set();
-                }
-                catch
-                {
-                    // Existing instance may be starting up or shutting down.
-                }
+                    "antigravity" => AppFollowService.WakeAgEventName,
+                    "gemini" => AppFollowService.WakeGeminiEventName,
+                    _ => AppFollowService.WakeEventName
+                };
+                AppFollowService.TrySignalNamedEvent(targetEventName);
+                AppFollowService.SignalStopFollowWatcher();
             }
             Shutdown();
             return;
         }
+
+        // Main GUI instance now owns follow detection; yield any headless cold-start watcher.
+        AppFollowService.SignalStopFollowWatcher();
 
         DispatcherUnhandledException += (_, args) =>
         {
@@ -199,11 +112,11 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        _wakeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeEventName);
-        _wakeAgEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeAgEventName);
-        _wakeGeminiEvent = new EventWaitHandle(false, EventResetMode.AutoReset, WakeGeminiEventName);
-        _reloadFollowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ReloadFollowEventName);
-        _closeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, CloseEventName);
+        _wakeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.WakeEventName);
+        _wakeAgEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.WakeAgEventName);
+        _wakeGeminiEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.WakeGeminiEventName);
+        _reloadFollowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.ReloadFollowEventName);
+        _closeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppFollowService.CloseEventName);
         _wakeCts = new CancellationTokenSource();
         StartWakeListener(_wakeCts.Token);
         StartCloseListener(_wakeCts.Token);
@@ -240,10 +153,13 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        _petWindow.Show();
-        string? wakeGreeting = FormatWakeGreeting(wokenByArg, followStartupArg);
+        string? detectedWakeKey = wokenByArg
+            ?? (followStartupArg ? AntigravityWatcherService.DetectRunningFollowedAppKey(_settings) : null);
+        string? wakeGreeting = FormatWakeGreeting(detectedWakeKey, followStartupArg);
         if (!string.IsNullOrEmpty(wakeGreeting))
             _petWindow.ShowAndGreet(wakeGreeting);
+        else
+            _petWindow.Show();
     }
 
     private void WireEvents()
@@ -268,7 +184,11 @@ public partial class App : System.Windows.Application
             _settingsWindow?.RefreshFromSettings();
         };
         _petWindow.Closed += (_, _) => GracefullyExit();
-        SessionEnding += (_, _) => GracefullyExit();
+        SessionEnding += (_, _) =>
+        {
+            _suppressWatcherOnExit = true;
+            GracefullyExit();
+        };
         _petWindow.ExitRequested += GracefullyExit;
 
         _trayService.ShowAndGreetRequested += () => _petWindow.ShowAndGreet();
@@ -420,20 +340,6 @@ public partial class App : System.Windows.Application
         AppLogger.Info("App", "进入托盘隐藏待机模式");
         _petWindow.Hide();
         _trayService.ShowBalloon("Gemini 娘待机中 💤", "已隐藏等待 Antigravity / Gemini 桌面 App 启动后自动唤醒（双击托盘图标可随时呼唤）。");
-    }
-
-    private static bool TrySignalNamedEvent(string eventName)
-    {
-        try
-        {
-            using var ev = EventWaitHandle.OpenExisting(eventName);
-            ev.Set();
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private void StartWakeListener(CancellationToken token)
@@ -605,7 +511,12 @@ public partial class App : System.Windows.Application
                 _settingsService,
                 GracefullyExit,
                 _lastUpdateResult,
-                beforeExitCleanup: () => _followService.CleanupLegacyFiles());
+                beforeExitCleanup: () =>
+                {
+                    _suppressWatcherOnExit = true;
+                    AppFollowService.SignalStopFollowWatcher();
+                    _followService.CleanupLegacyFiles();
+                });
             _updateWindow.CheckCompleted += result => HandleUpdateResult(result, notifyUser: false);
             _updateWindow.Closed += (_, _) => _updateWindow = null;
             created = true;
@@ -693,7 +604,25 @@ public partial class App : System.Windows.Application
         try { _updateWindow?.Close(); } catch { }
         try { _petWindow.Close(); } catch { }
 
+        bool handoffFollowWatcher = !_suppressWatcherOnExit && AppFollowService.AnyFollowEnabled(_settings);
+        // Release the single-instance mutex before spawning the headless watcher so
+        // the watcher does not immediately exit upon seeing MainMutexName held.
+        ReleaseSingleInstanceMutex();
+        if (handoffFollowWatcher)
+            AppFollowService.SpawnFollowWatcher(fromExit: true);
+
         Shutdown(0);
+    }
+
+    private void ReleaseSingleInstanceMutex()
+    {
+        if (_ownsMutex)
+        {
+            try { _instanceMutex?.ReleaseMutex(); } catch { }
+            _ownsMutex = false;
+        }
+        _instanceMutex?.Dispose();
+        _instanceMutex = null;
     }
 
     private void RunSmokeRender(string outDir)
@@ -800,12 +729,7 @@ public partial class App : System.Windows.Application
         _wakeGeminiEvent?.Dispose();
         _reloadFollowEvent?.Dispose();
         _closeEvent?.Dispose();
-        if (_ownsMutex)
-        {
-            try { _instanceMutex?.ReleaseMutex(); } catch { }
-            _ownsMutex = false;
-        }
-        _instanceMutex?.Dispose();
+        ReleaseSingleInstanceMutex();
         base.OnExit(e);
     }
 }

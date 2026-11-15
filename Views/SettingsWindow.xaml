@@ -102,7 +102,7 @@
                         </Border>
                     </WrapPanel>
 
-                    <TextBlock Text="勾选后由主程序在系统托盘原生监听 Antigravity.exe / Gemini.exe，并注册当前用户开机静默待机入口，不写入外部 VBS 脚本。"
+                    <TextBlock Text="勾选后由主程序与轻量后台监听原生检测 Antigravity.exe / Gemini.exe（含退出桌宠后冷启动），并注册当前用户开机静默待机入口，不写入外部 VBS 脚本。"
                                TextWrapping="Wrap" FontSize="11.5" Foreground="#9D95C8" Margin="0,0,0,8"/>
                     <CheckBox x:Name="FollowAntigravityCheck" Content="跟随 Antigravity 启动而启动" Foreground="#EAE6FF" Margin="0,4" Checked="FollowOptions_Changed" Unchecked="FollowOptions_Changed"/>
                     <CheckBox x:Name="FollowGeminiAppCheck" Content="跟随 Gemini 桌面 App 启动而启动" Foreground="#EAE6FF" Margin="0,4" Checked="FollowOptions_Changed" Unchecked="FollowOptions_Changed"/>
