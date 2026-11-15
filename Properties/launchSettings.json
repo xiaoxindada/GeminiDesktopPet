@@ -1,8 +1,0 @@
-{
-  "profiles": {
-    "GeminiDesktopPet": {
-      "commandName": "Project",
-      "workingDirectory": "$(ProjectDir)"
-    }
-  }
-}
