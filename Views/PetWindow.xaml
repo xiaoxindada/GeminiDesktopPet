@@ -120,14 +120,19 @@
                     HorizontalAlignment="Center">
                 <StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                        <Button x:Name="QuickPatBtn" Content="♥ 摸摸猫耳" Click="MenuPat_Click" Style="{StaticResource QuickPillBtn}" ToolTip="摸摸猫耳，增加好感度"/>
                         <Button Content="💬 对话" Click="ToggleChat_Click" Style="{StaticResource QuickPillBtn}" ToolTip="打开对话输入"/>
+                        <Button x:Name="QuickBubbleBtn" Content="💭 自动气泡" Click="ToggleSpeechBubble_Click" Style="{StaticResource QuickPillBtn}" ToolTip="开关自动弹出对话气泡"/>
                         <Button x:Name="QuickStyleBtn" Content="🎀 切换形象" Click="ToggleStyleMode_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换 Q 版 / 标准版形象"/>
-                        <Button x:Name="QuickFloatBtn" Content="✨ 悬浮" Click="ToggleAntiGravity_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换反重力悬浮"/>
-                        <Button x:Name="QuickPinBtn" Content="📌 固定(不乱跑)" Click="TogglePinOnDesktop_Click" Style="{StaticResource QuickPillBtn}" ToolTip="固定在桌面不乱跑"/>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,4,0,0">
+                        <Button x:Name="QuickFloatBtn" Content="✨ 悬浮" Click="ToggleAntiGravity_Click" Style="{StaticResource QuickPillBtn}" ToolTip="切换反重力悬浮"/>
+                        <Button x:Name="QuickPinBtn" Content="📌 固定(不乱跑)" Click="TogglePinOnDesktop_Click" Style="{StaticResource QuickPillBtn}" ToolTip="固定在桌面不乱跑"/>
                         <Button Content="📖 档案" Click="OpenProfile_Click" Style="{StaticResource QuickPillBtn}" ToolTip="查看角色设定与三视图"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,4,0,0">
                         <Button Content="✏️ 角色设定" Click="OpenCharacterEditor_Click" Style="{StaticResource QuickPillBtn}" ToolTip="可视化自定义角色设定"/>
+                        <Button x:Name="QuickLogBtn" Content="📝 运行日志" Click="ToggleRuntimeLog_Click" Style="{StaticResource QuickPillBtn}" ToolTip="开关运行日志记录（排错用）"/>
                         <Button Content="🆕 检查更新" Click="OpenUpdate_Click" Style="{StaticResource QuickPillBtn}" ToolTip="检查 GitHub Releases 更新与更新日志"/>
                     </StackPanel>
                 </StackPanel>

@@ -261,6 +261,10 @@ public partial class PetWindow : Window
         MenuFollowGeminiApp.IsChecked = _settings.FollowGeminiApp;
         MenuRuntimeLog.IsChecked = _settings.EnableRuntimeLog;
 
+        QuickBubbleBtn.Content = _settings.ShowSpeechBubble ? "💭 气泡已开" : "💭 自动气泡";
+        QuickBubbleBtn.ToolTip = _settings.ShowSpeechBubble
+            ? "当前已开启自动弹出对话气泡（点击关闭）"
+            : "当前已关闭自动弹出对话气泡（点击开启）";
         QuickStyleBtn.Content = "🎀 切换形象";
         QuickStyleBtn.ToolTip = _settings.StyleMode == PetStyleMode.Standard
             ? "当前：标准立绘版（点击切换至 Q 版）"
@@ -270,6 +274,10 @@ public partial class PetWindow : Window
         QuickPinBtn.ToolTip = pinned
             ? "已固定在桌面（点击恢复漫步）"
             : "固定在桌面不乱跑";
+        QuickLogBtn.Content = _settings.EnableRuntimeLog ? "📝 日志已开" : "📝 运行日志";
+        QuickLogBtn.ToolTip = _settings.EnableRuntimeLog
+            ? $"当前已开启运行日志，写入 Logs\\{System.IO.Path.GetFileName(AppLogger.GetDailyLogFilePath())}（点击关闭）"
+            : "当前已关闭运行日志记录（点击开启排错日志）";
 
         BondBadgeText.Text = $" · ♥ {_settings.Favorability}";
         if (!_settings.ShowSpeechBubble && !_isChatOpen)
@@ -1162,6 +1170,13 @@ public partial class PetWindow : Window
         SettingsSynced?.Invoke();
     }
 
+    private void ToggleSpeechBubble_Click(object sender, RoutedEventArgs e)
+    {
+        SetSpeechBubbleEnabled(!_settings.ShowSpeechBubble);
+        _settingsService.Save(_settings);
+        SettingsSynced?.Invoke();
+    }
+
     private void ToggleChat_Click(object sender, RoutedEventArgs e)
     {
         if (!_isChatOpen)
@@ -1532,9 +1547,8 @@ public partial class PetWindow : Window
     private void MenuStandby_Click(object sender, RoutedEventArgs e) => StandbyRequested?.Invoke();
     private void MenuExit_Click(object sender, RoutedEventArgs e) => ExitRequested?.Invoke();
 
-    private void MenuRuntimeLog_Click(object sender, RoutedEventArgs e)
+    private void SetRuntimeLogEnabled(bool enabled)
     {
-        bool enabled = MenuRuntimeLog.IsChecked;
         _settings.EnableRuntimeLog = enabled;
         AppLogger.SetEnabled(enabled);
         _settingsService.Save(_settings);
@@ -1545,8 +1559,15 @@ public partial class PetWindow : Window
             enabled
                 ? $"已开启运行日志，将写入 Logs\\{System.IO.Path.GetFileName(AppLogger.GetDailyLogFilePath())} 📝"
                 : "已关闭运行日志记录喵～",
-            TimeSpan.FromSeconds(4));
+            TimeSpan.FromSeconds(4),
+            force: true);
     }
+
+    private void ToggleRuntimeLog_Click(object sender, RoutedEventArgs e)
+        => SetRuntimeLogEnabled(!_settings.EnableRuntimeLog);
+
+    private void MenuRuntimeLog_Click(object sender, RoutedEventArgs e)
+        => SetRuntimeLogEnabled(MenuRuntimeLog.IsChecked);
 
     public void SyncCharacterProfile(CharacterProfile profile)
     {
