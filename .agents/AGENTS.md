@@ -20,6 +20,12 @@ Assisted-by: <当前模型的代号名称>
 4. **提交必须按职责拆分**：禁止将多个不相关或跨模块的改动打包为单次大提交；应按功能模块、逻辑边界或独立修复拆分为多个原子提交，保证每次提交职责单一且可独立编译。
 5. **发布新 Tag 使用 `gh` 发布 Release**：发布新的版本 Tag（如 `v0.3.0`）并获得用户允许推送后，先更新 `models/app_version.py` 中的 `APP_VERSION`、运行 `BuildRelease.bat --no-pause` 生成 `out\GeminiDesktopPet-<tag>-win-x64.zip` 与 `out\git-commit-summary.md`，创建并推送 Tag 后，使用 `gh release create`（若 Release 已存在则用 `gh release upload --clobber` 与 `gh release edit`）上传安装包并发布对应 Tag 的 GitHub Release。
 
+# 隐私与敏感信息规范
+
+1. **推送与提交时禁止生成或包含敏感数据**：编写代码、文档、注释、测试、预览图以及执行提交、推送或发布 Release 时，严禁生成、写入或推送任何真实或未脱敏的敏感数据（如 API Key、Token、账号邮箱、密码凭据、真实账户额度数据、含本机用户名的绝对路径，以及本地配置文件或运行日志产物）。
+2. **禁止生成或推送敏感描述**：在 `README.md`、更新日志、Release 说明与公开文档中，禁止暴露敏感配置字段键名、内部鉴权实现、内部 CLI / 进程探测与缓存文件细节或未公开的敏感技术描述；如涉及问题反馈指引，须提醒用户先脱敏后再提交。
+3. **推送前自检**：执行 `git commit` / `git push` 或使用 `gh` 发布 Release 前，必须确认工作区、变更内容与产物附件中均不包含上述敏感数据与敏感描述。
+
 # 代码注释规则
 
 1. **重要逻辑必须写注释**：编写或修改代码时，对重要、核心或复杂的逻辑始终添加清晰的注释。
