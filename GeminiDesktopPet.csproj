@@ -57,4 +57,8 @@
     <Copy SourceFiles="$(TargetDir)Uninstall.exe" DestinationFiles="$(PublishDir)Uninstall.exe" OverwriteReadOnlyFiles="true" />
   </Target>
 
+  <Target Name="RunLocalFollowStartupTests" AfterTargets="Build" Condition="'$(CI)' != 'true' and '$(GITHUB_ACTIONS)' != 'true' and Exists('$(ProjectDir)tools\TestFollowStartup.ps1') and Exists('$(TargetDir)GeminiDesktopPet.exe')">
+    <Exec Command="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ProjectDir)tools\TestFollowStartup.ps1&quot; -RepoRoot &quot;$(ProjectDir).&quot; -ExePath &quot;$(TargetDir)GeminiDesktopPet.exe&quot;" />
+  </Target>
+
 </Project>

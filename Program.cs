@@ -9,6 +9,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length >= 1
+            && string.Equals(args[0], "--test-follow-startup", StringComparison.OrdinalIgnoreCase))
+        {
+            string? reportPath = args.Length >= 2 ? args[1] : null;
+            return FollowStartupSelfTest.RunAll(reportPath);
+        }
+
         if (args.Length >= 3
             && string.Equals(args[0], "--apply-update", StringComparison.OrdinalIgnoreCase)
             && int.TryParse(args[1], out int parentPid))

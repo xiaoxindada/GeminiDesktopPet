@@ -28,3 +28,4 @@ Assisted-by: <当前模型的代号名称>
 # 开发完成后测试规则
 1. **只做有意义的必须测试**：开发完成后只做有意义的必须测试，否则直接交付结果。
 2. **编写或修改代码时必须通过安全测试**：严禁引入易触发杀毒/EDR 误报或存在安全隐患的实现（如向启动目录释放 VBS/批处理等脚本、`NtQueryInformationProcess` 跨进程内存读取、`CreateProcessW` 脱离作业/隐藏执行、`wscript`/`winmgmts` 调用、未经审计的 P/Invoke、硬编码密钥或 `cmd.exe /c` 隐藏脚本等）；每次编写或修改代码后须完成编译并运行 `tools/SecurityCheck.ps1` 通过安全校验（发布前同步校验构建产物），全部通过后方可提交或发布。
+3. **跟随应用启动功能回归测试**：涉及应用跟随启动、后台监听进程（`--follow-watcher`）、进程检测（`AntigravityWatcherService` / `AppFollowService`）或配置文件（`config.ini`）的修改后，必须运行 `tools/TestFollowStartup.ps1` 并确保全部测试用例通过，防止跟随启动问题重复出现。

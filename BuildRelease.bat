@@ -99,6 +99,15 @@ if errorlevel 1 (
     goto :fail
 )
 
+if /i not "%GITHUB_ACTIONS%"=="true" if /i not "%CI%"=="true" (
+    echo [Test] Running local follow-app startup regression tests...
+    powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%ROOT%tools\TestFollowStartup.ps1" -RepoRoot "%ROOT%." -ExePath "%STAGE_DIR%\GeminiDesktopPet.exe"
+    if errorlevel 1 (
+        echo [ERROR] Follow-app startup regression test failed. Aborting package creation.
+        goto :fail
+    )
+)
+
 echo [5/6] Generating git commit summary: "%GIT_SUMMARY_PATH%"
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%ROOT%tools\GenerateGitSummary.ps1" -RepoRoot "%ROOT%." -Version "%APP_VERSION%" -OutputPath "%GIT_SUMMARY_PATH%"
 if errorlevel 1 (
