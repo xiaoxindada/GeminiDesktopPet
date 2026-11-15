@@ -93,6 +93,8 @@ public partial class PetWindow : Window
     // Hover / Chat UI state
     private bool _isHovering;
     private bool _isBubbleHovered;
+    private bool _suppressLoadedDefaultGreeting;
+    private bool _isForcedBubbleActive;
     private bool _isChatOpen;
     private DateTime _lastMonitorBubbleUtc = DateTime.MinValue;
 
@@ -145,6 +147,7 @@ public partial class PetWindow : Window
         };
         _bubbleTimer.Tick += (_, _) =>
         {
+            _isForcedBubbleActive = false;
             if (!_isChatOpen && !_isBubbleHovered)
                 SpeechBubble.Visibility = Visibility.Collapsed;
             _bubbleTimer.Stop();
@@ -178,12 +181,19 @@ public partial class PetWindow : Window
         RestoreOrInitPosition();
         _sysMonitor.Sample(); // prime baseline
 
-        // Show time-of-day or festival greeting on launch
-        var greetState = CharacterLore.DetectFestivalState(DateTime.Now)
-                         ?? CharacterLore.GetTimeGreetingState(DateTime.Now);
-        SetTemporaryPose(greetState, TimeSpan.FromSeconds(5.5), CharacterLore.PickLineForState(greetState));
-        _sound.Play(PetSoundEffect.Sparkle);
-        SpawnStarBurst(Width * 0.5, Height * 0.65, 8);
+        if (_suppressLoadedDefaultGreeting)
+        {
+            _suppressLoadedDefaultGreeting = false;
+        }
+        else
+        {
+            // Show time-of-day or festival greeting on launch
+            var greetState = CharacterLore.DetectFestivalState(DateTime.Now)
+                             ?? CharacterLore.GetTimeGreetingState(DateTime.Now);
+            SetTemporaryPose(greetState, TimeSpan.FromSeconds(5.5), CharacterLore.PickLineForState(greetState));
+            _sound.Play(PetSoundEffect.Sparkle);
+            SpawnStarBurst(Width * 0.5, Height * 0.65, 8);
+        }
 
         _lastTickUtc = DateTime.UtcNow;
         _frameTimer.Start();
@@ -199,8 +209,11 @@ public partial class PetWindow : Window
 
     private void PetWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        _settings.LastLeft = Left;
-        _settings.LastTop = Top;
+        if (!double.IsNaN(Left) && !double.IsNaN(Top))
+        {
+            _settings.LastLeft = Left;
+            _settings.LastTop = Top;
+        }
         _settingsService.Save(_settings);
     }
 
@@ -280,7 +293,7 @@ public partial class PetWindow : Window
             : "当前已关闭运行日志记录（点击开启排错日志）";
 
         BondBadgeText.Text = $" · ♥ {_settings.Favorability}";
-        if (!_settings.ShowSpeechBubble && !_isChatOpen)
+        if (!_settings.ShowSpeechBubble && !_isChatOpen && !_isForcedBubbleActive)
         {
             _bubbleTimer.Stop();
             SpeechBubble.Visibility = Visibility.Collapsed;
@@ -364,18 +377,25 @@ public partial class PetWindow : Window
 
     public void ShowAndGreet(string? customMessage = null)
     {
+        if (!IsLoaded)
+            _suppressLoadedDefaultGreeting = true;
+
+        if (double.IsNaN(Left) || double.IsNaN(Top))
+            RestoreOrInitPosition();
         if (!IsVisible) Show();
+
+        bool forceWakeBubble = !string.IsNullOrWhiteSpace(customMessage);
         if (_settings.DockedSide != DockSide.None)
         {
             ReanchorDockedPosition();
             var dockPose = _settings.DockedSide == DockSide.Left ? PetState.EdgeLeftPeek : PetState.EdgeRightPeek;
-            SetTemporaryPose(dockPose, TimeSpan.FromSeconds(5.0), customMessage ?? CharacterLore.PickLine("edge"));
+            SetTemporaryPose(dockPose, TimeSpan.FromSeconds(5.0), customMessage ?? CharacterLore.PickLine("edge"), forceWakeBubble);
         }
         else
         {
             ClampInsideNearestWorkArea();
             var greet = CharacterLore.GetTimeGreetingState(DateTime.Now);
-            SetTemporaryPose(greet, TimeSpan.FromSeconds(5.0), customMessage ?? CharacterLore.PickLineForState(greet));
+            SetTemporaryPose(greet, TimeSpan.FromSeconds(5.0), customMessage ?? CharacterLore.PickLineForState(greet), forceWakeBubble);
         }
         _sound.Play(PetSoundEffect.Sparkle);
         SpawnStarBurst(Width * 0.5, Height - PetImage.Height * 0.55, 7);
@@ -668,7 +688,7 @@ public partial class PetWindow : Window
         return PetState.Idle;
     }
 
-    private void SetTemporaryPose(PetState state, TimeSpan duration, string? bubbleMessage = null)
+    private void SetTemporaryPose(PetState state, TimeSpan duration, string? bubbleMessage = null, bool forceBubble = false)
     {
         _isWalking = false;
         _isSleeping = state == PetState.Sleeping;
@@ -677,7 +697,7 @@ public partial class PetWindow : Window
         RefreshSpriteVisual();
 
         if (!string.IsNullOrWhiteSpace(bubbleMessage))
-            ShowBubble(bubbleMessage, duration);
+            ShowBubble(bubbleMessage, duration, force: forceBubble);
     }
 
     private void InitializeWalkRigs()
@@ -1127,6 +1147,7 @@ public partial class PetWindow : Window
         if (!force && !_settings.ShowSpeechBubble && !_isChatOpen)
             return;
 
+        _isForcedBubbleActive = force;
         BubbleText.Text = message;
         SpeechBubble.Visibility = Visibility.Visible;
         _bubbleTimer.Stop();
