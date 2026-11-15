@@ -18,7 +18,7 @@ from models.app_version import AppVersion
 from tools.git_summary import generate_git_summary
 
 REQUIRED_RELEASE_DOCS = ("README.md", "CREDITS.md", "LICENSE")
-REQUIRED_BUILD_FILES = (*REQUIRED_RELEASE_DOCS, "GeminiDesktopPet.spec")
+REQUIRED_BUILD_FILES = (*REQUIRED_RELEASE_DOCS, "main.py", "clean_config.py")
 EXPECTED_STAGE_ENTRIES = (
     "CREDITS.md",
     "CleanConfig.exe",
@@ -27,6 +27,130 @@ EXPECTED_STAGE_ENTRIES = (
     "README.md",
     "_internal",
 )
+
+
+def build_pyinstaller_spec_content(repo_root: Path) -> str:
+    """生成用于双 EXE 打包的 PyInstaller .spec 内容，绑定仓库根目录。"""
+    resolved_root = repr(str(repo_root.resolve()))
+    return f"""# -*- mode: python ; coding: utf-8 -*-
+import os
+from PyInstaller.utils.hooks import collect_submodules
+
+ROOT_DIR = {resolved_root}
+ICON_PATH = os.path.join(ROOT_DIR, "Assets", "AppIcon.ico")
+
+main_hiddenimports = collect_submodules("google.genai")
+gui_excludes = [
+    "tkinter",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.QtWebEngineQuick",
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.Qt3DCore",
+    "PySide6.QtMultimedia",
+    "PySide6.QtNetwork",
+]
+
+a_main = Analysis(
+    [os.path.join(ROOT_DIR, "main.py")],
+    pathex=[ROOT_DIR],
+    binaries=[],
+    datas=[(os.path.join(ROOT_DIR, "Assets"), "Assets")],
+    hiddenimports=main_hiddenimports,
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=gui_excludes,
+    noarchive=False,
+    optimize=0,
+)
+pyz_main = PYZ(a_main.pure)
+
+exe_main = EXE(
+    pyz_main,
+    a_main.scripts,
+    [],
+    exclude_binaries=True,
+    name="GeminiDesktopPet",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[ICON_PATH],
+)
+
+# CleanConfig.exe 仅包含无 GUI 的清理入口与服务模块，与主程序共用同一份 _internal 依赖
+a_clean = Analysis(
+    [os.path.join(ROOT_DIR, "clean_config.py")],
+    pathex=[ROOT_DIR],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=[
+        "tkinter",
+        "PySide6",
+        "shiboken6",
+        "google",
+        "PIL",
+        "unittest",
+    ],
+    noarchive=False,
+    optimize=0,
+)
+pyz_clean = PYZ(a_clean.pure)
+
+exe_clean = EXE(
+    pyz_clean,
+    a_clean.scripts,
+    [],
+    exclude_binaries=True,
+    name="CleanConfig",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[ICON_PATH],
+)
+
+coll = COLLECT(
+    exe_main,
+    exe_clean,
+    a_main.binaries,
+    a_main.datas,
+    a_clean.binaries,
+    a_clean.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="GeminiDesktopPet",
+)
+"""
+
+
+def write_pyinstaller_spec(repo_root: Path, output_path: Path) -> Path:
+    """将动态生成的 PyInstaller .spec 写入构建临时目录。"""
+    content = build_pyinstaller_spec_content(repo_root)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
 
 
 def resolve_release_version(repo_root: Path, output_path: Path) -> str:
@@ -92,6 +216,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--repo-root", type=Path, default=_REPO_ROOT)
     p_ver.add_argument("--output", type=Path, required=True)
 
+    p_spec = subparsers.add_parser("generate-spec", help="生成 PyInstaller .spec 至构建目录")
+    p_spec.add_argument("--repo-root", type=Path, default=_REPO_ROOT)
+    p_spec.add_argument("--output", type=Path, required=True)
+
     p_stage = subparsers.add_parser("finalize-stage", help="复制发布文档并校验输出目录结构")
     p_stage.add_argument("--repo-root", type=Path, default=_REPO_ROOT)
     p_stage.add_argument("--stage-dir", type=Path, required=True)
@@ -111,6 +239,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     try:
         if args.command == "resolve-version":
             resolve_release_version(args.repo_root, args.output)
+        elif args.command == "generate-spec":
+            write_pyinstaller_spec(args.repo_root, args.output)
         elif args.command == "finalize-stage":
             finalize_stage_dir(args.repo_root, args.stage_dir)
         elif args.command == "create-archive":

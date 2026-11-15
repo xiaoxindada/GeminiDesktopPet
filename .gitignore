@@ -15,7 +15,9 @@ dist/
 out/
 publish/
 *.spec
-!GeminiDesktopPet.spec
+*.toc
+*.pkg
+*.pyz
 
 # Runtime & OS
 *.log

@@ -56,6 +56,14 @@ if not defined APP_VERSION (
     goto finish
 )
 
+set "SPEC_PATH=%BUILD_WORK%\GeminiDesktopPet.spec"
+"%PYTHON_EXE%" -m tools.release_package generate-spec --repo-root "%REPO_ROOT%" --output "%SPEC_PATH%"
+if errorlevel 1 (
+    echo [ERROR] Failed to generate PyInstaller spec file!
+    set "EXIT_CODE=1"
+    goto finish
+)
+
 set "ZIP_PATH=%OUTPUT_BASE%\GeminiDesktopPet-v%APP_VERSION%-win-x64.zip"
 set "SUMMARY_PATH=%OUTPUT_BASE%\git-commit-summary.md"
 if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
@@ -68,7 +76,7 @@ echo [3/5] Building GeminiDesktopPet.exe ^& CleanConfig.exe (--onedir) via PyIns
     --clean ^
     --distpath "%OUTPUT_BASE%" ^
     --workpath "%BUILD_WORK%\main" ^
-    "%REPO_ROOT%\GeminiDesktopPet.spec"
+    "%SPEC_PATH%"
 if errorlevel 1 (
     echo [ERROR] PyInstaller build failed!
     set "EXIT_CODE=1"

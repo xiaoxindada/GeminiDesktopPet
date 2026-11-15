@@ -33,7 +33,7 @@ python main.py
 python main.py --close-pet --stop-all
 python clean_config.py
 
-# Windows 一键打包（基于 GeminiDesktopPet.spec）
+# Windows 一键打包（构建脚本自动生成 PyInstaller 配置至 build 目录）
 BuildRelease.bat --no-pause
 ```
 
