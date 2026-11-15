@@ -78,8 +78,6 @@ echo [4/6] Placing user scripts ^& docs together with GeminiDesktopPet.exe...
 for %%F in (
     "启动Gemini娘桌宠.bat"
     "关闭Gemini娘桌宠.bat"
-    "开启跟随应用联动.bat"
-    "关闭跟随应用联动.bat"
     "README.md"
     "VERSION"
 ) do (

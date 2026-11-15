@@ -20,6 +20,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Uninstaller\**" />
+    <None Include="Uninstaller\Uninstaller.cs" />
     <Resource Include="Assets\AppIcon.ico" />
   </ItemGroup>
 
@@ -36,9 +38,6 @@
     <Content Include="Assets\WalkRig\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="Scripts\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
     <Content Include="CREDITS.md">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -49,5 +48,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
+  <Target Name="BuildStandaloneUninstaller" AfterTargets="Build" Condition="Exists('C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe') and Exists('$(ProjectDir)Uninstaller\Uninstaller.cs')">
+    <Exec Command="&quot;C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe&quot; /nologo /target:winexe /optimize+ /win32icon:&quot;$(ProjectDir)Assets\AppIcon.ico&quot; /out:&quot;$(TargetDir)Uninstall.exe&quot; &quot;$(ProjectDir)Uninstaller\Uninstaller.cs&quot;" />
+  </Target>
+
+  <Target Name="PublishStandaloneUninstaller" AfterTargets="Publish" Condition="Exists('$(TargetDir)Uninstall.exe')">
+    <Copy SourceFiles="$(TargetDir)Uninstall.exe" DestinationFiles="$(PublishDir)Uninstall.exe" OverwriteReadOnlyFiles="true" />
+  </Target>
 
 </Project>
