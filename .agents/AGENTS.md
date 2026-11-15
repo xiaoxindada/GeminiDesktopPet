@@ -18,6 +18,7 @@ Assisted-by: <当前模型的代号名称>
 2. **禁止未经允许不要 push**：永远不要在用户不允许的情况下 push 任何本地提交，除非用户明确指定。
 3. **提交前保持标准格式化**：代码提交 git 时需要保持标准格式化。
 4. **提交必须按职责拆分**：禁止将多个不相关或跨模块的改动打包为单次大提交；应按功能模块、逻辑边界或独立修复拆分为多个原子提交，保证每次提交职责单一且可独立编译。
+5. **发布新 Tag 使用 `gh` 发布 Release**：发布新的版本 Tag（如 `v0.3.0`）并获得用户允许推送后，先更新 `models/app_version.py` 中的 `APP_VERSION`、运行 `BuildRelease.bat --no-pause` 生成 `out\GeminiDesktopPet-<tag>-win-x64.zip` 与 `out\git-commit-summary.md`，创建并推送 Tag 后，使用 `gh release create`（若 Release 已存在则用 `gh release upload --clobber` 与 `gh release edit`）上传安装包并发布对应 Tag 的 GitHub Release。
 
 # 代码注释规则
 
@@ -27,5 +28,4 @@ Assisted-by: <当前模型的代号名称>
 
 # 开发完成后测试规则
 1. **只做有意义的必须测试**：开发完成后只做有意义的必须测试，否则直接交付结果。
-2. **编写或修改代码时必须通过安全测试**：严禁引入易触发杀毒/EDR 误报或存在安全隐患的实现（如向启动目录释放 VBS/批处理等脚本、`NtQueryInformationProcess` 跨进程内存读取、`CreateProcessW` 脱离作业/隐藏执行、`wscript`/`winmgmts` 调用、未经审计的 P/Invoke、硬编码密钥或 `cmd.exe /c` 隐藏脚本等）；每次编写或修改代码后须完成编译并运行 `tools/SecurityCheck.ps1` 通过安全校验（发布前同步校验构建产物），全部通过后方可提交或发布。
-3. **跟随应用启动功能回归测试**：涉及应用跟随启动、后台监听进程（`--follow-watcher`）、进程检测（`AntigravityWatcherService` / `AppFollowService`）或配置文件（`config.ini`）的修改后，必须运行 `tools/TestFollowStartup.ps1` 并确保全部测试用例通过，防止跟随启动问题重复出现。
+
