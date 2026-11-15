@@ -158,7 +158,7 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             bat_bytes = (REPO_ROOT / bat_name).read_bytes()
             self.assertFalse(any(b >= 128 for b in bat_bytes), f"{bat_name} must be pure ASCII")
             self.assertNotIn(b"\n", bat_bytes.replace(b"\r\n", b""), f"{bat_name} must use CRLF")
-        self.assertTrue((REPO_ROOT / "GeminiDesktopPet.spec").is_file())
+        self.assertFalse((REPO_ROOT / "GeminiDesktopPet.spec").exists())
         self.assertTrue((REPO_ROOT / "clean_config.py").is_file())
         self.assertTrue((REPO_ROOT / "tools" / "release_package.py").is_file())
         self.assertFalse((REPO_ROOT / "CleanConfig.bat").exists())
@@ -166,7 +166,15 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
         self.assertFalse((REPO_ROOT / "tools" / "security_check.py").exists())
         bat_text = (REPO_ROOT / "BuildRelease.bat").read_text(encoding="ascii")
         self.assertNotIn('"%PYTHON_EXE%" -c', bat_text)
-        self.assertIn("-m tools.release_package", bat_text)
+        self.assertIn("-m tools.release_package generate-spec", bat_text)
+        gitignore_lines = {
+            line.strip()
+            for line in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        self.assertIn("build/", gitignore_lines)
+        self.assertIn("*.spec", gitignore_lines)
+        self.assertNotIn("!GeminiDesktopPet.spec", gitignore_lines)
 
     def test_release_package_tool_helpers(self) -> None:
         import hashlib
@@ -177,6 +185,7 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             create_release_archive,
             finalize_stage_dir,
             resolve_release_version,
+            write_pyinstaller_spec,
         )
 
         with tempfile.TemporaryDirectory() as tmp_root:
@@ -192,6 +201,14 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             ver_file = root / "build" / "version.txt"
             version = resolve_release_version(repo, ver_file)
             self.assertEqual(ver_file.read_text(encoding="ascii"), version)
+
+            spec_file = root / "build" / "pyinstaller" / "GeminiDesktopPet.spec"
+            generated_spec = write_pyinstaller_spec(repo, spec_file)
+            self.assertEqual(generated_spec, spec_file)
+            spec_text = spec_file.read_text(encoding="utf-8")
+            self.assertIn(repr(str(repo.resolve())), spec_text)
+            self.assertIn('name="GeminiDesktopPet"', spec_text)
+            self.assertIn('name="CleanConfig"', spec_text)
 
             # 模拟 PyInstaller 产出的可执行文件与 _internal 目录
             (stage / "GeminiDesktopPet.exe").write_bytes(b"exe")
