@@ -1,4 +1,4 @@
-"""Antigravity 剩余额度与 AI Credits 紧凑悬浮气泡卡片窗口。"""
+"""Antigravity 剩余额度紧凑悬浮气泡卡片窗口。"""
 
 from __future__ import annotations
 
@@ -46,6 +46,9 @@ class _QuotaFetchWorker(QThread):
 class QuotaWindow(QWidget):
     """紧贴桌宠一侧显示的无边框暗紫星夜卡片，实时呈现 Antigravity 额度。"""
 
+    query_started = Signal()
+    query_finished = Signal(object)
+
     def __init__(
         self,
         quota_service: AntigravityQuotaService,
@@ -61,7 +64,7 @@ class QuotaWindow(QWidget):
         self._drag_offset: Optional[QPoint] = None
         self._worker: Optional[_QuotaFetchWorker] = None
         self._last_snapshot: Optional[QuotaSnapshot] = None
-        self._full_meta_text: str = "AI Credits: -  ·  --:--"
+        self._full_meta_text: str = "套餐 -  ·  --:--"
 
         self.setWindowTitle("✦ Antigravity 剩余额度")
         self.setWindowIcon(TrayIconService.load_app_icon())
@@ -203,7 +206,7 @@ class QuotaWindow(QWidget):
         ftr = QHBoxLayout()
         ftr.setContentsMargins(0, 2, 0, 0)
         ftr.setSpacing(6)
-        self._meta_label = QLabel("AI Credits: -  ·  --:--")
+        self._meta_label = QLabel("套餐 -  ·  --:--")
         self._meta_label.setMinimumWidth(0)
         self._meta_label.setStyleSheet("color: #877DB7; font-size: 10.5px; border: none; background: transparent;")
         ftr.addWidget(self._meta_label, 1)
@@ -332,6 +335,7 @@ class QuotaWindow(QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
 
+        self.query_started.emit()
         worker = _QuotaFetchWorker(self._quota_service, self)
         worker.finished_snapshot.connect(self._on_fetch_finished)
         self._worker = worker
@@ -341,6 +345,7 @@ class QuotaWindow(QWidget):
         self._refresh_btn.setEnabled(True)
         self._refresh_btn.setText("↻")
         self.apply_snapshot(snap)
+        self.query_finished.emit(snap)
 
     def apply_snapshot(self, snapshot: QuotaSnapshot) -> None:
         self._last_snapshot = snapshot
@@ -378,15 +383,16 @@ class QuotaWindow(QWidget):
         self._header_title.setText("Antigravity 剩余额度")
         self._copy_btn.show()
 
-        credits_txt = f"AI Credits: {snap.remaining_credits}" if snap.remaining_credits is not None else "AI Credits: -"
-        model_txt = f" · {snap.active_cli_model}" if snap.active_cli_model else ""
+        plan_txt = snap.account_plan or "套餐未知"
         fetched_local = snap.fetched_at.astimezone().strftime("%H:%M")
-        full_meta = f"{credits_txt} · {fetched_local}{model_txt}"
+        full_meta = f"{plan_txt} · {fetched_local}"
         self._full_meta_text = full_meta
         self._update_elided_meta_text()
         tip_lines = [full_meta]
-        if snap.agy_path:
-            tip_lines.append(f"数据源：{snap.agy_path}")
+        if snap.account_email:
+            tip_lines.append(f"账号：{snap.account_email}")
+        if snap.source_detail:
+            tip_lines.append(f"数据源：{snap.source_detail}")
         self._meta_label.setToolTip("\n".join(tip_lines))
 
         self._clear_content()
@@ -465,7 +471,7 @@ class QuotaWindow(QWidget):
             self._auto_close_timer.start()
 
     def _update_elided_meta_text(self) -> None:
-        """在 QSS 字体生效后按剩余宽度平滑省略底部模型元信息。"""
+        """在 QSS 字体生效后按剩余宽度平滑省略底部套餐元信息。"""
         self._meta_label.ensurePolished()
         if self._meta_label.isVisible() and self._meta_label.width() > 40:
             avail_w = self._meta_label.width()

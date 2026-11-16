@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -400,31 +399,6 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
                 self.assertFalse(SettingsService.is_startup_enabled())
                 self.assertFalse(AppFollowService.is_follow_watcher_run_enabled())
 
-    def test_agy_subprocess_hides_console_window(self) -> None:
-        captured: dict[str, object] = {}
-
-        class _FakeProc:
-            returncode = 0
-
-            def communicate(self, timeout: float = 10.0) -> tuple[str, str]:
-                return "{}", ""
-
-        def _fake_popen(cmd, **kwargs):
-            captured["cmd"] = cmd
-            captured["kwargs"] = kwargs
-            return _FakeProc()
-
-        with patch("services.antigravity_quota_service.subprocess.Popen", side_effect=_fake_popen):
-            code, out, _ = AntigravityQuotaService._run_agy_command("agy.exe", ["--print", "/quota"], 5.0)
-
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "{}")
-        kwargs = captured["kwargs"]
-        assert isinstance(kwargs, dict)
-        if os.name == "nt":
-            self.assertEqual(kwargs.get("creationflags"), 0x08000000)
-            self.assertIsNone(kwargs.get("startupinfo"))
-
     def test_quota_window_full_display_and_non_overlapping_placement(self) -> None:
         app = QApplication.instance() or QApplication([])
         _ = app
@@ -454,10 +428,9 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             snap = QuotaSnapshot(
                 success=True,
                 error_message=None,
-                agy_path="agy.exe",
-                active_cli_model="Gemini 4 Argon (High)",
-                remaining_credits=0,
-                upgrade_uri=None,
+                source_detail="Antigravity app · pid 1234 · http://127.0.0.1:56789",
+                account_email=None,
+                account_plan="Google AI Pro",
                 overview_description=None,
                 fetched_at=datetime.now(timezone.utc),
                 groups=[

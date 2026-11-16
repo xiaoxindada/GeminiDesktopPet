@@ -29,10 +29,9 @@ def _sample_snapshot() -> QuotaSnapshot:
     return QuotaSnapshot(
         success=True,
         error_message=None,
-        agy_path="agy.exe",
-        active_cli_model="Gemini 4 Hydrogen",
-        remaining_credits=12,
-        upgrade_uri=None,
+        source_detail="Antigravity app · pid 1234 · http://127.0.0.1:56789",
+        account_email=None,
+        account_plan="Google AI Pro",
         overview_description=None,
         fetched_at=datetime.now(timezone.utc),
         groups=[

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import os
-from pathlib import Path
 import tempfile
 import unittest
 
@@ -50,10 +49,9 @@ class TestWindowLayoutFixes(unittest.TestCase):
         snap = QuotaSnapshot(
             success=True,
             error_message=None,
-            agy_path="C:/Users/demo/AppData/Local/agy/bin/agy.exe",
-            active_cli_model="Gemini 4 Argon (High)",
-            remaining_credits=0,
-            upgrade_uri=None,
+            source_detail="Antigravity app · pid 1234 · http://127.0.0.1:56789",
+            account_email=None,
+            account_plan="Google AI Pro",
             overview_description=None,
             fetched_at=now,
             groups=[
@@ -81,16 +79,15 @@ class TestWindowLayoutFixes(unittest.TestCase):
         self.assertFalse(win._scroll.verticalScrollBar().isVisible())
         self.assertGreaterEqual(win._scroll.height(), win._content_container.sizeHint().height())
         self.assertLess(win._meta_label.geometry().right(), win._copy_btn.geometry().left())
-        self.assertIn("Gemini 4 Argon (High)", win._meta_label.text())
+        self.assertIn("Google AI Pro", win._meta_label.text())
 
         # 超长模型名应平滑省略，不与复制按钮重叠
         long_snap = QuotaSnapshot(
             success=True,
             error_message=None,
-            agy_path=snap.agy_path,
-            active_cli_model="Gemini 4 Argon Ultra Experimental Extended Long Name (High)",
-            remaining_credits=120,
-            upgrade_uri=None,
+            source_detail=snap.source_detail,
+            account_email=None,
+            account_plan="Google AI Ultra Experimental Extended Long Name Pro",
             overview_description=None,
             fetched_at=now,
             groups=snap.groups,
@@ -108,10 +105,9 @@ class TestWindowLayoutFixes(unittest.TestCase):
         overflow_snap = QuotaSnapshot(
             success=True,
             error_message=None,
-            agy_path=snap.agy_path,
-            active_cli_model="Gemini 4 Argon",
-            remaining_credits=10,
-            upgrade_uri=None,
+            source_detail=snap.source_detail,
+            account_email=None,
+            account_plan="Google AI Pro",
             overview_description=None,
             fetched_at=now,
             groups=[QuotaGroupInfo(name="Overflow Models", buckets=many_buckets)],

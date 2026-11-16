@@ -1,19 +1,53 @@
-"""基于官方 Antigravity CLI (agy) 的模型配额与 AI Credits 查询服务。"""
+"""通过本机 Antigravity 语言服务器的回环 RPC 查询模型剩余额度（5 小时 / 每周）。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
-import shutil
-import subprocess
-import time
-from typing import Optional
+from typing import Any, Optional
+
+import psutil
+import requests
 
 from services.app_logger import AppLogger
-from services.win32_ipc import subprocess_hidden_kwargs
+
+try:
+    import urllib3
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+
+_LS_SERVICE = "exa.language_server_pb.LanguageServerService"
+_RPC_HOST = "127.0.0.1"
+_CONNECT_TIMEOUT_S = 2.0
+_READ_TIMEOUT_S = 5.0
+_KIND_ORDER = {"app": 0, "ide": 1}
+_IDE_MARKERS = (
+    "antigravity ide.app",
+    "--app_data_dir antigravity-ide",
+    "--app_data_dir=antigravity-ide",
+    "extensions\\antigravity\\bin\\language_server",
+    "extensions/antigravity/bin/language_server",
+)
+# Hub 版把端口与令牌写在 daemon 目录的 hub_<port>.json 里。
+_HUB_DIRS = (
+    Path.home() / ".gemini" / "antigravity" / "daemon",
+    Path.home() / ".gemini" / "antigravity-cli" / "daemon",
+)
+_PROBE_METADATA = {
+    "ideName": "antigravity",
+    "extensionName": "antigravity",
+    "ideVersion": "unknown",
+    "locale": "en",
+}
+_LEGACY_POOL_ORDER = ("Gemini Pro", "Gemini Flash", "Claude", "Gemini 4 Argon")
+
+# 回环地址不应走系统代理，否则本地 RPC 会被转发到代理端口。
+_SESSION = requests.Session()
+_SESSION.trust_env = False
 
 
 @dataclass(frozen=True)
@@ -37,44 +71,23 @@ class QuotaGroupInfo:
 class QuotaSnapshot:
     success: bool
     error_message: Optional[str]
-    agy_path: Optional[str]
-    active_cli_model: Optional[str]
-    remaining_credits: Optional[int]
-    upgrade_uri: Optional[str]
+    # 数据源描述（进程类型 / pid / 回环端口），用于卡片提示与复制文本。
+    source_detail: Optional[str]
+    account_email: Optional[str]
+    account_plan: Optional[str]
     overview_description: Optional[str]
     fetched_at: datetime
     groups: list[QuotaGroupInfo] = field(default_factory=list)
 
-    def format_bubble_summary(self) -> str:
-        if not self.success or not self.groups:
-            return self.error_message or "暂时无法读取 Antigravity 额度喵～"
-
-        parts: list[str] = []
-        for g in self.groups:
-            b5h = next((b for b in g.buckets if b.window.lower() == "5h"), None)
-            bwk = next((b for b in g.buckets if b.window.lower() == "weekly"), None)
-            short_name = g.name.replace(" models", "").replace(" Models", "").strip()
-            if b5h is not None and bwk is not None:
-                parts.append(
-                    f"{short_name}: 5h {b5h.remaining_fraction * 100:.0f}% / 周 {bwk.remaining_fraction * 100:.0f}%"
-                )
-            elif bwk is not None:
-                parts.append(f"{short_name}: {bwk.remaining_fraction * 100:.0f}%")
-            elif g.buckets:
-                parts.append(f"{short_name}: {g.buckets[0].remaining_fraction * 100:.0f}%")
-
-        summary = " · ".join(parts) if parts else "已读取额度"
-        if self.remaining_credits is not None:
-            summary += f" · AI Credits: {self.remaining_credits}"
-        return f"反重力额度✦ {summary}"
-
     def format_clipboard_text(self) -> str:
         local_dt = self.fetched_at.astimezone()
-        lines = [f"Antigravity 反重力额度快照 ({local_dt.strftime('%Y-%m-%d %H:%M:%S')})"]
-        if self.active_cli_model:
-            lines.append(f"当前模型: {self.active_cli_model}")
-        if self.remaining_credits is not None:
-            lines.append(f"AI Credits: {self.remaining_credits}")
+        lines = [f"Antigravity 额度快照 ({local_dt.strftime('%Y-%m-%d %H:%M:%S')})"]
+        if self.account_plan:
+            lines.append(f"套餐: {self.account_plan}")
+        if self.account_email:
+            lines.append(f"账号: {self.account_email}")
+        if self.source_detail:
+            lines.append(f"数据源: {self.source_detail}")
         lines.append("")
 
         for g in self.groups:
@@ -89,220 +102,557 @@ class QuotaSnapshot:
         return "\n".join(lines).rstrip()
 
 
-class AntigravityQuotaService:
-    """调用本地官方 agy CLI 查询各模型 5h/weekly 剩余额度与 AI Credits。"""
+@dataclass(frozen=True)
+class _AntigravityProcess:
+    pid: int
+    kind: str
+    csrf_token: str
+    extension_port: Optional[int] = None
+    hub_port: Optional[int] = None
 
-    @staticmethod
-    def resolve_agy_executable() -> Optional[str]:
-        local_app_data = Path(os.environ.get("LOCALAPPDATA") or Path.home())
-        user_profile = Path(os.environ.get("USERPROFILE") or Path.home())
-        candidates = (
-            local_app_data / "agy" / "bin" / "agy.exe",
-            local_app_data / "agy" / "bin" / "agy.cmd",
-            user_profile / ".gemini" / "antigravity" / "bin" / "agy.exe",
-        )
-        for cand in candidates:
-            if cand.is_file():
-                return str(cand)
-        found = shutil.which("agy.exe") or shutil.which("agy.cmd") or shutil.which("agy")
-        if found:
-            found_path = Path(found)
-            if found_path.suffix.lower() in (".cmd", ".bat"):
-                exe_sibling = found_path.with_suffix(".exe")
-                if exe_sibling.is_file():
-                    return str(exe_sibling)
-        return found
 
-    @staticmethod
-    def read_active_cli_model() -> Optional[str]:
+@dataclass(frozen=True)
+class _RpcEndpoint:
+    scheme: str
+    port: int
+    csrf_token: str
+
+
+@dataclass(frozen=True)
+class _QuotaSource:
+    label: str
+    endpoints: tuple[_RpcEndpoint, ...]
+
+
+def _first_text(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _clamp_fraction(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
         try:
-            settings_path = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
-            if not settings_path.is_file():
-                return None
-            data = json.loads(settings_path.read_text(encoding="utf-8"))
-            model = data.get("model")
-            return str(model) if isinstance(model, str) and model else None
-        except Exception:
+            value = float(value)
+        except ValueError:
             return None
+    if not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number:
+        return None
+    return max(0.0, min(1.0, number))
+
+
+def _parse_time(value: Any) -> Optional[datetime]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value) / 1000.0 if float(value) > 20_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _unwrap_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """Connect-RPC 常把业务字段包在 response / summary 里，剥一层。"""
+    for key in ("response", "summary"):
+        inner = body.get(key)
+        if isinstance(inner, dict):
+            return inner
+    return body
+
+
+def _normalize_group_name(raw: Any) -> str:
+    text = _first_text(raw) or "Models"
+    low = text.lower()
+    if low in ("gemini", "gemini model", "gemini models"):
+        return "Gemini Models"
+    if "claude" in low or "gpt" in low:
+        return "Claude and GPT models"
+    return text
+
+
+def _bucket_window(raw: dict[str, Any]) -> Optional[str]:
+    text = " ".join(str(raw.get(key) or "") for key in ("window", "bucketId", "displayName", "name")).lower()
+    text = text.replace("_", "-")
+    if "weekly" in text:
+        return "weekly"
+    if any(token in text for token in ("session", "5h", "5-hour", "five hour", "five-hour")):
+        return "5h"
+    return None
+
+
+def _bucket_fraction(raw: dict[str, Any]) -> Optional[float]:
+    fraction = _clamp_fraction(raw.get("remainingFraction"))
+    if fraction is not None:
+        return fraction
+    remaining = raw.get("remaining")
+    if isinstance(remaining, dict):
+        fraction = _clamp_fraction(remaining.get("remainingFraction"))
+        if fraction is None and remaining.get("case") == "remainingFraction":
+            fraction = _clamp_fraction(remaining.get("value"))
+    return fraction
+
+
+def _parse_bucket(raw: dict[str, Any]) -> Optional[QuotaBucketInfo]:
+    window = _bucket_window(raw)
+    if window is None:
+        return None
+    fraction = _bucket_fraction(raw)
+    if fraction is None:
+        return None
+    name = (
+        _first_text(raw.get("displayName"))
+        or _first_text(raw.get("name"))
+        or _first_text(raw.get("bucketId"))
+        or window
+    )
+    bucket_id = _first_text(raw.get("bucketId")) or _first_text(raw.get("id")) or name
+    reset = _parse_time(raw.get("resetTime") if raw.get("resetTime") is not None else raw.get("reset_time"))
+    description = raw.get("description") if isinstance(raw.get("description"), str) else None
+    return QuotaBucketInfo(bucket_id, name, window, fraction, reset, description)
+
+
+def _parse_quota_summary(body: dict[str, Any]) -> tuple[Optional[str], list[QuotaGroupInfo]]:
+    root = _unwrap_payload(body)
+    overview = root.get("description") if isinstance(root.get("description"), str) else None
+    raw_groups = root.get("groups")
+    if not isinstance(raw_groups, list):
+        return overview, []
+
+    groups: list[QuotaGroupInfo] = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            continue
+        buckets: list[QuotaBucketInfo] = []
+        for raw_bucket in raw_group.get("buckets") or []:
+            if isinstance(raw_bucket, dict):
+                bucket = _parse_bucket(raw_bucket)
+                if bucket is not None:
+                    buckets.append(bucket)
+        if not buckets:
+            continue
+        description = raw_group.get("description") if isinstance(raw_group.get("description"), str) else None
+        groups.append(
+            QuotaGroupInfo(
+                _normalize_group_name(raw_group.get("displayName") or raw_group.get("name")),
+                description,
+                buckets,
+            )
+        )
+    return overview, groups
+
+
+def _legacy_pool_name(text: str) -> Optional[str]:
+    low = (text or "").lower()
+    if not low or "placeholder" in low:
+        return None
+    if "argon" in low:
+        return "Gemini 4 Argon"
+    if "gemini" in low and "pro" in low:
+        return "Gemini Pro"
+    if "gemini" in low and "flash" in low:
+        return "Gemini Flash"
+    if "claude" in low or "gpt" in low:
+        return "Claude"
+    return None
+
+
+def _legacy_groups(root: dict[str, Any]) -> list[QuotaGroupInfo]:
+    """旧版 Antigravity 只回逐模型 quotaInfo，这里按模型族池化成固定分组。"""
+    configs = root.get("clientModelConfigs")
+    if not isinstance(configs, list):
+        cascade = root.get("cascadeModelConfigData")
+        configs = cascade.get("clientModelConfigs") if isinstance(cascade, dict) else None
+    if not isinstance(configs, list):
+        return []
+
+    pools: dict[str, tuple[float, Optional[datetime]]] = {}
+    for config in configs:
+        if not isinstance(config, dict):
+            continue
+        quota_info = config.get("quotaInfo")
+        if not isinstance(quota_info, dict):
+            continue
+        fraction = _clamp_fraction(quota_info.get("remainingFraction"))
+        if fraction is None:
+            continue
+        alias = config.get("modelOrAlias")
+        model_id = str(alias.get("model") or "") if isinstance(alias, dict) else ""
+        pool = _legacy_pool_name(model_id or str(config.get("label") or config.get("displayName") or ""))
+        if pool is None:
+            continue
+        reset = _parse_time(
+            quota_info.get("resetTime") if quota_info.get("resetTime") is not None else quota_info.get("reset_time")
+        )
+        previous = pools.get(pool)
+        # 同池多个模型取最保守值；剩余量相同时取更早的重置时间。
+        if previous is None or fraction < previous[0]:
+            pools[pool] = (fraction, reset or (previous[1] if previous else None))
+        elif reset is not None and (previous[1] is None or reset < previous[1]):
+            pools[pool] = (previous[0], reset)
+
+    groups: list[QuotaGroupInfo] = []
+    for name in _LEGACY_POOL_ORDER:
+        if name not in pools:
+            continue
+        fraction, reset = pools[name]
+        groups.append(QuotaGroupInfo(name, None, [QuotaBucketInfo("legacy", name, "weekly", fraction, reset, None)]))
+    return groups
+
+
+def _parse_user_status(body: dict[str, Any]) -> tuple[Optional[str], Optional[str], list[QuotaGroupInfo]]:
+    root = _unwrap_payload(body)
+    user = root.get("userStatus") if isinstance(root.get("userStatus"), dict) else root
+    email = _first_text(user.get("email"))
+
+    plan: Optional[str] = None
+    for container in (user, root):
+        tier = container.get("userTier") or container.get("paidTier") or container.get("currentTier")
+        if isinstance(tier, dict):
+            plan = _first_text(tier.get("name")) or _first_text(tier.get("displayName")) or _first_text(tier.get("id"))
+        if plan:
+            break
+        plan_info = container.get("planInfo")
+        if isinstance(plan_info, dict):
+            for key in ("planDisplayName", "displayName", "productName", "planName", "planShortName"):
+                plan = _first_text(plan_info.get(key))
+                if plan:
+                    break
+        if plan:
+            break
+
+    return email, plan, _legacy_groups(root)
+
+
+def _extract_flag(cmdline: list[str], flag: str) -> Optional[str]:
+    prefix = f"{flag}="
+    for index, part in enumerate(cmdline):
+        if part.startswith(prefix):
+            value = part[len(prefix) :].strip().strip('"').strip("'")
+            return value or None
+        if part == flag and index + 1 < len(cmdline):
+            value = cmdline[index + 1].strip().strip('"').strip("'")
+            return value or None
+    return None
+
+
+def _extract_port(cmdline: list[str], flag: str) -> Optional[int]:
+    raw = _extract_flag(cmdline, flag)
+    if not raw:
+        return None
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _port_from_address(address: Optional[str]) -> Optional[int]:
+    text = (address or "").strip()
+    if not text:
+        return None
+    tail = text.rsplit(":", 1)[-1]
+    try:
+        port = int(tail)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _detect_process_kind(name: str, cmdline: list[str]) -> Optional[str]:
+    exe = (name or "").strip().lower()
+    command = " ".join(cmdline).strip().lower() or exe
+    if not any(token in exe or token in command for token in ("language_server", "language-server")):
+        return None
+    if any(marker in command for marker in _IDE_MARKERS):
+        return "ide"
+    if "antigravity" in command or "antigravity" in exe:
+        return "app"
+    return None
+
+
+def _listening_ports(pid: int) -> list[int]:
+    connections: list[Any] = []
+    try:
+        connections = psutil.Process(pid).net_connections(kind="tcp")
+    except (psutil.Error, OSError):
+        connections = []
+    if not connections:
+        try:
+            connections = [conn for conn in psutil.net_connections(kind="tcp") if conn.pid == pid]
+        except (psutil.Error, OSError):
+            connections = []
+    ports: set[int] = set()
+    for conn in connections:
+        if conn.status == psutil.CONN_LISTEN and conn.laddr:
+            ports.add(int(conn.laddr.port))
+    return sorted(ports)
+
+
+def _listening_port_set() -> set[int]:
+    """一次性拿到本机所有 LISTEN 端口，用来剔除已退出的 hub 残留记录。"""
+    try:
+        return {
+            int(conn.laddr.port)
+            for conn in psutil.net_connections(kind="tcp")
+            if conn.status == psutil.CONN_LISTEN and conn.laddr
+        }
+    except (psutil.Error, OSError):
+        return set()
+
+
+def _pid_looks_like_antigravity(pid: int) -> bool:
+    try:
+        name = psutil.Process(pid).name().strip().lower()
+    except (psutil.Error, OSError):
+        return False
+    return "language_server" in name or "language-server" in name or name.startswith(("antigravity", "agy"))
+
+
+def _hub_file_sources(listening: set[int]) -> list[_QuotaSource]:
+    """读取 Hub 写在 daemon 目录的 hub_<port>.json（显式给了端口与令牌）。"""
+    entries: list[tuple[float, _QuotaSource]] = []
+    for directory in _HUB_DIRS:
+        try:
+            files = list(directory.glob("hub_*.json"))
+        except OSError:
+            continue
+        for path in files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                mtime = path.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            pid = data.get("pid")
+            token = _first_text(data.get("csrfToken"))
+            if not isinstance(pid, int) or not token:
+                continue
+            # 端口必须真的在监听，且 pid 不能被系统复用给无关进程。
+            if not _pid_looks_like_antigravity(pid):
+                continue
+            endpoints: list[_RpcEndpoint] = []
+            for scheme, key in (("https", "httpsPort"), ("http", "httpPort")):
+                port = data.get(key)
+                if isinstance(port, int) and port in listening:
+                    endpoints.append(_RpcEndpoint(scheme, port, token))
+            if endpoints:
+                entries.append((mtime, _QuotaSource(f"Antigravity hub · pid {pid}", tuple(endpoints))))
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [source for _, source in entries]
+
+
+def _process_sources(listening: set[int]) -> list[_QuotaSource]:
+    found: list[tuple[int, int, _QuotaSource]] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            info = proc.info
+            pid = int(info.get("pid") or proc.pid)
+            name = str(info.get("name") or "")
+            cmdline = [str(part) for part in (info.get("cmdline") or [])]
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+        kind = _detect_process_kind(name, cmdline)
+        csrf_token = _extract_flag(cmdline, "--csrf_token")
+        if kind is not None and csrf_token:
+            process = _AntigravityProcess(
+                pid=pid,
+                kind=kind,
+                csrf_token=csrf_token,
+                extension_port=_extract_port(cmdline, "--extension_server_port"),
+                hub_port=_extract_port(cmdline, "--hub_port") or _extract_port(cmdline, "--hub-port"),
+            )
+            endpoints = tuple(endpoint for endpoint in _endpoints_for(process) if endpoint.port in listening)
+            if endpoints:
+                found.append(
+                    (
+                        _KIND_ORDER.get(kind, 9),
+                        pid,
+                        _QuotaSource(f"Antigravity {kind} · pid {pid}", endpoints),
+                    )
+                )
+            continue
+
+        # Hub 版把令牌与语言服务器地址放在进程环境变量里。
+        if not name.lower().startswith(("antigravity", "agy")):
+            continue
+        try:
+            env = proc.environ()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
+        env_token = _first_text(env.get("ANTIGRAVITY_CSRF_TOKEN"))
+        env_port = _port_from_address(env.get("ANTIGRAVITY_LS_ADDRESS"))
+        if env_token and env_port and env_port in listening:
+            found.append(
+                (
+                    _KIND_ORDER.get("app", 9),
+                    pid,
+                    _QuotaSource(f"Antigravity sidecar · pid {pid}", (_RpcEndpoint("http", env_port, env_token),)),
+                )
+            )
+
+    found.sort(key=lambda item: (item[0], item[1]))
+    return [source for _, _, source in found]
+
+
+def _endpoints_for(process: _AntigravityProcess) -> list[_RpcEndpoint]:
+    endpoints: list[_RpcEndpoint] = []
+    seen: set[tuple[str, int, str]] = set()
+
+    def add(scheme: str, port: Optional[int]) -> None:
+        if not port or not (0 < int(port) < 65536):
+            return
+        key = (scheme, int(port), process.csrf_token)
+        if key in seen:
+            return
+        seen.add(key)
+        endpoints.append(_RpcEndpoint(scheme, int(port), process.csrf_token))
+
+    # 显式 hub 端口优先，其次监听端口，最后扩展服务端口。
+    add("https", process.hub_port)
+    add("http", process.hub_port)
+    for port in _listening_ports(process.pid):
+        add("https", port)
+        add("http", port)
+    add("http", process.extension_port)
+    return endpoints
+
+
+class AntigravityQuotaService:
+    """发现运行中的 Antigravity 语言服务器，通过回环 RPC 读取 5h / 每周额度。"""
+
+    @staticmethod
+    def _discover_sources() -> list[_QuotaSource]:
+        listening = _listening_port_set()
+        sources = _hub_file_sources(listening) + _process_sources(listening)
+        deduped: list[_QuotaSource] = []
+        seen: set[tuple[str, int, str]] = set()
+        for source in sources:
+            endpoints = tuple(
+                endpoint for endpoint in source.endpoints if (endpoint.scheme, endpoint.port, endpoint.csrf_token) not in seen
+            )
+            if not endpoints:
+                continue
+            seen.update((endpoint.scheme, endpoint.port, endpoint.csrf_token) for endpoint in endpoints)
+            deduped.append(_QuotaSource(source.label, endpoints))
+        return deduped
+
+    @staticmethod
+    def _post(endpoint: _RpcEndpoint, method: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        url = f"{endpoint.scheme}://{_RPC_HOST}:{endpoint.port}/{_LS_SERVICE}/{method}"
+        headers = {
+            "content-type": "application/json",
+            "connect-protocol-version": "1",
+            "x-codeium-csrf-token": endpoint.csrf_token,
+        }
+        response = _SESSION.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S),
+            verify=False,
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        return response.status_code, body if isinstance(body, dict) else {}
+
+    def _fetch_user_status(self, endpoint: _RpcEndpoint) -> tuple[Optional[str], Optional[str], list[QuotaGroupInfo]]:
+        try:
+            status, body = self._post(endpoint, "GetUserStatus", {"metadata": _PROBE_METADATA})
+        except requests.RequestException:
+            return None, None, []
+        if status != 200:
+            return None, None, []
+        return _parse_user_status(body)
 
     def fetch_quota(self, cancel_check: Optional[callable] = None) -> QuotaSnapshot:  # type: ignore[valid-type]
-        agy_path = self.resolve_agy_executable()
-        active_model = self.read_active_cli_model()
-        now = datetime.now(timezone.utc)
-
-        if not agy_path:
-            AppLogger.warn("Quota", "未在本机找到 agy.exe / agy.cmd")
+        sources = self._discover_sources()
+        if not sources:
+            AppLogger.warn("Quota", "未检测到 Antigravity 语言服务器")
             return QuotaSnapshot(
                 False,
-                "未在本机找到官方 Antigravity CLI (agy.exe)。请先安装并登录 Antigravity CLI 或桌面端。",
-                None,
-                active_model,
+                "未检测到 Antigravity 的额度服务。请先打开 Antigravity 桌面端或 IDE 后再查看额度。",
                 None,
                 None,
                 None,
-                now,
+                None,
+                datetime.now(timezone.utc),
                 [],
             )
 
-        q_code, q_out, q_err = self._run_agy_command(
-            agy_path, ["--print", "/quota", "--output-format", "json", "--print-timeout", "15s"], timeout_s=18.0
-        )
-        quota_ok, overview, groups, json_err = self._try_parse_quota_json(q_out)
-        if not quota_ok and not (cancel_check and cancel_check()):
-            time.sleep(0.35)
-            q_code, q_out, q_err = self._run_agy_command(
-                agy_path, ["--print", "/quota", "--output-format", "json", "--print-timeout", "15s"], timeout_s=18.0
-            )
-            quota_ok, overview, groups, json_err = self._try_parse_quota_json(q_out)
+        last_error = ""
+        for source in sources:
+            if cancel_check and cancel_check():
+                break
+            rejected = False
+            for endpoint in source.endpoints:
+                if cancel_check and cancel_check():
+                    break
+                try:
+                    status, body = self._post(endpoint, "RetrieveUserQuotaSummary", {"forceRefresh": True})
+                except requests.RequestException:
+                    continue
+                if status in (401, 403):
+                    # 同一来源换端口也没用，直接看下一个来源。
+                    last_error = "Antigravity 本地接口拒绝了请求（CSRF 校验失败），请重启 Antigravity 后再试。"
+                    rejected = True
+                    break
+                if status != 200:
+                    last_error = f"Antigravity 本地接口返回 HTTP {status}。"
+                    continue
 
-        remaining_credits: Optional[int] = None
-        upgrade_uri: Optional[str] = None
-        if not (cancel_check and cancel_check()):
-            _, c_out, _ = self._run_agy_command(
-                agy_path, ["--print", "/credits", "--output-format", "json", "--print-timeout", "10s"], timeout_s=12.0
-            )
-            remaining_credits, upgrade_uri = self._try_parse_credits_json(c_out)
+                overview, groups = _parse_quota_summary(body)
+                email, plan, legacy_groups = self._fetch_user_status(endpoint)
+                if not groups:
+                    groups = legacy_groups
+                if not groups:
+                    last_error = "Antigravity 没有返回额度数据，请确认已在应用内登录账号。"
+                    continue
 
-        if quota_ok:
-            AppLogger.info(
-                "Quota",
-                f"额度查询成功：分组={len(groups)}, 模型={active_model or 'unknown'}, Credits={remaining_credits if remaining_credits is not None else 'n/a'}",
-            )
-            return QuotaSnapshot(
-                True,
-                None,
-                agy_path,
-                active_model,
-                remaining_credits,
-                upgrade_uri,
-                overview,
-                datetime.now(timezone.utc),
-                groups,
-            )
+                source_detail = f"{source.label} · {endpoint.scheme}://{_RPC_HOST}:{endpoint.port}"
+                AppLogger.info(
+                    "Quota",
+                    f"额度查询成功：来源={source.label}, 分组={len(groups)}, 套餐={plan or 'unknown'}",
+                )
+                return QuotaSnapshot(
+                    True,
+                    None,
+                    source_detail,
+                    email,
+                    plan,
+                    overview,
+                    datetime.now(timezone.utc),
+                    groups,
+                )
+            if rejected:
+                continue
 
-        detail = (
-            json_err
-            or (q_err or "").strip()
-            or f"agy 查询返回失败 (退出码 {q_code})。请确认已在 Antigravity / agy 中完成 Google 账号登录。"
-        )
-        AppLogger.warn("Quota", f"额度查询失败 (agyPath={agy_path}, exitCode={q_code}): {detail}")
+        detail = last_error or "Antigravity 额度服务未响应，请确认 Antigravity 正在运行后重试。"
+        AppLogger.warn("Quota", f"额度查询失败：{detail}")
         return QuotaSnapshot(
             False,
             detail,
-            agy_path,
-            active_model,
-            remaining_credits,
-            upgrade_uri,
+            None,
+            None,
+            None,
             None,
             datetime.now(timezone.utc),
             [],
         )
-
-    @staticmethod
-    def _run_agy_command(agy_path: str, args: list[str], timeout_s: float) -> tuple[int, str, str]:
-        try:
-            is_cmd = agy_path.lower().endswith((".cmd", ".bat"))
-            comspec = os.environ.get("ComSpec", "cmd.exe")
-            cmd = [comspec, "/d", "/c", agy_path, *args] if is_cmd else [agy_path, *args]
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(Path.home()),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **subprocess_hidden_kwargs(),
-            )
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout_s)
-                return proc.returncode or 0, stdout or "", stderr or ""
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.communicate(timeout=2)
-                except Exception:
-                    pass
-                return -1, "", "查询 agy CLI 超时"
-        except Exception as exc:
-            return -1, "", str(exc)
-
-    @staticmethod
-    def _extract_json_object(raw: str) -> Optional[str]:
-        if not raw or not raw.strip():
-            return None
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        return raw[start : end + 1]
-
-    @classmethod
-    def _try_parse_quota_json(
-        cls, raw: str
-    ) -> tuple[bool, Optional[str], list[QuotaGroupInfo], Optional[str]]:
-        json_str = cls._extract_json_object(raw)
-        if not json_str:
-            return False, None, [], None
-        try:
-            root = json.loads(json_str)
-            status = root.get("status")
-            if isinstance(status, str) and status.upper() != "SUCCESS":
-                resp = root.get("response")
-                return False, None, [], str(resp) if isinstance(resp, str) else None
-
-            cmd = root.get("command") or {}
-            data = cmd.get("data") or {}
-            if not isinstance(data, dict):
-                return False, None, [], None
-
-            overview = data.get("description") if isinstance(data.get("description"), str) else None
-            raw_groups = data.get("groups")
-            if not isinstance(raw_groups, list):
-                return False, None, [], None
-
-            groups: list[QuotaGroupInfo] = []
-            for g in raw_groups:
-                if not isinstance(g, dict):
-                    continue
-                g_name = str(g.get("name") or "Models")
-                g_desc = g.get("description") if isinstance(g.get("description"), str) else None
-                buckets: list[QuotaBucketInfo] = []
-                for b in g.get("buckets") or []:
-                    if not isinstance(b, dict):
-                        continue
-                    bid = str(b.get("id") or "")
-                    bname = str(b.get("name") or bid)
-                    bwin = str(b.get("window") or "")
-                    bdesc = b.get("description") if isinstance(b.get("description"), str) else None
-                    raw_frac = b.get("remaining_fraction")
-                    frac = max(0.0, min(1.0, float(raw_frac))) if isinstance(raw_frac, (int, float)) else 0.0
-                    reset_dt: Optional[datetime] = None
-                    raw_rt = b.get("reset_time")
-                    if isinstance(raw_rt, str) and raw_rt:
-                        try:
-                            reset_dt = datetime.fromisoformat(raw_rt.replace("Z", "+00:00"))
-                        except Exception:
-                            reset_dt = None
-                    buckets.append(QuotaBucketInfo(bid, bname, bwin, frac, reset_dt, bdesc))
-                groups.append(QuotaGroupInfo(g_name, g_desc, buckets))
-
-            return len(groups) > 0, overview, groups, None
-        except Exception as exc:
-            return False, None, [], f"解析额度返回数据失败：{exc}"
-
-    @classmethod
-    def _try_parse_credits_json(cls, raw: str) -> tuple[Optional[int], Optional[str]]:
-        json_str = cls._extract_json_object(raw)
-        if not json_str:
-            return None, None
-        try:
-            root = json.loads(json_str)
-            data = (root.get("command") or {}).get("data") or {}
-            credits_val = data.get("remaining_credits")
-            credits_int = int(credits_val) if isinstance(credits_val, (int, float)) else None
-            uri = data.get("upgrade_uri")
-            return credits_int, str(uri) if isinstance(uri, str) and uri else None
-        except Exception:
-            return None, None
