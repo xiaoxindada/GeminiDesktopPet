@@ -28,9 +28,7 @@ class AntigravityWatcherService:
         self._initialized = False
 
         self.on_antigravity_started: Optional[Callable[[], None]] = None
-        self.on_antigravity_exited: Optional[Callable[[], None]] = None
         self.on_gemini_app_started: Optional[Callable[[], None]] = None
-        self.on_gemini_app_exited: Optional[Callable[[], None]] = None
 
     @property
     def is_running(self) -> bool:
@@ -99,10 +97,6 @@ class AntigravityWatcherService:
 
         if ag_started and self.on_antigravity_started:
             self.on_antigravity_started()
-        elif ag_exited and self.on_antigravity_exited:
-            self.on_antigravity_exited()
 
         if gem_started and self.on_gemini_app_started:
             self.on_gemini_app_started()
-        elif gem_exited and self.on_gemini_app_exited:
-            self.on_gemini_app_exited()

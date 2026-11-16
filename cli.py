@@ -68,7 +68,6 @@ def main(args: Optional[list[str]] = None) -> int:
             "  gemini-desktop-pet [选项]\n"
             "  python main.py [选项]\n\n"
             "常用选项:\n"
-            "  --follow-antigravity  以联动跟随模式启动（被跟随应用未运行时静默待机）\n"
             "  --close-pet           通知运行中的主实例优雅退出\n"
             "  --stop-all            停止主实例以及后台跟随守护进程\n"
             "  --force               配合 --close-pet 强制结束残留进程\n"

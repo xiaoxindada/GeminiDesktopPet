@@ -96,7 +96,6 @@ class PetApplicationCoordinator(QObject):
         self._args = args
         self._main_mutex = main_mutex
         self._is_exiting = False
-        self._in_standby = False
         self._ipc_stop_flag = threading.Event()
         self._ipc_stop_event = Win32Event(None, manual_reset=True, initial_state=False)
         self._ipc_thread: Optional[threading.Thread] = None
@@ -105,7 +104,6 @@ class PetApplicationCoordinator(QObject):
 
         # 解析启动模式参数
         low_args = [a.lower() for a in args]
-        self._follow_start_mode = "--follow-antigravity" in low_args
         self._woken_by: Optional[str] = None
         for a in low_args:
             if a.startswith("--woken-by:"):
@@ -170,14 +168,8 @@ class PetApplicationCoordinator(QObject):
         self._wire_signals()
         self._start_watcher()
 
-        # 决定首次显示还是待机启动
-        if self._follow_start_mode and not self._woken_by:
-            detected = self._watcher.detect_running_followed_app_key(self._settings)
-            if detected:
-                self._show_pet_with_wake_greeting(detected)
-            else:
-                self.enter_standby_mode(silent=True)
-        elif self._woken_by:
+        # 若由联动监听唤醒则播放欢迎提示，否则直接显示主桌宠窗口
+        if self._woken_by:
             self._show_pet_with_wake_greeting(self._woken_by)
         else:
             self._pet.show()
@@ -272,7 +264,6 @@ class PetApplicationCoordinator(QObject):
         if app_key:
             self._show_pet_with_wake_greeting(app_key)
         else:
-            self._in_standby = False
             self._pet.show_and_greet()
             self._pet.raise_()
             self._pet.activateWindow()
@@ -285,9 +276,7 @@ class PetApplicationCoordinator(QObject):
 
     def _start_watcher(self) -> None:
         self._watcher.on_antigravity_started = self._on_antigravity_started
-        self._watcher.on_antigravity_exited = self._on_antigravity_exited
         self._watcher.on_gemini_app_started = self._on_gemini_app_started
-        self._watcher.on_gemini_app_exited = self._on_gemini_app_exited
         self._watcher.start()
 
     def _on_antigravity_started(self) -> None:
@@ -300,18 +289,7 @@ class PetApplicationCoordinator(QObject):
         if self._settings.follow_gemini_app:
             self._show_pet_with_wake_greeting("gemini")
 
-    def _on_antigravity_exited(self) -> None:
-        AppLogger.info("Watcher", "Watcher detected Antigravity exited.")
-        if (self._settings.follow_antigravity or self._settings.follow_gemini_app) and not self._watcher.check_any_followed_target_running(self._settings):
-            self.enter_standby_mode(silent=False)
-
-    def _on_gemini_app_exited(self) -> None:
-        AppLogger.info("Watcher", "Watcher detected Gemini desktop app exited.")
-        if (self._settings.follow_antigravity or self._settings.follow_gemini_app) and not self._watcher.check_any_followed_target_running(self._settings):
-            self.enter_standby_mode(silent=False)
-
     def _show_pet_with_wake_greeting(self, app_key: str) -> None:
-        self._in_standby = False
         if app_key == "antigravity":
             msg = "检测到 Antigravity 启动啦，Gemini 娘上线陪你一起写超棒的代码喵✦"
         elif app_key == "gemini":
@@ -321,39 +299,23 @@ class PetApplicationCoordinator(QObject):
         self._pet.show_and_greet(msg)
         self._pet.raise_()
 
-    def enter_standby_mode(self, silent: bool = False) -> None:
-        if self._in_standby:
-            return
-        self._in_standby = True
-        self._pet.hide()
-        if not silent:
-            self._tray.show_balloon(
-                "Gemini 娘已进入隐身待机",
-                "联动软件未运行时将安静待机，启动 Antigravity 或 Gemini 时自动现身喵～",
-            )
-        AppLogger.info("App", f"Entered standby mode (silent={silent}).")
-
     # ==================== Tray Handlers ====================
 
     def _wake_from_tray_or_greet(self) -> None:
-        self._in_standby = False
         self._pet.show_and_greet()
         self._pet.raise_()
 
     def _open_chat_from_tray(self) -> None:
-        self._in_standby = False
         if not self._pet.isVisible():
             self._pet.show()
         self._pet.open_chat_dialog()
 
     def _pat_from_tray(self) -> None:
-        self._in_standby = False
         if not self._pet.isVisible():
             self._pet.show()
         self._pet.trigger_pat()
 
     def _reset_position_from_tray(self) -> None:
-        self._in_standby = False
         if not self._pet.isVisible():
             self._pet.show()
         self._pet.move_to_bottom_right_corner()
@@ -434,7 +396,7 @@ class PetApplicationCoordinator(QObject):
         self._pet.apply_settings_to_window()
         self._tray.sync_state(self._settings)
         if self._settings_win is not None and self._settings_win.isVisible():
-            self._settings_win.sync_from_settings()
+            self._settings_win.sync_from_settings(force=False)
         if self._profile_win is not None and self._profile_win.isVisible():
             self._profile_win.refresh_profile(self._settings)
 
@@ -473,7 +435,6 @@ class PetApplicationCoordinator(QObject):
         self._show_and_focus(self._profile_win)
 
     def _on_profile_preview_state(self, state: PetState) -> None:
-        self._in_standby = False
         if not self._pet.isVisible():
             self._pet.show()
         self._pet.trigger_external_sprite_preview(state.to_sprite_key())
@@ -513,6 +474,7 @@ class PetApplicationCoordinator(QObject):
 
     def _on_oauth_session_changed(self) -> None:
         self._chat.reset_conversation()
+        self._pet.apply_settings_to_window()
         if not self._pet.isVisible():
             return
         if self._oauth_service.is_logged_in():
@@ -590,7 +552,7 @@ class PetApplicationCoordinator(QObject):
         self._latest_update_result = result
         if result.succeeded and result.update_available:
             self._tray.set_available_update(result.latest_tag)
-            if not self._in_standby:
+            if self._pet.isVisible():
                 self._pet.show_bubble(
                     f"发现新版本 {result.latest_tag} 啦！点击「检查更新」即可查看更新日志并一键升级喵✨",
                     7.0,
