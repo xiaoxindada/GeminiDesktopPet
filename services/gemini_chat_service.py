@@ -61,7 +61,7 @@ class GeminiChatService:
         self._oauth_session_sig = None
         self._oauth_session_id = str(uuid.uuid4())
 
-    def _resolve_chat_provider(self, settings: PetSettings) -> Optional[str]:
+    def resolve_chat_provider(self, settings: PetSettings) -> Optional[str]:
         has_oauth = self._oauth_service is not None and self._oauth_service.is_logged_in()
         has_api_key = bool((settings.gemini_api_key or "").strip())
         mode = settings.chat_auth_mode
@@ -70,11 +70,17 @@ class GeminiChatService:
             return "oauth" if has_oauth else None
         if mode == ChatAuthMode.API_KEY:
             return "api_key" if has_api_key else None
+        # 自动模式下当 OAuth 与 API Key 同时可用时，优先使用 OAuth
+        if has_oauth and has_api_key:
+            return "oauth"
         if has_oauth:
             return "oauth"
         if has_api_key:
             return "api_key"
         return None
+
+    def _resolve_chat_provider(self, settings: PetSettings) -> Optional[str]:
+        return self.resolve_chat_provider(settings)
 
     def ask(
         self,
@@ -397,11 +403,15 @@ class GeminiChatService:
         return status_code in (404, 408) or 500 <= status_code < 600
 
     @staticmethod
+    def _decode_response_text(resp: requests.Response) -> str:
+        raw_bytes = getattr(resp, "content", None)
+        if isinstance(raw_bytes, (bytes, bytearray)):
+            return bytes(raw_bytes).decode("utf-8", errors="replace")
+        return str(getattr(resp, "text", "") or "")
+
+    @staticmethod
     def _read_error_response(resp: requests.Response) -> str:
-        try:
-            raw = resp.text or ""
-        except Exception:
-            raw = ""
+        raw = GeminiChatService._decode_response_text(resp)
         try:
             obj = json.loads(raw)
             if isinstance(obj, dict):
@@ -416,16 +426,64 @@ class GeminiChatService:
         return cleaned[:160] if len(cleaned) > 160 else (cleaned or f"HTTP {resp.status_code}")
 
     @staticmethod
+    def _extract_chunk_parts(
+        chunk: dict[str, Any], *, wrapped_in_response: bool = True
+    ) -> list[str]:
+        actual = chunk["response"] if (wrapped_in_response and isinstance(chunk.get("response"), dict)) else chunk
+        if isinstance(actual.get("error"), dict):
+            err_obj = actual["error"]
+            code = err_obj.get("code")
+            msg = str(err_obj.get("message") or err_obj.get("status") or "上游返回错误").strip()
+            raise OAuthError(msg, status_code=int(code) if isinstance(code, int) else None)
+
+        candidates = actual.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            return []
+        first_cand = candidates[0]
+        if not isinstance(first_cand, dict):
+            return []
+        content = first_cand.get("content")
+        if not isinstance(content, dict):
+            return []
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            return []
+
+        texts: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            # 仅提取非思维链的正文文本输出到桌宠对话气泡
+            if part.get("thought") is True:
+                continue
+            txt = part.get("text")
+            if isinstance(txt, str) and txt:
+                texts.append(txt)
+        return texts
+
+    @staticmethod
     def _parse_sse_candidates_response(
         resp: requests.Response, *, wrapped_in_response: bool = True
     ) -> str:
+        # 响应头缺少 charset 时 requests 默认按 ISO-8859-1 解码会导致中文乱码，强制读取原始字节按 UTF-8 解码
         answer_parts: list[str] = []
-        for raw_line in resp.iter_lines(decode_unicode=True):
+        raw_lines: list[str] = []
+        seen_sse_data = False
+
+        for raw_line in resp.iter_lines(decode_unicode=False):
             if not raw_line:
                 continue
-            line = raw_line.strip()
+            line = (
+                bytes(raw_line).decode("utf-8", errors="replace").strip()
+                if isinstance(raw_line, (bytes, bytearray))
+                else str(raw_line).strip()
+            )
+            if not line:
+                continue
+            raw_lines.append(line)
             if not line.startswith("data:"):
                 continue
+            seen_sse_data = True
             json_part = line[5:].strip()
             if not json_part or json_part == "[DONE]":
                 continue
@@ -433,41 +491,22 @@ class GeminiChatService:
                 chunk = json.loads(json_part)
             except Exception:
                 continue
-            if not isinstance(chunk, dict):
-                continue
+            if isinstance(chunk, dict):
+                answer_parts.extend(
+                    GeminiChatService._extract_chunk_parts(chunk, wrapped_in_response=wrapped_in_response)
+                )
 
-            if wrapped_in_response and isinstance(chunk.get("response"), dict):
-                actual = chunk["response"]
-            else:
-                actual = chunk
-
-            if isinstance(actual.get("error"), dict):
-                err_obj = actual["error"]
-                code = err_obj.get("code")
-                msg = str(err_obj.get("message") or err_obj.get("status") or "上游返回错误").strip()
-                raise OAuthError(msg, status_code=int(code) if isinstance(code, int) else None)
-
-            candidates = actual.get("candidates")
-            if not isinstance(candidates, list) or not candidates:
-                continue
-            first_cand = candidates[0]
-            if not isinstance(first_cand, dict):
-                continue
-            content = first_cand.get("content")
-            if not isinstance(content, dict):
-                continue
-            parts = content.get("parts")
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                # 仅提取非思维链的正文文本输出到桌宠对话气泡
-                if part.get("thought") is True:
-                    continue
-                txt = part.get("text")
-                if isinstance(txt, str) and txt:
-                    answer_parts.append(txt)
+        if not seen_sse_data and raw_lines:
+            try:
+                parsed = json.loads("\n".join(raw_lines))
+                items = parsed if isinstance(parsed, list) else [parsed]
+                for item in items:
+                    if isinstance(item, dict):
+                        answer_parts.extend(
+                            GeminiChatService._extract_chunk_parts(item, wrapped_in_response=wrapped_in_response)
+                        )
+            except Exception:
+                pass
 
         return "".join(answer_parts).strip()
 

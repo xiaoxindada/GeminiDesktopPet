@@ -1220,7 +1220,12 @@ class OAuthAuthService:
         if not resp.ok:
             return "oauth-user@google", "Google OAuth 账号"
         try:
-            data = resp.json()
+            raw_bytes = getattr(resp, "content", None)
+            data = (
+                json.loads(bytes(raw_bytes).decode("utf-8", errors="replace"))
+                if isinstance(raw_bytes, (bytes, bytearray))
+                else resp.json()
+            )
         except Exception:
             return "oauth-user@google", "Google OAuth 账号"
 
@@ -1393,13 +1398,18 @@ class OAuthAuthService:
 
     @staticmethod
     def _extract_oauth_error_detail(resp: requests.Response) -> str:
+        raw_bytes = getattr(resp, "content", None)
+        if isinstance(raw_bytes, (bytes, bytearray)):
+            raw_text = bytes(raw_bytes).decode("utf-8", errors="replace")
+        else:
+            raw_text = str(getattr(resp, "text", "") or "")
         try:
-            body = resp.json()
+            body = json.loads(raw_text) if raw_text else resp.json()
             if isinstance(body, dict):
                 err = body.get("error_description") or body.get("error")
                 if isinstance(err, str) and err.strip():
                     return err.strip()
         except Exception:
             pass
-        text = (resp.text or "").strip()
+        text = raw_text.strip()
         return text[:160] if len(text) > 160 else (text or "未知错误")

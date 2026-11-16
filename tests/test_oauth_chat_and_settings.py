@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -456,6 +457,76 @@ class TestOAuthAndChat(unittest.TestCase):
                     oauth_svc.clear_session()
                     offline = chat.ask("现在能聊吗？", settings)
                     self.assertEqual(offline.suggested_state, PetState.THINKING)
+
+    def test_sse_utf8_decoding_without_charset_prevents_mojibake(self) -> None:
+        # 当 SSE 响应头未携带 charset 时，requests 会默认设为 ISO-8859-1；验证仍正确按 UTF-8 解码中文
+        sse_bytes = (
+            'data: {"candidates":[{"content":{"parts":[{"text":"你好呀，"},{"text":"主人喵～✦"}]}}]}\n\n'
+            "data: [DONE]\n\n"
+        ).encode("utf-8")
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.headers["Content-Type"] = "text/event-stream"
+        resp.encoding = "ISO-8859-1"
+        resp.raw = io.BytesIO(sse_bytes)
+        resp._content_consumed = False
+
+        decoded = GeminiChatService._parse_sse_candidates_response(resp, wrapped_in_response=False)
+        self.assertEqual(decoded, "你好呀，主人喵～✦")
+
+        err_resp = requests.Response()
+        err_resp.status_code = 400
+        err_resp.encoding = "ISO-8859-1"
+        err_resp._content = json.dumps({"error": {"message": "参数错误：模型不可用"}}, ensure_ascii=False).encode("utf-8")
+        self.assertEqual(GeminiChatService._read_error_response(err_resp), "参数错误：模型不可用")
+
+    def test_both_oauth_and_api_key_prefers_oauth(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as tmp_home,
+            tempfile.TemporaryDirectory() as tmp_appdata,
+        ):
+            with patch.dict(os.environ, _isolated_env(tmp_home, tmp_appdata)):
+                oauth_svc = OAuthAuthService(tmp)
+                oauth_svc.save_session(
+                    OAuthSession(
+                        email="priority@example.com",
+                        access_token="acc_valid",
+                        refresh_token="1//priority_rt",
+                        expiry_timestamp=time.time() + 3600,
+                        client_id="cid",
+                        auth_source="oauth_login",
+                        api_backend="generativelanguage",
+                    )
+                )
+                chat = GeminiChatService(oauth_service=oauth_svc)
+                settings = PetSettings(
+                    chat_auth_mode=ChatAuthMode.AUTO,
+                    gemini_api_key="dummy-api-key-value",
+                    oauth_model="gemini-2.5-flash",
+                )
+                self.assertEqual(chat.resolve_chat_provider(settings), "oauth")
+
+                def _fake_oauth_post(url: str, **kwargs):
+                    del url, kwargs
+                    return _DummyResp(
+                        200,
+                        lines=['data: {"candidates":[{"content":{"parts":[{"text":"优先走了OAuth喵✦"}]}}]}'],
+                    )
+
+                with patch("services.gemini_chat_service.requests.post", side_effect=_fake_oauth_post) as mock_post, patch.object(
+                    chat, "_call_gemini_api"
+                ) as mock_api_key:
+                    reply = chat.ask("现在走哪个通道？", settings)
+                    self.assertEqual(reply.text, "优先走了OAuth喵✦")
+                    mock_post.assert_called_once()
+                    mock_api_key.assert_not_called()
+
+                # 显式选择 API_KEY 模式时允许手动切换，退出 OAuth 后 AUTO 自动回落 API_KEY
+                api_only = PetSettings(chat_auth_mode=ChatAuthMode.API_KEY, gemini_api_key="dummy-api-key-value")
+                self.assertEqual(chat.resolve_chat_provider(api_only), "api_key")
+                oauth_svc.clear_session()
+                self.assertEqual(chat.resolve_chat_provider(settings), "api_key")
 
     def test_settings_roundtrip_and_oauth_ui_smoke(self) -> None:
         app = self._ensure_app()

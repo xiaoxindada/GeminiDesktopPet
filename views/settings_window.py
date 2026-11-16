@@ -550,7 +550,11 @@ class SettingsWindow(QWidget):
             }
             source_tag = source_map.get(session.auth_source, "本地授权")
             disp = f"{session.display_name} ({session.email})" if session.display_name else session.email
-            self._oauth_status_lbl.setText(f"授权状态：已就绪 · {disp}")
+            has_api_key = bool((self._settings.gemini_api_key or "").strip())
+            if has_api_key and self._settings.chat_auth_mode == ChatAuthMode.AUTO:
+                self._oauth_status_lbl.setText(f"授权状态：已就绪（OAuth 与 API Key 均存在，当前优先使用 OAuth）· {disp}")
+            else:
+                self._oauth_status_lbl.setText(f"授权状态：已就绪 · {disp}")
             tier = session.subscription_tier or source_tag
             self._oauth_tier_badge.setText(tier)
             self._oauth_login_btn.setText("🔄 重新授权 / 导入...")

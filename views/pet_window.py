@@ -618,6 +618,7 @@ class PetWindow(QWidget):
         )
 
         self._bubble_text_lbl = QLabel("喵～Gemini 上线！")
+        self._bubble_text_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._bubble_text_lbl.setWordWrap(True)
         self._bubble_text_lbl.setCursor(Qt.CursorShape.ArrowCursor)
         self._bubble_text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
