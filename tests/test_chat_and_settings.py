@@ -115,6 +115,24 @@ class TestChatAndSettings(unittest.TestCase):
                     self.assertEqual(chat.ask("继续解释算法", settings).text, "在线回复")
                     request.assert_called_once()
                     self.assertEqual(request.call_args.args[2], "gemini-3.1-flash-lite")
+
+                    # 清空 Key 后实际按离线运行，菜单勾选需与状态徽章一致
+                    settings.gemini_api_key = ""
+                    pet._sync_chat_controls()
+                    self.assertEqual(pet._chat_channel_badge.text(), "离线模式")
+                    keyless_menu = QMenu(pet)
+                    pet._populate_connection_menu(keyless_menu)
+                    keyless_modes = {
+                        action.data()[1]: action
+                        for action in keyless_menu.actions()
+                        if action.data() and action.data()[0] == "chat_mode"
+                    }
+                    self.assertTrue(keyless_modes["offline"].isChecked())
+                    self.assertFalse(keyless_modes["api_key"].isChecked())
+                    keyless_modes["api_key"].trigger()
+                    self.assertIn("Gemini API Key", pet._bubble_text_lbl.text())
+                    self.assertTrue(keyless_modes["offline"].isChecked())
+                    self.assertFalse(keyless_modes["api_key"].isChecked())
             finally:
                 pet.close()
                 pet.deleteLater()

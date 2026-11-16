@@ -2655,7 +2655,11 @@ class PetWindow(QWidget):
             tooltip = "使用 Gemini 官方 API Key（点击可获取模型或打开设置）"
         else:
             color, rgb = "#FDE68A", "251, 191, 36"
-            tooltip = "当前处于离线模式，点击可切换为官方 API Key 联网对话"
+            tooltip = (
+                "当前处于离线模式，点击可切换为官方 API Key 联网对话"
+                if self._settings.chat_offline_mode
+                else "未填写 Gemini API Key，当前使用离线陪伴；点击可打开设置"
+            )
         self._chat_channel_badge.setToolTip(tooltip)
         self._chat_channel_badge.setStyleSheet(
             "QPushButton#ChatChannelBadge { "
@@ -2673,16 +2677,23 @@ class PetWindow(QWidget):
         )
         self._update_chat_size_btn_label()
 
+    def _effective_chat_offline(self) -> bool:
+        """未填写 API Key 时实际按离线运行，用于同步状态徽章与菜单勾选。"""
+        return self._settings.chat_offline_mode or not (self._settings.gemini_api_key or "").strip()
+
     def _populate_connection_menu(self, menu: QMenu) -> None:
         modes = QActionGroup(menu)
         modes.setExclusive(True)
+        effective_offline = self._effective_chat_offline()
         for offline, label in ((True, "🌙 离线陪伴"), (False, "🌐 在线 · 官方 API Key")):
             action = menu.addAction(label)
             action.setCheckable(True)
-            action.setChecked(self._settings.chat_offline_mode == offline)
+            action.setChecked(effective_offline == offline)
             action.setData(("chat_mode", "offline" if offline else "api_key"))
             modes.addAction(action)
-            action.triggered.connect(lambda _checked=False, value=offline: self.select_chat_offline_mode(value))
+            action.triggered.connect(
+                lambda _checked=False, value=offline, act=action: self._select_chat_mode_from_menu(act, value)
+            )
         menu.addSeparator()
         refresh = menu.addAction("🔄 获取 / 刷新官方模型")
         refresh.setEnabled(not self._settings.chat_offline_mode)
@@ -2690,9 +2701,26 @@ class PetWindow(QWidget):
         settings = menu.addAction("⚙️ 设置 API Key...")
         settings.triggered.connect(self.open_settings_requested)
 
+    def _select_chat_mode_from_menu(self, action: QAction, offline: bool) -> None:
+        """点击菜单后按实际生效模式回写勾选，避免无 Key 时在线挡被误选。"""
+        self.select_chat_offline_mode(offline)
+        group = action.actionGroup()
+        if group is None:
+            return
+        effective_offline = self._effective_chat_offline()
+        for item in group.actions():
+            item.setChecked(
+                item.data() == ("chat_mode", "offline" if effective_offline else "api_key")
+            )
+
     def select_chat_offline_mode(self, offline: bool) -> None:
         previous = self._settings.chat_offline_mode
         if previous == offline:
+            # 无 Key 时在线挡实际仍走离线，重复点击时提示补全配置。
+            if not offline and not (self._settings.gemini_api_key or "").strip():
+                self._show_chat_status_notice(
+                    "✦ 在线模式需要 Gemini API Key，请先在偏好设置中填写", force=True
+                )
             return
         self._settings.chat_offline_mode = offline
         try:
