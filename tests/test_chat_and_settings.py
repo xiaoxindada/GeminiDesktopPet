@@ -21,15 +21,12 @@ from views.settings_window import SettingsWindow
 
 
 def _isolated_env(home_dir: str, appdata_dir: str) -> dict[str, str]:
-    clean_path = os.pathsep.join(
-        p for p in os.environ.get("PATH", "").split(os.pathsep) if "agy" not in p.lower()
-    )
     return {
         "USERPROFILE": home_dir,
         "HOME": home_dir,
         "APPDATA": appdata_dir,
         "LOCALAPPDATA": appdata_dir,
-        "PATH": clean_path,
+        "PATH": os.environ.get("PATH", ""),
     }
 
 

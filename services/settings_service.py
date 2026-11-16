@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from models.app_version import (
-    USER_CONFIG_DIR_NAME,
     get_app_base_dir,
     get_bundled_resource_dir,
     get_user_config_dir,

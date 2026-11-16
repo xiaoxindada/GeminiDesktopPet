@@ -1,6 +1,6 @@
 """设定图在布局收缩、切页和刷新后必须保持完整。"""
 import pytest
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
