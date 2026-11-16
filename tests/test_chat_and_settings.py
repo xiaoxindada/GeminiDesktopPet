@@ -47,7 +47,7 @@ class TestChatAndSettings(unittest.TestCase):
             SimpleNamespace(id="demo-turn-1", output_text="第一轮回复"),
             SimpleNamespace(id="demo-turn-2", output_text="第二轮回复"),
         ]
-        settings = PetSettings(gemini_api_key="demo-api-key", gemini_model="gemini-3.1-flash-lite")
+        settings = PetSettings(gemini_api_key="demo-api-key", gemini_model=DEFAULT_GEMINI_MODEL)
         chat = GeminiChatService()
         with patch("google.genai.Client", return_value=client) as factory:
             self.assertEqual(chat.ask("分析一下这段算法", settings).text, "第一轮回复")
@@ -114,7 +114,7 @@ class TestChatAndSettings(unittest.TestCase):
                     self.assertEqual(pet._chat_channel_badge.text(), "在线 · API Key")
                     self.assertEqual(chat.ask("继续解释算法", settings).text, "在线回复")
                     request.assert_called_once()
-                    self.assertEqual(request.call_args.args[2], "gemini-3.1-flash-lite")
+                    self.assertEqual(request.call_args.args[2], DEFAULT_GEMINI_MODEL)
 
                     # 清空 Key 后实际按离线运行，菜单勾选需与状态徽章一致
                     settings.gemini_api_key = ""
@@ -142,9 +142,10 @@ class TestChatAndSettings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service = SettingsService(tmp)
             settings = service.load()
-            self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.1-flash-lite")
             self.assertEqual(settings.gemini_model, DEFAULT_GEMINI_MODEL)
-            self.assertEqual(format_model_display_name(None), "Gemini 3.1 Flash-Lite")
+            self.assertEqual(
+                format_model_display_name(None), format_model_display_name(DEFAULT_GEMINI_MODEL)
+            )
             settings.gemini_model = "gemini-2.5-flash"
             service.save(settings)
             self.assertEqual(service.load().gemini_model, "gemini-2.5-flash")
@@ -168,7 +169,7 @@ class TestChatAndSettings(unittest.TestCase):
         fake_models = [
             MagicMock(name="models/gemini-2.5-pro", supported_actions=["generateContent"]),
             MagicMock(name="models/gemini-embedding-001", supported_actions=["embedContent"]),
-            MagicMock(name="models/gemini-3.1-flash-lite", supported_actions=["generateContent", "countTokens"]),
+            MagicMock(name=f"models/{DEFAULT_GEMINI_MODEL}", supported_actions=["generateContent", "countTokens"]),
             MagicMock(name="models/imagen-3.0-generate-002", supported_actions=["predict"]),
             MagicMock(name="models/gemini-3-flash-preview", supported_actions=["createInteraction"]),
         ]
@@ -178,7 +179,7 @@ class TestChatAndSettings(unittest.TestCase):
             [
                 "models/gemini-2.5-pro",
                 "models/gemini-embedding-001",
-                "models/gemini-3.1-flash-lite",
+                f"models/{DEFAULT_GEMINI_MODEL}",
                 "models/imagen-3.0-generate-002",
                 "models/gemini-3-flash-preview",
             ],
@@ -193,7 +194,7 @@ class TestChatAndSettings(unittest.TestCase):
         GeminiChatService._api_models_cache.clear()
         with patch("google.genai.Client", return_value=fake_client):
             fetched = GeminiChatService.fetch_api_key_models("AIza-test-models")
-        self.assertEqual(fetched, ["gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-3-flash-preview"])
+        self.assertEqual(fetched, [DEFAULT_GEMINI_MODEL, "gemini-2.5-pro", "gemini-3-flash-preview"])
 
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -225,10 +226,10 @@ class TestChatAndSettings(unittest.TestCase):
                     )
                     try:
                         # 获取前不写死大模型清单，仅显示当前配置的默认模型
-                        self.assertEqual(win._model_combo.currentText(), "gemini-3.1-flash-lite")
+                        self.assertEqual(win._model_combo.currentText(), DEFAULT_GEMINI_MODEL)
                         self.assertEqual(
                             [win._model_combo.itemText(i) for i in range(win._model_combo.count())],
-                            ["gemini-3.1-flash-lite"],
+                            [DEFAULT_GEMINI_MODEL],
                         )
                         # 验证 对话模型 / Gemini API Key / 思考强度 三行均采用统一水平标签布局
                         self.assertIsNotNone(win._model_combo.parentWidget())
@@ -244,13 +245,13 @@ class TestChatAndSettings(unittest.TestCase):
                         # 修改草稿后、未点确认前：既不触发 on_applied 也不写盘，可点击还原修改恢复
                         win._model_combo.setEditText("gemini-2.5-pro")
                         app.processEvents()
-                        self.assertEqual(settings.gemini_model, "gemini-3.1-flash-lite")
+                        self.assertEqual(settings.gemini_model, DEFAULT_GEMINI_MODEL)
                         self.assertEqual(applied_calls, 0)
                         self.assertTrue(win.has_unsaved_changes())
                         win._discard_btn.click()
                         app.processEvents()
                         self.assertFalse(win.has_unsaved_changes())
-                        self.assertEqual(win._model_combo.currentText(), "gemini-3.1-flash-lite")
+                        self.assertEqual(win._model_combo.currentText(), DEFAULT_GEMINI_MODEL)
 
                         # 再次修改并点击确认修改 -> 写盘并显示保存成功
                         win._model_combo.setEditText("gemini-2.5-pro")

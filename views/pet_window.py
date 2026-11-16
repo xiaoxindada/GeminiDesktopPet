@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 from models import (
     CharacterLore,
     CharacterProfile,
+    DEFAULT_GEMINI_MODEL,
     DockSide,
     PetSettings,
     PetState,
@@ -670,7 +671,9 @@ class PetWindow(QWidget):
         toolbar_row.setContentsMargins(0, 0, 0, 0)
         toolbar_row.setSpacing(6)
 
-        self._chat_model_btn = QPushButton(f"{format_model_display_name(None)} · 自动   ▾", self._chat_toolbar)
+        self._chat_model_btn = QPushButton(
+            f"{format_model_display_name(DEFAULT_GEMINI_MODEL)} · 自动   ▾", self._chat_toolbar
+        )
         self._chat_model_btn.setObjectName("ChatModelBtn")
         self._chat_model_btn.setToolTip("点击切换当前对话模型与思考强度")
         self._chat_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
