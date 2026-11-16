@@ -37,10 +37,14 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QSplitter,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -73,6 +77,7 @@ from services import (
     SystemMetrics,
     SystemMonitorService,
 )
+from services.chat_history_service import ChatHistoryService
 from services.sprite_manager import SpriteManager
 from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
@@ -413,6 +418,15 @@ class PetWindow(QWidget):
         super().__init__(None)
         self._settings = settings
         self._settings_service = settings_service
+        # 未保存尺寸时使用最大预设，已手动调整的尺寸继续保留。
+        _, default_chat_width, default_chat_height = self._CHAT_WINDOW_SIZE_PRESETS[-1]
+        if settings.chat_width is None:
+            settings.chat_width = default_chat_width
+        if settings.chat_height is None:
+            settings.chat_height = default_chat_height
+        self._chat_archive = ChatHistoryService(settings_service.settings_path.parent)
+        self._history_expanded = False
+        self._archive_error = ""
         self._sprites = sprites
         self._sound = sound
         self._sys_monitor = sys_monitor
@@ -584,9 +598,9 @@ class PetWindow(QWidget):
         header_row.addWidget(self._chat_channel_badge)
         header_row.addStretch(1)
 
-        self._chat_clear_btn = QPushButton("🗑")
+        self._chat_clear_btn = QPushButton("＋")
         self._chat_clear_btn.setFixedSize(18, 18)
-        self._chat_clear_btn.setToolTip("清空聊天记录与对话上下文")
+        self._chat_clear_btn.setToolTip("开始新对话（旧会话保存在历史对话中）")
         self._chat_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._chat_clear_btn.setStyleSheet(
             """
@@ -713,6 +727,56 @@ class PetWindow(QWidget):
         self._chat_toolbar.setVisible(False)
         self._bubble_layout.addWidget(self._chat_toolbar)
 
+        self._chat_session_bar = QWidget(self._speech_bubble)
+        self._chat_session_bar.setStyleSheet("background: transparent;")
+        session_row = QHBoxLayout(self._chat_session_bar)
+        session_row.setContentsMargins(0, 0, 0, 0)
+        session_row.setSpacing(6)
+        self._history_btn = QPushButton("☰ 历史对话")
+        self._history_btn.setCheckable(True)
+        self._history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._history_btn.clicked.connect(self._toggle_chat_history)
+        self._new_chat_btn = QPushButton("＋ 新对话")
+        self._new_chat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._new_chat_btn.clicked.connect(self._clear_chat_history)
+        self._chat_session_bar.setStyleSheet("""
+            QWidget { background: transparent; }
+            QPushButton { background: #16112C; color: #D8CCFF; border: 1px solid #4E3F8E;
+                          border-radius: 7px; padding: 4px 9px; font-size: 11px; }
+            QPushButton:hover, QPushButton:checked { background: #35285E; border-color: #7C5CFF; }
+            QPushButton:disabled { color: #73698E; }
+        """)
+        session_row.addWidget(self._history_btn)
+        self._task_folder_btn = QPushButton("选择任务文件夹")
+        self._task_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._task_folder_btn.setToolTip("为当前会话关联任务文件夹")
+        self._task_folder_btn.clicked.connect(self._choose_task_folder)
+        session_row.addWidget(self._task_folder_btn)
+        session_row.addStretch(1)
+        session_row.addWidget(self._new_chat_btn)
+        self._chat_session_bar.hide()
+        self._bubble_layout.addWidget(self._chat_session_bar)
+
+        # 列表与原消息卡片共用同一窗口；收起列表后恢复紧凑聊天布局。
+        self._chat_splitter = QSplitter(Qt.Orientation.Horizontal, self._speech_bubble)
+        self._chat_splitter.setChildrenCollapsible(False)
+        self._chat_splitter.setHandleWidth(6)
+        self._chat_splitter.setStyleSheet("QSplitter::handle { background: #352B55; }")
+        self._history_list = QListWidget(self._chat_splitter)
+        self._history_list.setMinimumWidth(140)
+        self._history_list.setMaximumWidth(240)
+        self._history_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._history_list.setStyleSheet("""
+            QListWidget { background: #19142C; color: #CEC3ED; border: 1px solid #4E3F8E;
+                          border-radius: 8px; outline: none; font-size: 11px; }
+            QListWidget::item { padding: 10px 7px; border-bottom: 1px solid #302746; }
+            QListWidget::item:selected { background: #443371; color: #FFFFFF; }
+            QListWidget::item:hover { background: #302448; }
+        """)
+        self._history_list.currentItemChanged.connect(self._select_chat_session)
+        self._history_list.hide()
+
         self._bubble_scroll = QScrollArea(self._speech_bubble)
         self._bubble_scroll.setWidgetResizable(True)
         self._bubble_scroll.setMinimumHeight(24)
@@ -775,7 +839,9 @@ class PetWindow(QWidget):
         self._bubble_content_layout.addStretch(1)
 
         self._bubble_scroll.setWidget(self._bubble_content)
-        self._bubble_layout.addWidget(self._bubble_scroll, 1)
+        self._chat_splitter.addWidget(self._bubble_scroll)
+        self._chat_splitter.setStretchFactor(1, 1)
+        self._bubble_layout.addWidget(self._chat_splitter, 1)
 
         # Inline Chat Input Panel
         self._chat_input_panel = QWidget(self._speech_bubble)
@@ -827,6 +893,39 @@ class PetWindow(QWidget):
 
         self._chat_input_panel.setVisible(False)
         self._bubble_layout.addWidget(self._chat_input_panel)
+
+        self._chat_path_panel = QWidget(self._speech_bubble)
+        path_layout = QVBoxLayout(self._chat_path_panel)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(2)
+        self._chat_save_status = QLabel("当前对话保存路径 · 首条消息后保存")
+        self._chat_save_status.setStyleSheet("color: #A89FD6; font-size: 10px; background: transparent;")
+        path_layout.addWidget(self._chat_save_status)
+        self._chat_path = QLineEdit()
+        self._chat_path.setReadOnly(True)
+        self._chat_path.setMinimumWidth(0)
+        self._chat_path.setStyleSheet(
+            "QLineEdit { color: #A89FD6; background: #19142C; border: none; "
+            "border-radius: 4px; padding: 3px 5px; font-size: 10px; }"
+        )
+        self._chat_path.setToolTip("当前会话文件；可选中复制，长路径可左右滚动查看")
+        path_layout.addWidget(self._chat_path)
+        task_row = QHBoxLayout()
+        task_row.setContentsMargins(0, 0, 0, 0)
+        task_label = QLabel("任务文件夹")
+        task_label.setStyleSheet("color: #A89FD6; font-size: 10px; background: transparent;")
+        task_row.addWidget(task_label)
+        self._task_folder_path = QLineEdit()
+        self._task_folder_path.setReadOnly(True)
+        self._task_folder_path.setMinimumWidth(0)
+        self._task_folder_path.setPlaceholderText("尚未选择")
+        self._task_folder_path.setStyleSheet(self._chat_path.styleSheet())
+        task_row.addWidget(self._task_folder_path, 1)
+        path_layout.addLayout(task_row)
+        self._chat_path_panel.hide()
+        self._bubble_layout.addWidget(self._chat_path_panel)
+        self._update_chat_save_path()
+
 
         self._speech_bubble.setVisible(False)
 
@@ -1365,7 +1464,9 @@ class PetWindow(QWidget):
         self._relayout_stage_top()
 
     def _bubble_min_size(self) -> tuple[int, int]:
-        return (300, 160) if self._is_chat_open else (220, 86)
+        if self._is_chat_open:
+            return (560, 360) if self._history_expanded else (320, 280)
+        return (220, 86)
 
     def _bubble_max_size(self, center_x: float, center_y: float) -> tuple[int, int]:
         area = self._get_work_area(center_x, center_y)
@@ -1400,6 +1501,9 @@ class PetWindow(QWidget):
             chrome_h += max(24, self._chat_toolbar.sizeHint().height()) + spacing
         if not self._chat_input_panel.isHidden():
             chrome_h += max(30, self._chat_input_panel.sizeHint().height()) + spacing
+        for panel in (self._chat_session_bar, self._chat_path_panel):
+            if not panel.isHidden():
+                chrome_h += panel.sizeHint().height() + spacing
         return max(min_h, min(max_h, chrome_h + scroll_h))
 
     def _compute_bubble_target_size(self) -> QSize:
@@ -2509,9 +2613,10 @@ class PetWindow(QWidget):
         return "api_key", badge, models, current
 
     _CHAT_WINDOW_SIZE_PRESETS: tuple[tuple[str, int, int], ...] = (
-        ("小", 360, 240),
-        ("中", 450, 340),
-        ("大", 580, 460),
+        # 各挡均容纳展开的历史列表，避免小、中挡被最小尺寸压成同一大小。
+        ("小", 560, 360),
+        ("中", 660, 480),
+        ("大", 760, 600),
     )
 
     def _update_chat_size_btn_label(self) -> None:
@@ -2528,22 +2633,24 @@ class PetWindow(QWidget):
 
     def cycle_chat_window_size(self) -> None:
         """在聊天模式中一键循环切换 小 / 中 / 大 窗口尺寸并持久化记忆。"""
-        current_w = self._settings.chat_width or (self._speech_bubble.width() if self._speech_bubble.isVisible() else 360)
+        current_w = self._settings.chat_width or self._speech_bubble.width()
+        current_h = self._settings.chat_height or self._speech_bubble.height()
         next_idx = 0
-        for i, (_name, pw, _ph) in enumerate(self._CHAT_WINDOW_SIZE_PRESETS):
-            if abs(current_w - pw) <= 15:
+        for i, (_name, pw, ph) in enumerate(self._CHAT_WINDOW_SIZE_PRESETS):
+            if abs(current_w - pw) <= 10 and abs(current_h - ph) <= 10:
                 next_idx = (i + 1) % len(self._CHAT_WINDOW_SIZE_PRESETS)
                 break
         else:
-            next_idx = 1 if current_w < 430 else (2 if current_w < 540 else 0)
+            next_idx = next(
+                (i for i, (_, pw, ph) in enumerate(self._CHAT_WINDOW_SIZE_PRESETS)
+                 if pw * ph > current_w * current_h),
+                0,
+            )
 
-        preset_name, target_w, target_h = self._CHAT_WINDOW_SIZE_PRESETS[next_idx]
-        min_w, min_h = self._bubble_min_size()
-        max_w, max_h = self._bubble_max_size(
-            self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
-        )
-        self._settings.chat_width = max(min_w, min(max_w, target_w))
-        self._settings.chat_height = max(min_h, min(max_h, target_h))
+        _, target_w, target_h = self._CHAT_WINDOW_SIZE_PRESETS[next_idx]
+        # 保存所选预设；实际显示尺寸由布局按屏幕限制，避免截断后丢失当前挡位。
+        self._settings.chat_width = target_w
+        self._settings.chat_height = target_h
         self._settings_service.save(self._settings)
         self._update_chat_size_btn_label()
         self._relayout_stage_top()
@@ -2555,6 +2662,15 @@ class PetWindow(QWidget):
         self._chat_clear_btn.setVisible(in_chat)
         self._bubble_settings_btn.setVisible(in_chat)
         self._chat_toolbar.setVisible(in_chat)
+        self._chat_session_bar.setVisible(in_chat)
+        self._chat_path_panel.setVisible(in_chat)
+        self._history_list.setVisible(in_chat and self._history_expanded)
+        busy = bool(self._waiting_chat_workers)
+        self._history_list.setEnabled(not busy)
+        self._new_chat_btn.setEnabled(not busy)
+        self._task_folder_btn.setEnabled(not busy)
+        self._chat_clear_btn.setEnabled(not busy)
+        self._chat_input_panel.setEnabled(not busy)
         self._chat_input_panel.setVisible(in_chat)
         if not in_chat:
             return
@@ -2850,7 +2966,6 @@ class PetWindow(QWidget):
             row_layout.addStretch(1)
             self._chat_messages_layout.addWidget(row)
             self._chat_message_rows.append(row)
-            self._trim_chat_rows_if_needed()
             QTimer.singleShot(0, self._scroll_chat_to_bottom)
             return row, None, notice_lbl
 
@@ -2911,30 +3026,145 @@ class PetWindow(QWidget):
 
         self._chat_messages_layout.addWidget(row)
         self._chat_message_rows.append(row)
-        self._trim_chat_rows_if_needed()
         QTimer.singleShot(0, self._scroll_chat_to_bottom)
         return row, meta_lbl, body_lbl
 
-    def _trim_chat_rows_if_needed(self) -> None:
-        while len(self._chat_message_rows) > 60:
-            oldest = self._chat_message_rows.pop(0)
-            self._chat_messages_layout.removeWidget(oldest)
-            oldest.deleteLater()
+    def _choose_task_folder(self) -> None:
+        if self._waiting_chat_workers:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self._speech_bubble, "选择任务文件夹", self._chat_archive.task_folder,
+        )
+        if not folder:
+            return
+        try:
+            self._chat_archive.set_task_folder(folder)
+        except (OSError, ValueError):
+            self._chat_save_status.setText("任务文件夹保存失败，请检查目录后重试")
+            return
+        self._archive_error = ""
+        self._update_chat_save_path()
+        self._refresh_chat_sessions()
+        self._relayout_stage_top()
 
-    def _clear_chat_history(self) -> None:
-        self._last_chat_api_notice = ""
+    def _update_chat_save_path(self) -> None:
+        self._task_folder_path.setText(self._chat_archive.task_folder)
+        self._task_folder_path.setCursorPosition(0)
+        self._task_folder_path.setToolTip(self._chat_archive.task_folder or "尚未选择任务文件夹")
+        path = self._chat_archive.session_path()
+        self._chat_path.setText(str(path))
+        self._chat_path.setCursorPosition(0)
+        self._chat_path.setToolTip(str(path))
+        if self._archive_error:
+            self._chat_save_status.setText("保存失败 · 请检查配置目录是否可写")
+        else:
+            self._chat_save_status.setText(
+                "当前对话保存路径 · 已保存" if path.exists()
+                else "当前对话保存路径 · 首条消息后保存"
+            )
+
+    def _save_chat_message(self, role: str, text: str, session_id=None) -> None:
+        try:
+            self._chat_archive.append(role, text, session_id=session_id)
+            self._archive_error = ""
+        except (OSError, ValueError) as exc:
+            self._archive_error = str(exc)
+        self._update_chat_save_path()
+        self._refresh_chat_sessions()
+
+    def _refresh_chat_sessions(self) -> None:
+        self._history_list.blockSignals(True)
+        try:
+            self._history_list.clear()
+            records = self._chat_archive.sessions()
+            current = self._chat_archive.session_id
+            if not any(record["id"] == current for record in records):
+                records.insert(0, {"id": current, "title": "新对话", "updated": "尚未发送消息"})
+            for record in records:
+                title = " ".join(str(record.get("title", "未命名会话")).split())
+                item = QListWidgetItem(title + "\n" + str(record.get("updated", "")).replace("T", " "))
+                item.setData(Qt.ItemDataRole.UserRole, record["id"])
+                item.setToolTip(title)
+                self._history_list.addItem(item)
+                if record["id"] == current:
+                    self._history_list.setCurrentItem(item)
+        finally:
+            self._history_list.blockSignals(False)
+
+    def _toggle_chat_history(self, checked: bool) -> None:
+        self._history_expanded = checked
+        self._history_btn.setChecked(checked)
+        self._refresh_chat_sessions()
+        self._sync_chat_controls()
+        self._relayout_stage_top()
+        if checked:
+            self._chat_splitter.setSizes([175, 360])
+
+    def _show_chat_history(self) -> None:
+        if not self.isVisible():
+            self.show()
+        self.open_chat_dialog()
+        self._toggle_chat_history(True)
+
+    def _clear_chat_rows(self) -> None:
         for row in self._chat_message_rows:
             self._chat_messages_layout.removeWidget(row)
             row.deleteLater()
         self._chat_message_rows.clear()
+
+    def _select_chat_session(self, item, previous=None) -> None:
+        if item is None or self._waiting_chat_workers:
+            return
+        session_id = item.data(Qt.ItemDataRole.UserRole)
+        if session_id == self._chat_archive.session_id:
+            return
+        try:
+            record = self._chat_archive.load(session_id)
+        except (OSError, ValueError):
+            self._refresh_chat_sessions()
+            self._chat_save_status.setText("无法读取所选会话，当前对话保持不变")
+            return
+        self._chat_archive.session_id = session_id
+        self._chat_archive.task_folder = record.get("task_folder", "")
+        self._chat.restore_conversation(record["messages"])
+        self._clear_chat_rows()
+        self._chat_input.clear()
+        self._last_chat_api_notice = ""
+        self._archive_error = ""
+        # 浏览历史时保留全部卡片，不沿用旧版只显示最近 60 行的限制。
+        self._chat_messages_panel.setVisible(bool(record["messages"]))
+        self._bubble_text_lbl.setVisible(not record["messages"])
+        if not record["messages"]:
+            self._bubble_text_lbl.setText("任务文件夹已就绪，想聊什么呀喵？✦")
+        for message in record["messages"]:
+            sender = "你" if message["role"] == "user" else "Gemini 娘"
+            self._append_chat_turn(
+                role=message["role"], sender=sender, text=message["text"],
+                meta=f"{sender} · {message.get('time', '').replace('T', ' ')}",
+            )
+        self._update_chat_save_path()
+        self._relayout_stage_top()
+        self._chat_input.setFocus()
+
+    def _clear_chat_history(self) -> None:
+        if self._waiting_chat_workers:
+            return
+        self._chat_archive.new_session()
+        self._archive_error = ""
+        self._last_chat_api_notice = ""
+        self._clear_chat_rows()
         self._chat.reset_conversation()
+        self._chat_input.clear()
         self._chat_messages_panel.setVisible(False)
         self._bubble_text_lbl.setStyleSheet(
             "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
         )
-        self._bubble_text_lbl.setText("已清空聊天记录，想聊什么呀喵✦")
+        self._bubble_text_lbl.setText("已开始新对话，旧会话已保存在历史对话中✦")
         self._bubble_text_lbl.setVisible(True)
+        self._update_chat_save_path()
+        self._refresh_chat_sessions()
         self._relayout_stage_top()
+        self._chat_input.setFocus()
 
     def show_bubble(self, message: str, duration_sec: float, force: bool = False) -> None:
         if not force and not self._settings.show_speech_bubble and not self._is_chat_open:
@@ -2988,7 +3218,7 @@ class PetWindow(QWidget):
 
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
-        self._sync_chat_controls()
+        self._toggle_chat_history(True)
         invalid_reason = self._chat.get_api_error(self._settings)
         if self._chat_message_rows:
             self._bubble_text_lbl.setVisible(False)
@@ -3061,7 +3291,7 @@ class PetWindow(QWidget):
 
     def _submit_chat(self) -> None:
         text = self._chat_input.text().strip()
-        if not text:
+        if not text or self._waiting_chat_workers:
             return
         self._chat_input.clear()
         self._is_chat_open = True
@@ -3083,6 +3313,7 @@ class PetWindow(QWidget):
         else:
             model_tag = "离线陪伴"
 
+        self._save_chat_message("user", text)
         self._append_chat_turn(role="user", sender="你", text=text, meta=f"你 · {now_str}")
         pending_target = self._append_chat_turn(
             role="assistant",
@@ -3099,7 +3330,7 @@ class PetWindow(QWidget):
         QTimer.singleShot(0, self._scroll_chat_to_bottom)
 
         metrics = self._sys_monitor.sample()
-        target_info = (pending_target, char_name, model_tag)
+        target_info = (pending_target, char_name, model_tag, self._chat_archive.session_id)
         worker = _ChatWorker(
             self._chat,
             text,
@@ -3110,6 +3341,7 @@ class PetWindow(QWidget):
         )
         self._active_chat_workers.append(worker)
         self._waiting_chat_workers.add(worker)
+        self._sync_chat_controls()
         self._set_temporary_pose(PetState.THINKING, 90.0)
         worker.reply_ready.connect(self._on_chat_reply_ready)
         worker.finished.connect(lambda w=worker: self._cleanup_chat_worker(w))
@@ -3146,7 +3378,11 @@ class PetWindow(QWidget):
         now_str = datetime.now().strftime("%H:%M")
 
         if target_info is not None:
-            pending_target, char_name, model_tag = target_info
+            pending_target, char_name, model_tag = target_info[:3]
+            session_id = target_info[3] if len(target_info) > 3 else self._chat_archive.session_id
+            self._save_chat_message("assistant", reply.text, session_id=session_id)
+            if session_id != self._chat_archive.session_id:
+                return
             row, meta_lbl, body_lbl = pending_target
             if row in self._chat_message_rows:
                 body_lbl.setText(reply.text)
