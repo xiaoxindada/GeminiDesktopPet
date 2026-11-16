@@ -1,4 +1,4 @@
-"""角色档案、立绘三视图与 55 态 Q 版表情动作图鉴窗口。"""
+"""角色档案、立绘三视图与 Q 版、标准版动作图鉴窗口。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from models.app_version import get_bundled_resource_dir
 from models.character_lore import CharacterLore
-from models.pet_settings import PetSettings
+from models.pet_settings import PetSettings, PetStyleMode
 from models.pet_state import PetState
 from services.sprite_manager import SpriteManager
 from services.tray_icon_service import TrayIconService
@@ -36,7 +36,7 @@ class ProfileWindow(QWidget):
         self,
         sprite_manager: SpriteManager,
         settings: PetSettings,
-        on_preview_state: Callable[[PetState], None],
+        on_preview_state: Callable[[PetState, PetStyleMode], None],
         on_open_editor: Optional[Callable[[], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -121,7 +121,13 @@ class ProfileWindow(QWidget):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_profile_tab(), "✦ 角色档案与设定")
         self._tabs.addTab(self._build_turnaround_tab(), "📐 角色三视图参考")
-        self._tabs.addTab(self._build_gallery_tab(), "🐱 Q版表情动作图鉴（点击可试演）")
+        self._gallery_cards = []
+        self._gallery_tabs = {}
+        for style, title in (
+            (PetStyleMode.CHIBI, "🐱 Q版动作演示"),
+            (PetStyleMode.STANDARD, "✦ 标准版动作演示"),
+        ):
+            self._gallery_tabs[style] = self._tabs.addTab(self._build_gallery_tab(style), title)
         root.addWidget(self._tabs, 1)
 
         footer = QFrame()
@@ -223,7 +229,7 @@ class ProfileWindow(QWidget):
         vl.addWidget(self._turnaround_caption_lbl)
         return w
 
-    def _build_gallery_tab(self) -> QWidget:
+    def _build_gallery_tab(self, style: PetStyleMode) -> QWidget:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         container = QWidget()
@@ -233,7 +239,7 @@ class ProfileWindow(QWidget):
 
         cols = 6
         for idx, state in enumerate(PetState):
-            pix = self._sprites.get(state)
+            pix = self._sprites.get(state, style)
             if pix is None:
                 continue
             card = QPushButton()
@@ -261,13 +267,16 @@ class ProfileWindow(QWidget):
             img.setStyleSheet("background: transparent; border: none;")
             img.setPixmap(pix.scaled(98, 102, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             cl.addWidget(img, 1)
+            self._gallery_cards.append((state, style, img))
 
             lbl = QLabel(state.to_sprite_key())
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet("color: #D7D0F5; font-size: 11px; background: transparent; border: none;")
             cl.addWidget(lbl)
 
-            card.clicked.connect(lambda _=False, st=state: self._on_preview_state(st))
+            card.setObjectName(f"preview_{style.value}_{state.value}")
+            card.setToolTip("以此形象演示动作，并保留形象选择")
+            card.clicked.connect(lambda _=False, st=state, mode=style: self._on_preview_state(st, mode))
             grid.addWidget(card, idx // cols, idx % cols)
 
         scroll.setWidget(container)
@@ -276,6 +285,14 @@ class ProfileWindow(QWidget):
     def refresh_profile(self, settings: Optional[PetSettings] = None) -> None:
         if settings is not None:
             self._settings = settings
+        # 正在浏览动作页时跟随桌宠形象切换；档案和三视图页不跳转。
+        if self._tabs.currentIndex() in self._gallery_tabs.values():
+            self._tabs.setCurrentIndex(self._gallery_tabs[self._settings.style_mode])
+        for state, style, label in self._gallery_cards:
+            pix = self._sprites.get(state, style)
+            if pix is not None:
+                label.setPixmap(pix.scaled(98, 102, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation))
         p = CharacterLore.get_active_profile()
 
         self._name_lbl.setText(f"✦ {p.name}")
@@ -297,18 +314,8 @@ class ProfileWindow(QWidget):
         standee_path = p.custom_standee_path if os.path.isfile(p.custom_standee_path) else os.path.join(res_dir, "gemini_standee.png")
         turn_path = p.custom_turnaround_path if os.path.isfile(p.custom_turnaround_path) else os.path.join(res_dir, "gemini_turnaround.png")
 
-        if os.path.isfile(standee_path):
-            pix = QPixmap(standee_path)
-            if not pix.isNull():
-                self._standee_lbl.setPixmap(
-                    pix.scaled(260, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                )
-        if os.path.isfile(turn_path):
-            pix = QPixmap(turn_path)
-            if not pix.isNull():
-                self._turnaround_lbl.setPixmap(
-                    pix.scaled(780, 420, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                )
+        self._standee_lbl.setPixmap(QPixmap(standee_path).scaled(260, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self._turnaround_lbl.setPixmap(QPixmap(turn_path).scaled(780, 420, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
         while self._traits_container.count():
             item = self._traits_container.takeAt(0)

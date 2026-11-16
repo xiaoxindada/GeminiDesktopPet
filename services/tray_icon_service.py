@@ -19,7 +19,6 @@ class TrayIconService(QObject):
 
     show_and_greet_requested = Signal()
     open_chat_requested = Signal()
-    pat_requested = Signal()
     reset_position_requested = Signal()
     style_toggle_requested = Signal()
     anti_gravity_toggled = Signal(bool)
@@ -58,7 +57,6 @@ class TrayIconService(QObject):
 
         self._add_action("📊 查看反重力额度 (Antigravity)", self.open_quota_requested.emit)
         self._add_action("💬 聊天模式 / 选模型对话", self.open_chat_requested.emit)
-        self._add_action("♥ 摸摸猫耳", self.pat_requested.emit)
 
         self._style_action = self._add_action(
             "🎀 切换形象：当前 Q 版 → 切至标准版", self.style_toggle_requested.emit

@@ -15,6 +15,7 @@ from models import (
     CharacterProfile,
     PetSettings,
     PetState,
+    PetStyleMode,
 )
 from services import (
     AppFollowService,
@@ -192,7 +193,6 @@ class PetApplicationCoordinator(QObject):
         # TrayIconService signals
         self._tray.show_and_greet_requested.connect(self._wake_from_tray_or_greet)
         self._tray.open_chat_requested.connect(self._open_chat_from_tray)
-        self._tray.pat_requested.connect(self._pat_from_tray)
         self._tray.reset_position_requested.connect(self._reset_position_from_tray)
         self._tray.style_toggle_requested.connect(self._pet.toggle_style_mode)
         self._tray.anti_gravity_toggled.connect(self._set_anti_gravity_from_tray)
@@ -307,11 +307,6 @@ class PetApplicationCoordinator(QObject):
         if not self._pet.isVisible():
             self._pet.show()
         self._pet.open_chat_dialog()
-
-    def _pat_from_tray(self) -> None:
-        if not self._pet.isVisible():
-            self._pet.show()
-        self._pet.trigger_pat()
 
     def _reset_position_from_tray(self) -> None:
         if not self._pet.isVisible():
@@ -432,7 +427,10 @@ class PetApplicationCoordinator(QObject):
         self._profile_win.refresh_profile(self._settings)
         self._show_and_focus(self._profile_win)
 
-    def _on_profile_preview_state(self, state: PetState) -> None:
+    def _on_profile_preview_state(self, state: PetState, style: PetStyleMode) -> None:
+        # 图鉴演示明确携带形象版本，沿用正常切换入口保存用户选择。
+        if self._settings.style_mode != style:
+            self._pet._set_style_mode(style)
         if not self._pet.isVisible():
             self._pet.show()
         self._pet.trigger_external_sprite_preview(state.to_sprite_key())
