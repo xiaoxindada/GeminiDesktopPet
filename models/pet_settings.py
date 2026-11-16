@@ -54,35 +54,146 @@ class ChatAuthMode(str, Enum):
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OAUTH_MODEL = "gemini-2.5-flash"
-BUILTIN_OAUTH_MODELS: tuple[str, ...] = (
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-4-hydrogen",
-    "gemini-4-argon",
-    "gemini-3-flash-preview",
-    "gemini-3.8-flash-low",
-    "gemini-3.8-flash-medium",
-    "gemini-3.8-flash-high",
-)
+DEFAULT_THINKING_LEVEL = "auto"
+
 DEPRECATED_MODEL_PREFIXES = ("gemini-2.0-", "gemini-1.5-", "gemini-1.0-")
+LEGACY_GEMINI_DEFAULT_MODELS = ("gemini-4-hydrogen",)
+
+THINKING_LEVEL_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("auto", "自动"),
+    ("off", "Off"),
+    ("minimal", "Minimal"),
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra"),
+)
+THINKING_LEVEL_LABELS: dict[str, str] = dict(THINKING_LEVEL_OPTIONS)
+
+
+def format_model_display_name(model_id: str | None) -> str:
+    """将动态获取的模型 ID 格式化为简洁可读名称（不写死静态清单，也不显示新/旧标签）。"""
+    cleaned = (model_id or "").strip()
+    if not cleaned:
+        return "Gemini 2.5 Flash"
+    if cleaned.startswith("models/"):
+        cleaned = cleaned[len("models/") :]
+    low = cleaned.lower()
+
+    if low == "gemini-pro-orchestrator-g1-pro":
+        return "Orchestrator (Argon)"
+    if low == "gpt-oss-120b-medium":
+        return "GPT-OSS 120B (Medium)"
+
+    parts = cleaned.split("-")
+    # 合并 claude-opus-5-5 -> Claude Opus 5.5
+    if low.startswith("claude-") and len(parts) >= 4 and parts[-1].isdigit() and parts[-2].isdigit():
+        ver = f"{parts[-2]}.{parts[-1]}"
+        body = " ".join(p.capitalize() for p in parts[:-2])
+        return f"{body} {ver}"
+
+    formatted: list[str] = []
+    for p in parts:
+        pl = p.lower()
+        if pl == "preview":
+            formatted.append("(Preview)")
+        elif pl == "it":
+            formatted.append("IT")
+        elif pl == "er":
+            formatted.append("ER")
+        elif pl == "customtools":
+            formatted.append("CustomTools")
+        elif pl == "flash":
+            formatted.append("Flash")
+        elif pl == "lite":
+            if formatted and formatted[-1] == "Flash":
+                formatted[-1] = "Flash-Lite"
+            else:
+                formatted.append("Lite")
+        elif pl == "gpt":
+            formatted.append("GPT")
+        elif pl == "oss":
+            formatted.append("OSS")
+        elif pl.endswith("b") and pl[:-1].isdigit():
+            formatted.append(p.upper())
+        elif any(ch.isdigit() for ch in p):
+            formatted.append(p.upper() if len(p) <= 3 and p[0].isalpha() else p)
+        else:
+            formatted.append(p.capitalize())
+    return " ".join(formatted)
+
+
+def normalize_thinking_level(level: str | None) -> str:
+    """规范化思考强度枚举值，兼容 extra/default 等别名。"""
+    cleaned = (level or "").strip().lower()
+    if not cleaned or cleaned in ("auto", "default", "unspecified", "thinking_level_unspecified"):
+        return "auto"
+    if cleaned in ("extra", "xhigh", "max"):
+        return "xhigh"
+    if cleaned in ("off", "none", "disabled", "0"):
+        return "off"
+    if cleaned in ("minimal", "min"):
+        return "minimal"
+    if cleaned in ("low", "medium", "high"):
+        return cleaned
+    return "auto"
+
+
+def format_thinking_level_label(level: str | None) -> str:
+    normalized = normalize_thinking_level(level)
+    return THINKING_LEVEL_LABELS.get(normalized, "自动")
+
+
+def get_supported_thinking_levels(model_id: str | None) -> tuple[str, ...]:
+    """根据模型系列返回支持的思考强度档位（兼容官方公开模型与动态发现模型）。"""
+    low = (model_id or "").strip().lower()
+    if not low:
+        return ("auto", "low", "medium", "high")
+    if low.startswith(("gemini-4-hydrogen", "gemini-4-carbon")):
+        return ("auto", "low", "medium", "high", "xhigh")
+    if low.startswith(("gemini-4-argon", "gemini-3.8-flash", "claude-")):
+        return ("auto", "low", "medium", "high")
+    if low.startswith(
+        (
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-robotics-er-2",
+            "gemma-4",
+        )
+    ):
+        return ("auto", "minimal", "low", "medium", "high")
+    if low.startswith("gemini-3-pro-preview"):
+        return ("auto", "low", "high")
+    if low.startswith(("gemini-3.1-pro", "gemini-3.1-flash-lite")):
+        return ("auto", "low", "medium", "high")
+    if low.startswith(("gemini-2.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest")):
+        return ("auto", "off", "low", "medium", "high")
+    if low.startswith(("gemini-2.5-pro", "gemini-pro-latest")):
+        return ("auto", "low", "medium", "high")
+    if low.startswith(("gemini-pro-orchestrator", "gpt-oss-")):
+        return ("auto",)
+    return ("auto", "minimal", "low", "medium", "high", "xhigh")
 
 
 def normalize_gemini_model(model: str | None) -> str:
-    """Normalize configured model name and upgrade deprecated Gemini versions."""
+    """Normalize API Key model name and upgrade deprecated or non-API default values."""
     cleaned = (model or "").strip()
     if not cleaned:
         return DEFAULT_GEMINI_MODEL
-    if cleaned.lower().startswith(DEPRECATED_MODEL_PREFIXES):
+    lowered = cleaned.lower()
+    if lowered.startswith(DEPRECATED_MODEL_PREFIXES) or lowered in LEGACY_GEMINI_DEFAULT_MODELS:
         return DEFAULT_GEMINI_MODEL
     return cleaned
 
 
 def normalize_oauth_model(model: str | None) -> str:
-    """规范化 OAuth 对话模型名，留空时回退到官方默认模型。"""
+    """规范化 OAuth 对话模型名，留空或已废弃旧版本时回退到官方默认模型。"""
     cleaned = (model or "").strip()
-    return cleaned if cleaned else DEFAULT_OAUTH_MODEL
+    if not cleaned or cleaned.lower().startswith(DEPRECATED_MODEL_PREFIXES):
+        return DEFAULT_OAUTH_MODEL
+    return cleaned
 
 
 @dataclass
@@ -107,7 +218,6 @@ class PetSettings:
     auto_festival_costume: bool = True
     follow_antigravity: bool = True
     follow_gemini_app: bool = True
-    sleep_when_antigravity_exits: bool = False
 
     costume_override: str = "auto"
 
@@ -125,6 +235,7 @@ class PetSettings:
     gemini_api_key: str = ""
     gemini_model: str = DEFAULT_GEMINI_MODEL
     oauth_model: str = DEFAULT_OAUTH_MODEL
+    thinking_level: str = DEFAULT_THINKING_LEVEL
 
     update_releases_url: str = "https://github.com/xiaoxindada/GeminiDesktopPet/releases"
     auto_check_updates: bool = True

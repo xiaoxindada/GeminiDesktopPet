@@ -111,6 +111,30 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-2.5-flash")
             self.assertEqual(DEFAULT_OAUTH_MODEL, "gemini-2.5-flash")
             self.assertEqual(normalize_gemini_model("gemini-2.5-pro"), "gemini-2.5-pro")
+            self.assertEqual(normalize_gemini_model("gemini-4-hydrogen"), "gemini-2.5-flash")
+            from models import normalize_oauth_model, normalize_thinking_level
+
+            self.assertEqual(normalize_oauth_model(""), "gemini-2.5-flash")
+            self.assertEqual(normalize_oauth_model("gemini-4-hydrogen"), "gemini-4-hydrogen")
+            self.assertEqual(normalize_thinking_level("Extra"), "xhigh")
+
+            # 旧 API Key 默认占位符 gemini-4-hydrogen 在加载旧版 user_config.json 时迁移到 gemini-2.5-flash，保留 OAuth 模型与思考强度
+            svc.settings_path.write_text(
+                json.dumps(
+                    {
+                        "gemini": {
+                            "model": "gemini-4-hydrogen",
+                            "oauth_model": "gemini-4-hydrogen",
+                            "thinking_level": "Extra",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            migrated = svc.load()
+            self.assertEqual(migrated.gemini_model, "gemini-2.5-flash")
+            self.assertEqual(migrated.oauth_model, "gemini-4-hydrogen")
+            self.assertEqual(migrated.thinking_level, "xhigh")
 
         # 验证默认配置目录为 %USERPROFILE%\.GeminiDesktopPet\user_config.json
         with tempfile.TemporaryDirectory() as tmp_home:

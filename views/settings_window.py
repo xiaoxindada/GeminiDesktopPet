@@ -25,18 +25,20 @@ from PySide6.QtWidgets import (
 from models.app_version import AppVersion
 from models.character_lore import COSTUME_OPTIONS
 from models.pet_settings import (
-    BUILTIN_OAUTH_MODELS,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OAUTH_MODEL,
+    THINKING_LEVEL_OPTIONS,
     ChatAuthMode,
     PetSettings,
     PetStyleMode,
     normalize_gemini_model,
     normalize_oauth_model,
+    normalize_thinking_level,
 )
 from services.app_follow_service import AppFollowService
 from services.app_logger import AppLogger
 from services.followed_app_probe import FollowedAppProbe
+from services.gemini_chat_service import GeminiChatService
 from services.oauth_auth_service import OAuthAuthService
 from services.settings_service import SettingsService
 from services.tray_icon_service import TrayIconService
@@ -45,25 +47,38 @@ from themes.starlight_theme import STARLIGHT_WINDOW_QSS
 from views.oauth_login_dialog import OAuthLoginDialog
 
 
-class _OAuthModelsRefreshWorker(QThread):
-    """后台刷新当前已登录个人账号的可用模型清单。"""
+class _ModelsRefreshWorker(QThread):
+    """后台从当前选定渠道（Google OAuth / Antigravity / Gemini API Key）动态获取官方模型清单。"""
 
-    completed = Signal(object, str)
+    completed = Signal(str, object, str)
 
-    def __init__(self, oauth_service: OAuthAuthService, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        source_kind: str,
+        oauth_service: OAuthAuthService,
+        api_key: str,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
+        self._source_kind = source_kind
         self._oauth_service = oauth_service
+        self._api_key = api_key
 
     def run(self) -> None:
         try:
-            models = self._oauth_service.refresh_models_for_current_session()
-            self.completed.emit(models, "")
+            if self._source_kind == "oauth":
+                models = self._oauth_service.refresh_models_for_current_session()
+            elif self._source_kind == "agy":
+                models = GeminiChatService.discover_agy_models(force_refresh=True)
+            else:
+                models = GeminiChatService.fetch_api_key_models(self._api_key)
+            self.completed.emit(self._source_kind, models, "")
         except Exception as exc:
-            self.completed.emit([], str(exc))
+            self.completed.emit(self._source_kind, [], str(exc))
 
 
 class SettingsWindow(QWidget):
-    """实时同步全部 user_config.json 与跟随联动的偏好设置面板。"""
+    """手动确认保存全部 user_config.json 与跟随联动的偏好设置面板。"""
 
     def __init__(
         self,
@@ -86,18 +101,24 @@ class SettingsWindow(QWidget):
         self._on_open_update = on_open_update_center
         self._oauth_service = oauth_service or OAuthAuthService(settings_service.settings_folder)
         self._on_oauth_changed = on_oauth_changed
-        self._models_refresh_worker: Optional[_OAuthModelsRefreshWorker] = None
+        self._models_refresh_worker: Optional[_ModelsRefreshWorker] = None
+        self._discovered_api_models: list[str] = []
+        self._discovered_oauth_models: list[str] = []
+        self._active_draft_channel: str = "oauth"
+        self._draft_oauth_model: str = DEFAULT_OAUTH_MODEL
+        self._draft_gemini_model: str = DEFAULT_GEMINI_MODEL
         self._loading = True
         self._self_updating = False
+        self._dirty = False
 
         self.setWindowTitle("⚙️ Gemini 娘 · 偏好设置")
         self.setWindowIcon(TrayIconService.load_app_icon())
-        self.resize(510, 740)
-        self.setMinimumSize(460, 560)
+        self.resize(510, 760)
+        self.setMinimumSize(460, 580)
         self.setStyleSheet(STARLIGHT_WINDOW_QSS)
 
         self._build_ui()
-        self.sync_from_settings()
+        self.sync_from_settings(force=True)
         self._loading = False
 
         self._status_timer = QTimer(self)
@@ -176,7 +197,7 @@ class SettingsWindow(QWidget):
         self._chk_bubble = self._add_check(c_beh, "自动弹出宠物对话气泡（默认关闭，需要时在菜单中打开）")
 
         # Follow launch card
-        c_fol = self._make_card(root, "应用启动联动（原生后台待机守护）")
+        c_fol = self._make_card(root, "应用启动联动（后台唤醒守护）")
         badge_row = QHBoxLayout()
         badge_row.setSpacing(6)
         self._ag_badge = self._make_status_badge("检测中...")
@@ -189,7 +210,7 @@ class SettingsWindow(QWidget):
         c_fol.addLayout(badge_row)
 
         desc = QLabel(
-            "勾选后由主程序与轻量后台监听原生检测 Antigravity.exe / Gemini.exe（含退出桌宠后冷启动），并在当前用户启动目录建立 .lnk 快捷方式，不写入注册表或外部 VBS 脚本。"
+            "勾选后由主程序与轻量后台监听原生检测 Antigravity.exe / Gemini.exe（含退出桌宠后冷启动唤醒），并在当前用户启动目录建立 .lnk 快捷方式，不写入注册表或外部 VBS 脚本。"
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #9D95C8; font-size: 11.5px; background: transparent;")
@@ -203,10 +224,6 @@ class SettingsWindow(QWidget):
         self._chk_follow_gem.toggled.connect(self._on_follow_changed)
         c_fol.addWidget(self._chk_follow_gem)
 
-        self._chk_sleep_exit = self._add_check(
-            c_fol, "被跟随应用全部关闭时自动隐藏待机（下次开启软件时再唤醒）"
-        )
-
         fol_btns = QHBoxLayout()
         fol_btns.setSpacing(8)
         sync_btn = QPushButton("🔄 启用并同步开机联动")
@@ -214,7 +231,7 @@ class SettingsWindow(QWidget):
         sync_btn.clicked.connect(self._on_sync_follow_btn)
         fol_btns.addWidget(sync_btn)
 
-        stop_btn = QPushButton("⏹ 停用联动与开机待机")
+        stop_btn = QPushButton("⏹ 停用应用联动")
         stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         stop_btn.clicked.connect(self._on_stop_follow_btn)
         fol_btns.addWidget(stop_btn)
@@ -272,11 +289,6 @@ class SettingsWindow(QWidget):
         self._oauth_login_btn.clicked.connect(self._on_oauth_login_clicked)
         oauth_btns.addWidget(self._oauth_login_btn)
 
-        self._oauth_refresh_models_btn = QPushButton("🔄 刷新模型")
-        self._oauth_refresh_models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._oauth_refresh_models_btn.clicked.connect(self._on_refresh_oauth_models_clicked)
-        oauth_btns.addWidget(self._oauth_refresh_models_btn)
-
         self._oauth_logout_btn = QPushButton("🚪 退出登录")
         self._oauth_logout_btn.setObjectName("DangerBtn")
         self._oauth_logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -284,26 +296,52 @@ class SettingsWindow(QWidget):
         oauth_btns.addWidget(self._oauth_logout_btn)
         oauth_btns.addStretch(1)
         ol.addLayout(oauth_btns)
-
-        self._oauth_model_combo = QComboBox()
-        self._oauth_model_combo.setEditable(True)
-        self._oauth_model_combo.lineEdit().setPlaceholderText(DEFAULT_OAUTH_MODEL)
-        self._oauth_model_combo.currentTextChanged.connect(self._on_api_changed)
-        self._add_labeled_row(ol, "OAuth 对话模型", self._oauth_model_combo)
         c_api.addWidget(oauth_box)
 
-        c_api.addWidget(self._field_lbl("Gemini API Key（API Key 模式使用）"))
+        model_row_host = QWidget()
+        model_row_host.setStyleSheet("background: transparent;")
+        api_model_row = QHBoxLayout(model_row_host)
+        api_model_row.setContentsMargins(0, 0, 0, 0)
+        api_model_row.setSpacing(6)
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        self._model_combo.lineEdit().setPlaceholderText(DEFAULT_GEMINI_MODEL)
+        self._model_combo.currentTextChanged.connect(self._on_model_text_changed)
+        api_model_row.addWidget(self._model_combo, 1)
+
+        self._api_refresh_models_btn = QPushButton("🔄 获取官方模型")
+        self._api_refresh_models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._api_refresh_models_btn.setToolTip("从当前连接的官方渠道（OAuth / Antigravity / API Key）拉取实时模型列表")
+        self._api_refresh_models_btn.clicked.connect(self._on_refresh_models_clicked)
+        api_model_row.addWidget(self._api_refresh_models_btn)
+        self._add_labeled_row(c_api, "对话模型", model_row_host)
+
+        self._api_models_hint_lbl = QLabel("")
+        self._api_models_hint_lbl.setWordWrap(True)
+        self._api_models_hint_lbl.setStyleSheet("color: #9D95C8; font-size: 11px; background: transparent;")
+        self._api_models_hint_lbl.setVisible(False)
+        c_api.addWidget(self._api_models_hint_lbl)
+
         self._api_key_edit = QLineEdit()
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._api_key_edit.setPlaceholderText("AIza...")
+        self._api_key_edit.setPlaceholderText("AIza...（API Key 模式使用）")
         self._api_key_edit.textChanged.connect(self._on_api_changed)
-        c_api.addWidget(self._api_key_edit)
+        self._add_labeled_row(c_api, "Gemini API Key", self._api_key_edit)
 
-        c_api.addWidget(self._field_lbl("API Key 模型名称"))
-        self._model_edit = QLineEdit()
-        self._model_edit.setPlaceholderText(DEFAULT_GEMINI_MODEL)
-        self._model_edit.textChanged.connect(self._on_api_changed)
-        c_api.addWidget(self._model_edit)
+        self._thinking_combo = QComboBox()
+        for val, short_label in THINKING_LEVEL_OPTIONS:
+            desc_map = {
+                "auto": "自动（模型默认动态思考）",
+                "off": "Off · 关闭思考（2.5 系列直接关闭，其余使用极简）",
+                "minimal": "Minimal · 极简思考（最快响应）",
+                "low": "Low · 轻度思考（低延迟与低开销）",
+                "medium": "Medium · 均衡思考（推荐日常与编码）",
+                "high": "High · 深度思考（复杂推理与数理）",
+                "xhigh": "Extra · 极限思考（最大推理深度）",
+            }
+            self._thinking_combo.addItem(desc_map.get(val, short_label), val)
+        self._thinking_combo.currentIndexChanged.connect(self._on_api_changed)
+        self._add_labeled_row(c_api, "思考强度", self._thinking_combo)
 
         # Updates card
         c_upd = self._make_card(root, "版本与软件更新")
@@ -382,7 +420,42 @@ class SettingsWindow(QWidget):
         root.addWidget(tip)
 
         scroll.setWidget(container)
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 1)
+
+        footer = QFrame()
+        footer.setObjectName("SettingsFooter")
+        footer.setStyleSheet(
+            """
+            QFrame#SettingsFooter {
+                background-color: #16112B;
+                border-top: 1px solid #352A63;
+            }
+            """
+        )
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(16, 10, 16, 10)
+        fl.setSpacing(8)
+
+        self._save_feedback_lbl = QLabel("✓ 当前配置已生效")
+        self._save_feedback_lbl.setWordWrap(True)
+        self._save_feedback_lbl.setStyleSheet(
+            "color: #A59EC9; font-size: 12px; background: transparent;"
+        )
+        fl.addWidget(self._save_feedback_lbl, 1)
+
+        self._discard_btn = QPushButton("↩ 还原修改")
+        self._discard_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._discard_btn.setEnabled(False)
+        self._discard_btn.clicked.connect(self._on_discard_clicked)
+        fl.addWidget(self._discard_btn)
+
+        self._confirm_btn = QPushButton("💾 确认修改")
+        self._confirm_btn.setObjectName("PrimaryBtn")
+        self._confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._confirm_btn.clicked.connect(self.confirm_and_save)
+        fl.addWidget(self._confirm_btn)
+
+        outer.addWidget(footer)
 
     @staticmethod
     def _make_card(parent_layout: QVBoxLayout, heading: str) -> QVBoxLayout:
@@ -438,8 +511,87 @@ class SettingsWindow(QWidget):
         )
         return l
 
-    def sync_from_settings(self) -> None:
+    def has_unsaved_changes(self) -> bool:
+        return bool(self._dirty)
+
+    def _set_feedback(self, text: str, *, kind: str = "neutral") -> None:
+        color_map = {
+            "neutral": "#A59EC9",
+            "dirty": "#FBBF24",
+            "success": "#34D399",
+            "error": "#F87171",
+        }
+        color = color_map.get(kind, "#A59EC9")
+        weight = "bold" if kind != "neutral" else "normal"
+        self._save_feedback_lbl.setStyleSheet(
+            f"color: {color}; font-size: 12px; font-weight: {weight}; background: transparent;"
+        )
+        self._save_feedback_lbl.setText(text)
+
+    def _mark_dirty(self) -> None:
+        if self._loading:
+            return
+        self._dirty = True
+        self._discard_btn.setEnabled(True)
+        self._set_feedback("● 有未保存的修改，请点击「确认修改」生效", kind="dirty")
+
+    def _resolve_draft_channel(self) -> str:
+        mode = ChatAuthMode.parse(self._auth_mode_combo.currentData())
+        has_oauth = self._oauth_service.is_logged_in()
+        opted_out = self._oauth_service.is_local_opted_out()
+        has_api_key = bool(self._api_key_edit.text().strip())
+        has_agy = (not opted_out) and GeminiChatService.has_agy_cli()
+        if mode == ChatAuthMode.API_KEY:
+            return "api_key"
+        if mode == ChatAuthMode.OAUTH:
+            return "oauth" if has_oauth else ("agy" if has_agy else "oauth")
+        if has_oauth:
+            return "oauth"
+        if has_api_key:
+            return "api_key"
+        if has_agy:
+            return "agy"
+        return "api_key"
+
+    def _sync_model_combo(self, selected_model: Optional[str] = None) -> None:
+        channel = self._resolve_draft_channel()
+        self._active_draft_channel = channel
+        if channel in ("oauth", "agy"):
+            session = self._oauth_service.load_session(auto_discover=False)
+            current = normalize_oauth_model(
+                selected_model if selected_model is not None else self._draft_oauth_model
+            )
+            fetched = [
+                *self._discovered_oauth_models,
+                *(session.available_models or []),
+                *GeminiChatService.get_cached_agy_models(),
+            ]
+        else:
+            current = normalize_gemini_model(
+                selected_model if selected_model is not None else self._draft_gemini_model
+            )
+            cached = GeminiChatService.get_cached_api_key_models(self._api_key_edit.text().strip())
+            fetched = [*self._discovered_api_models, *cached]
+
+        candidates: list[str] = []
+        for m in [*fetched, current]:
+            cleaned = (m or "").strip()
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+
+        self._model_combo.blockSignals(True)
+        try:
+            self._model_combo.clear()
+            for m in candidates:
+                self._model_combo.addItem(m)
+            self._model_combo.setCurrentText(current)
+        finally:
+            self._model_combo.blockSignals(False)
+
+    def sync_from_settings(self, force: bool = True, clear_feedback: bool = True) -> None:
         if self._self_updating:
+            return
+        if not force and self._dirty:
             return
         self._loading = True
         try:
@@ -466,7 +618,6 @@ class SettingsWindow(QWidget):
 
             self._chk_follow_ag.setChecked(s.follow_antigravity)
             self._chk_follow_gem.setChecked(s.follow_gemini_app)
-            self._chk_sleep_exit.setChecked(s.sleep_when_antigravity_exits)
 
             auth_idx = next(
                 (
@@ -477,27 +628,70 @@ class SettingsWindow(QWidget):
                 0,
             )
             self._auth_mode_combo.setCurrentIndex(auth_idx)
-            self._sync_oauth_panel()
             self._api_key_edit.setText(s.gemini_api_key or "")
-            self._model_edit.setText(s.gemini_model or DEFAULT_GEMINI_MODEL)
+            self._draft_oauth_model = normalize_oauth_model(s.oauth_model or DEFAULT_OAUTH_MODEL)
+            self._draft_gemini_model = normalize_gemini_model(s.gemini_model or DEFAULT_GEMINI_MODEL)
+            self._sync_oauth_panel(preserve_draft=False)
+            self._sync_model_combo()
+            cur_thinking = normalize_thinking_level(getattr(s, "thinking_level", "auto"))
+            t_idx = next(
+                (
+                    i
+                    for i in range(self._thinking_combo.count())
+                    if self._thinking_combo.itemData(i) == cur_thinking
+                ),
+                0,
+            )
+            self._thinking_combo.setCurrentIndex(t_idx)
             self._chk_autocheck.setChecked(s.auto_check_updates)
             self._upstream_btn.setText(
                 f"上游追踪源：{UpdateService.normalize_releases_url(s.update_releases_url)}"
             )
             self._chk_log.setChecked(s.enable_runtime_log)
+            self._dirty = False
+            self._discard_btn.setEnabled(False)
+            if clear_feedback:
+                self._set_feedback("✓ 当前配置已生效", kind="neutral")
         finally:
             self._loading = False
 
     def _on_any_changed(self) -> None:
         if self._loading:
             return
+        scale = max(0.6, min(1.8, self._scale_slider.value() / 100.0))
+        opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
+        self._scale_val_lbl.setText(f"{scale:.2f}x")
+        self._opacity_val_lbl.setText(f"{int(round(opacity * 100))}%")
+        self._mark_dirty()
+
+    def _on_model_text_changed(self, text: str) -> None:
+        if self._loading:
+            return
+        if self._active_draft_channel in ("oauth", "agy"):
+            self._draft_oauth_model = text
+        else:
+            self._draft_gemini_model = text
+        self._mark_dirty()
+
+    def _on_api_changed(self) -> None:
+        if self._loading:
+            return
+        prev_family = "oauth" if self._active_draft_channel in ("oauth", "agy") else "api_key"
+        next_channel = self._resolve_draft_channel()
+        next_family = "oauth" if next_channel in ("oauth", "agy") else "api_key"
+        self._refresh_oauth_status_text()
+        if next_family != prev_family:
+            self._sync_model_combo()
+        else:
+            self._active_draft_channel = next_channel
+        self._mark_dirty()
+
+    def _commit_ui_to_settings(self) -> None:
         s = self._settings
         # QComboBox 会把 str 枚举数据转成普通 str，需解析回 PetStyleMode 才能正常序列化保存
         s.style_mode = PetStyleMode.parse(self._style_combo.currentData())
         s.scale = max(0.6, min(1.8, self._scale_slider.value() / 100.0))
         s.opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
-        self._scale_val_lbl.setText(f"{s.scale:.2f}x")
-        self._opacity_val_lbl.setText(f"{int(round(s.opacity * 100))}%")
 
         costume_id = self._costume_combo.currentData() or "auto"
         s.costume_override = costume_id
@@ -513,23 +707,53 @@ class SettingsWindow(QWidget):
         s.sound_enabled = self._chk_sound.isChecked()
         s.system_monitor_enabled = self._chk_sysmon.isChecked()
         s.show_speech_bubble = self._chk_bubble.isChecked()
-        s.sleep_when_antigravity_exits = self._chk_sleep_exit.isChecked()
+        s.follow_antigravity = self._chk_follow_ag.isChecked()
+        s.follow_gemini_app = self._chk_follow_gem.isChecked()
+
+        s.chat_auth_mode = ChatAuthMode.parse(self._auth_mode_combo.currentData())
+        cur_text = self._model_combo.currentText()
+        if self._active_draft_channel in ("oauth", "agy"):
+            self._draft_oauth_model = cur_text
+        else:
+            self._draft_gemini_model = cur_text
+        s.oauth_model = normalize_oauth_model(self._draft_oauth_model)
+        s.gemini_api_key = self._api_key_edit.text().strip()
+        s.gemini_model = normalize_gemini_model(self._draft_gemini_model)
+        s.thinking_level = normalize_thinking_level(self._thinking_combo.currentData())
         s.auto_check_updates = self._chk_autocheck.isChecked()
         s.enable_runtime_log = self._chk_log.isChecked()
-        AppLogger.set_enabled(s.enable_runtime_log)
 
-        self._settings_service.save(s)
-        self._emit_applied()
+    def confirm_and_save(self) -> bool:
+        """校验并提交界面草稿到运行态与 user_config.json，成功/失败均展示明确状态提示。"""
+        snapshot = dict(vars(self._settings))
+        follow_changed = (
+            self._settings.follow_antigravity != self._chk_follow_ag.isChecked()
+            or self._settings.follow_gemini_app != self._chk_follow_gem.isChecked()
+        )
+        self._commit_ui_to_settings()
+        try:
+            self._settings_service.save(self._settings)
+            if follow_changed:
+                self._follow_service.sync_and_apply(self._settings)
+            AppLogger.set_enabled(self._settings.enable_runtime_log)
+        except Exception as exc:
+            vars(self._settings).update(snapshot)
+            self._dirty = True
+            self._discard_btn.setEnabled(True)
+            AppLogger.error("[Settings] save failed", exc)
+            err_msg = str(exc).strip() or type(exc).__name__
+            self._set_feedback(f"❌ 保存失败：{err_msg}", kind="error")
+            return False
 
-    def _on_api_changed(self) -> None:
-        if self._loading:
-            return
-        self._settings.chat_auth_mode = ChatAuthMode.parse(self._auth_mode_combo.currentData())
-        self._settings.oauth_model = normalize_oauth_model(self._oauth_model_combo.currentText())
-        self._settings.gemini_api_key = self._api_key_edit.text().strip()
-        self._settings.gemini_model = normalize_gemini_model(self._model_edit.text())
-        self._settings_service.save(self._settings)
+        self.sync_from_settings(force=True, clear_feedback=False)
+        self._set_feedback("✅ 偏好设置保存成功，已生效", kind="success")
         self._emit_applied()
+        self._refresh_follow_badges()
+        return True
+
+    def _on_discard_clicked(self) -> None:
+        self.sync_from_settings(force=True, clear_feedback=False)
+        self._set_feedback("已还原未保存的修改", kind="neutral")
 
     def _emit_applied(self) -> None:
         self._self_updating = True
@@ -538,9 +762,11 @@ class SettingsWindow(QWidget):
         finally:
             self._self_updating = False
 
-    def _sync_oauth_panel(self) -> None:
+    def _refresh_oauth_status_text(self) -> None:
         session = self._oauth_service.load_session(auto_discover=True)
         logged_in = session.is_logged_in()
+        has_api_key = bool(self._api_key_edit.text().strip())
+        draft_mode = ChatAuthMode.parse(self._auth_mode_combo.currentData())
         if logged_in:
             source_map = {
                 "local_adc": "本地 ADC",
@@ -550,38 +776,28 @@ class SettingsWindow(QWidget):
             }
             source_tag = source_map.get(session.auth_source, "本地授权")
             disp = f"{session.display_name} ({session.email})" if session.display_name else session.email
-            has_api_key = bool((self._settings.gemini_api_key or "").strip())
-            if has_api_key and self._settings.chat_auth_mode == ChatAuthMode.AUTO:
+            if has_api_key and draft_mode == ChatAuthMode.AUTO:
                 self._oauth_status_lbl.setText(f"授权状态：已就绪（OAuth 与 API Key 均存在，当前优先使用 OAuth）· {disp}")
             else:
                 self._oauth_status_lbl.setText(f"授权状态：已就绪 · {disp}")
             tier = session.subscription_tier or source_tag
             self._oauth_tier_badge.setText(tier)
             self._oauth_login_btn.setText("🔄 重新授权 / 导入...")
+        elif not self._oauth_service.is_local_opted_out() and GeminiChatService.has_agy_cli():
+            self._oauth_status_lbl.setText("授权状态：已连接本机 Antigravity CLI（可直接发起实时对话）")
+            self._oauth_tier_badge.setText("Antigravity")
+            self._oauth_login_btn.setText("🔐 导入 OAuth...")
         else:
             self._oauth_status_lbl.setText("授权状态：未检测到本地 OAuth 授权（可选）")
             self._oauth_tier_badge.setText("未授权")
             self._oauth_login_btn.setText("🔐 获取 OAuth 授权...")
 
-        self._oauth_refresh_models_btn.setVisible(logged_in)
         self._oauth_logout_btn.setVisible(logged_in)
 
-        # 更新可用模型下拉框列表并保持当前选择
-        current_model = normalize_oauth_model(self._settings.oauth_model)
-        candidates: list[str] = []
-        for m in [*(session.available_models or []), *BUILTIN_OAUTH_MODELS, current_model]:
-            cleaned = (m or "").strip()
-            if cleaned and cleaned not in candidates:
-                candidates.append(cleaned)
-
-        self._oauth_model_combo.blockSignals(True)
-        try:
-            self._oauth_model_combo.clear()
-            for m in candidates:
-                self._oauth_model_combo.addItem(m)
-            self._oauth_model_combo.setCurrentText(current_model)
-        finally:
-            self._oauth_model_combo.blockSignals(False)
+    def _sync_oauth_panel(self, preserve_draft: bool = True) -> None:
+        self._refresh_oauth_status_text()
+        if not preserve_draft:
+            self._sync_model_combo()
 
     def _on_detect_local_oauth_clicked(self) -> None:
         try:
@@ -597,72 +813,112 @@ class SettingsWindow(QWidget):
 
     def _apply_logged_in_session(self, session) -> None:
         self._settings.chat_auth_mode = ChatAuthMode.OAUTH
-        # 若账户返回了动态模型列表且当前默认模型不在其中，自动选首个可用模型避免 404
-        if session.available_models and self._settings.oauth_model not in session.available_models:
-            preferred = next(
-                (m for m in (DEFAULT_OAUTH_MODEL, "gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon") if m in session.available_models),
-                session.available_models[0],
-            )
-            self._settings.oauth_model = preferred
-        self._settings_service.save(self._settings)
-        self.sync_from_settings()
+        if session.available_models:
+            self._discovered_oauth_models = list(session.available_models)
+            if self._settings.oauth_model not in session.available_models:
+                preferred = next(
+                    (m for m in (DEFAULT_OAUTH_MODEL, "gemini-2.5-pro", "gemini-3.8-flash", "gemini-4-argon") if m in session.available_models),
+                    session.available_models[0],
+                )
+                self._settings.oauth_model = preferred
+        try:
+            self._settings_service.save(self._settings)
+        except Exception as exc:
+            self._set_feedback(f"❌ 保存失败：{exc}", kind="error")
+            return
+        self.sync_from_settings(force=True, clear_feedback=False)
+        self._set_feedback("✅ OAuth 授权状态已保存并生效", kind="success")
         if self._on_oauth_changed:
             self._on_oauth_changed()
-        self._on_applied()
+        self._emit_applied()
 
     def _on_oauth_login_clicked(self) -> None:
         dlg = OAuthLoginDialog(self._oauth_service, parent=self)
         if dlg.exec() == OAuthLoginDialog.DialogCode.Accepted and dlg.logged_in_session is not None:
             self._apply_logged_in_session(dlg.logged_in_session)
 
-    def _on_refresh_oauth_models_clicked(self) -> None:
+    def _on_refresh_models_clicked(self) -> None:
         if self._models_refresh_worker is not None and self._models_refresh_worker.isRunning():
             return
-        self._oauth_refresh_models_btn.setEnabled(False)
-        self._oauth_refresh_models_btn.setText("⏳ 刷新中...")
-        worker = _OAuthModelsRefreshWorker(self._oauth_service, parent=self)
-        worker.completed.connect(self._on_oauth_models_refreshed)
+        channel = self._resolve_draft_channel()
+        api_key = self._api_key_edit.text().strip()
+        if channel == "api_key" and not api_key:
+            self._api_models_hint_lbl.setStyleSheet("color: #FBBF24; font-size: 11px; background: transparent;")
+            self._api_models_hint_lbl.setText("⚠️ 请先登录 OAuth / Antigravity，或填写 Gemini API Key 后获取官方模型")
+            self._api_models_hint_lbl.setVisible(True)
+            return
+        if channel == "oauth" and not self._oauth_service.is_logged_in():
+            if not self._oauth_service.is_local_opted_out() and GeminiChatService.has_agy_cli():
+                channel = "agy"
+            else:
+                self._api_models_hint_lbl.setStyleSheet("color: #FBBF24; font-size: 11px; background: transparent;")
+                self._api_models_hint_lbl.setText("⚠️ 当前处于 OAuth 模式且未登录，请先授权或填入 API Key")
+                self._api_models_hint_lbl.setVisible(True)
+                return
+
+        self._api_refresh_models_btn.setEnabled(False)
+        self._api_refresh_models_btn.setText("⏳ 获取中...")
+        self._api_models_hint_lbl.setStyleSheet("color: #A59EC9; font-size: 11px; background: transparent;")
+        self._api_models_hint_lbl.setText("正在向官方渠道拉取实时可用对话模型列表...")
+        self._api_models_hint_lbl.setVisible(True)
+
+        worker = _ModelsRefreshWorker(channel, self._oauth_service, api_key, parent=self)
+        worker.completed.connect(self._on_models_refreshed)
         self._models_refresh_worker = worker
         worker.start()
 
-    def _on_oauth_models_refreshed(self, models: list[str], err_msg: str) -> None:
+    def _on_models_refreshed(self, source_kind: str, models: list[str], err_msg: str) -> None:
         if self._models_refresh_worker is not None:
             self._models_refresh_worker.deleteLater()
             self._models_refresh_worker = None
-        self._oauth_refresh_models_btn.setEnabled(True)
-        self._oauth_refresh_models_btn.setText("🔄 刷新模型")
+        self._api_refresh_models_btn.setEnabled(True)
+        self._api_refresh_models_btn.setText("🔄 获取官方模型")
+
         if err_msg:
-            QMessageBox.warning(self, "刷新模型失败", f"暂时无法拉取个人账号可用模型列表：{err_msg}")
+            self._api_models_hint_lbl.setStyleSheet("color: #F87171; font-size: 11px; background: transparent;")
+            self._api_models_hint_lbl.setText(f"❌ 获取官方模型失败：{err_msg}")
+            self._api_models_hint_lbl.setVisible(True)
             return
-        self._sync_oauth_panel()
-        QMessageBox.information(
-            self,
-            "模型列表已更新",
-            f"已同步个人账号可用模型，共 {len(models)} 个候选模型。",
-        )
+
+        if not models:
+            self._api_models_hint_lbl.setStyleSheet("color: #FBBF24; font-size: 11px; background: transparent;")
+            self._api_models_hint_lbl.setText("⚠️ 未返回可用对话模型，可继续保留当前或手动填写模型名")
+            self._api_models_hint_lbl.setVisible(True)
+            return
+
+        if source_kind in ("oauth", "agy"):
+            self._discovered_oauth_models = list(models)
+        else:
+            self._discovered_api_models = list(models)
+
+        self._sync_model_combo(self._model_combo.currentText())
+        self._api_models_hint_lbl.setStyleSheet("color: #34D399; font-size: 11px; background: transparent;")
+        self._api_models_hint_lbl.setText(f"✅ 已获取 {len(models)} 个官方可用模型，选择后请点击下方「确认修改」生效")
+        self._api_models_hint_lbl.setVisible(True)
 
     def _on_oauth_logout_clicked(self) -> None:
         self._oauth_service.clear_session()
         if self._settings.chat_auth_mode == ChatAuthMode.OAUTH:
             self._settings.chat_auth_mode = ChatAuthMode.AUTO
-        self._settings_service.save(self._settings)
-        self.sync_from_settings()
+        try:
+            self._settings_service.save(self._settings)
+        except Exception as exc:
+            self._set_feedback(f"❌ 保存失败：{exc}", kind="error")
+            return
+        self.sync_from_settings(force=True, clear_feedback=False)
+        self._set_feedback("✅ 已退出 Google 个人账号登录", kind="success")
         if self._on_oauth_changed:
             self._on_oauth_changed()
-        self._on_applied()
-
+        self._emit_applied()
 
     def _on_follow_changed(self) -> None:
         if self._loading:
             return
-        self._settings.follow_antigravity = self._chk_follow_ag.isChecked()
-        self._settings.follow_gemini_app = self._chk_follow_gem.isChecked()
-        self._settings_service.save(self._settings)
-        self._follow_service.sync_and_apply(self._settings)
-        self._on_applied()
-        self._refresh_follow_badges()
+        self._mark_dirty()
 
     def _on_sync_follow_btn(self) -> None:
+        self._settings.follow_antigravity = self._chk_follow_ag.isChecked()
+        self._settings.follow_gemini_app = self._chk_follow_gem.isChecked()
         if not AppFollowService.any_follow_enabled(self._settings):
             self._settings.follow_antigravity = True
             self._settings.follow_gemini_app = True
@@ -670,9 +926,14 @@ class SettingsWindow(QWidget):
             self._chk_follow_ag.setChecked(True)
             self._chk_follow_gem.setChecked(True)
             self._loading = False
-        self._settings_service.save(self._settings)
-        self._follow_service.sync_and_apply(self._settings)
-        self._on_applied()
+        try:
+            self._settings_service.save(self._settings)
+            self._follow_service.sync_and_apply(self._settings)
+        except Exception as exc:
+            self._set_feedback(f"❌ 保存失败：{exc}", kind="error")
+            return
+        self._set_feedback("✅ 已启用应用联动并保存设置", kind="success")
+        self._emit_applied()
         self._refresh_follow_badges()
         QMessageBox.information(
             self,
@@ -687,9 +948,14 @@ class SettingsWindow(QWidget):
         self._loading = False
         self._settings.follow_antigravity = False
         self._settings.follow_gemini_app = False
-        self._settings_service.save(self._settings)
-        self._follow_service.disable_follow()
-        self._on_applied()
+        try:
+            self._settings_service.save(self._settings)
+            self._follow_service.disable_follow()
+        except Exception as exc:
+            self._set_feedback(f"❌ 保存失败：{exc}", kind="error")
+            return
+        self._set_feedback("✅ 已停用应用联动并保存设置", kind="success")
+        self._emit_applied()
         self._refresh_follow_badges()
 
     def _refresh_follow_badges(self) -> None:

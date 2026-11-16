@@ -672,12 +672,15 @@ class OAuthAuthService:
                     self.session_path.unlink()
                 except OSError as exc:
                     AppLogger.warn("OAuth", f"清理 oauth_session.json 失败：{exc}")
-            if suppress_local_auto and self.discover_local_session() is not None:
+            if suppress_local_auto:
                 try:
                     self.config_dir.mkdir(parents=True, exist_ok=True)
                     self._optout_path.write_text("disabled\n", encoding="utf-8")
                 except OSError:
                     pass
+
+    def is_local_opted_out(self) -> bool:
+        return self._optout_path.is_file()
 
     def is_logged_in(self) -> bool:
         return self.load_session().is_logged_in()

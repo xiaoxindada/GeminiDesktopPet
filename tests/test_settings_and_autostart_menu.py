@@ -207,9 +207,17 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertEqual(coord._pet._resolve_resting_state(), PetState.SLEEPING)
                     self.assertTrue(SettingsService().load().doze_mode)
 
-                    # 2. 偏好设置取消勾选（同时验证 style_mode 枚举保存不报错）-> 同步回两级菜单与快捷栏
+                    # 2. 偏好设置取消勾选（需点击确认修改后才写入配置并同步两级菜单与快捷栏）
                     win._chk_doze.setChecked(False)
                     app.processEvents()
+                    self.assertTrue(win.has_unsaved_changes())
+                    self.assertTrue(coord._settings.doze_mode)
+                    self.assertTrue(SettingsService().load().doze_mode)
+
+                    win._confirm_btn.click()
+                    app.processEvents()
+                    self.assertFalse(win.has_unsaved_changes())
+                    self.assertIn("保存成功", win._save_feedback_lbl.text())
                     self.assertEqual(coord._settings.style_mode, PetStyleMode.CHIBI)
                     self.assertFalse(coord._settings.doze_mode)
                     self.assertFalse(pet_doze.isChecked())

@@ -17,12 +17,14 @@ from models.app_version import (
 from models.pet_settings import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OAUTH_MODEL,
+    DEFAULT_THINKING_LEVEL,
     ChatAuthMode,
     DockSide,
     PetSettings,
     PetStyleMode,
     normalize_gemini_model,
     normalize_oauth_model,
+    normalize_thinking_level,
 )
 from services.win32_ipc import (
     get_windows_startup_dir,
@@ -159,9 +161,6 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     _SettingFieldSpec("system_monitor_enabled", "behavior", "system_monitor_enabled", _parse_bool, bool),
     _SettingFieldSpec("follow_antigravity", "behavior", "follow_antigravity", _parse_bool, bool),
     _SettingFieldSpec("follow_gemini_app", "behavior", "follow_gemini_app", _parse_bool, bool),
-    _SettingFieldSpec(
-        "sleep_when_antigravity_exits", "behavior", "sleep_when_antigravity_exits", _parse_bool, bool
-    ),
     _SettingFieldSpec("auto_festival_costume", "costume", "auto_festival_costume", _parse_bool, bool),
     _SettingFieldSpec(
         "costume_override", "costume", "costume_override", _parse_nonempty_str, lambda v: v or "auto"
@@ -233,6 +232,13 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
         lambda v: v or DEFAULT_OAUTH_MODEL,
     ),
     _SettingFieldSpec(
+        "thinking_level",
+        "gemini",
+        "thinking_level",
+        lambda raw, _cur: normalize_thinking_level(str(raw)) if raw is not None else _cur,
+        lambda v: normalize_thinking_level(v) or DEFAULT_THINKING_LEVEL,
+    ),
+    _SettingFieldSpec(
         "update_releases_url", "updates", "releases_url", _parse_nonempty_str, lambda v: v or ""
     ),
     _SettingFieldSpec("auto_check_updates", "updates", "auto_check", _parse_bool, bool),
@@ -271,12 +277,14 @@ class SettingsService:
                 pass
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
         settings.oauth_model = normalize_oauth_model(settings.oauth_model)
+        settings.thinking_level = normalize_thinking_level(settings.thinking_level)
         return settings
 
     def save(self, settings: PetSettings) -> None:
         self.settings_folder.mkdir(parents=True, exist_ok=True)
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
         settings.oauth_model = normalize_oauth_model(settings.oauth_model)
+        settings.thinking_level = normalize_thinking_level(settings.thinking_level)
         settings.gemini_api_key = (settings.gemini_api_key or "").strip()
         self.settings_path.write_text(self._serialize_json(settings), encoding="utf-8")
 

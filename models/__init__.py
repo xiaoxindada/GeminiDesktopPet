@@ -20,15 +20,21 @@ from .character_lore import (
 )
 from .character_profile import CharacterProfile, CharacterTrait
 from .pet_settings import (
-    BUILTIN_OAUTH_MODELS,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OAUTH_MODEL,
+    DEFAULT_THINKING_LEVEL,
+    THINKING_LEVEL_LABELS,
+    THINKING_LEVEL_OPTIONS,
     ChatAuthMode,
     DockSide,
     PetSettings,
     PetStyleMode,
+    format_model_display_name,
+    format_thinking_level_label,
+    get_supported_thinking_levels,
     normalize_gemini_model,
     normalize_oauth_model,
+    normalize_thinking_level,
 )
 from .pet_state import PetState
 
@@ -37,7 +43,6 @@ __all__ = [
     "APPEARANCE_TRAITS",
     "AiTonePreset",
     "AppVersion",
-    "BUILTIN_OAUTH_MODELS",
     "BUILTIN_PRESETS",
     "COSTUME_OPTIONS",
     "CharacterLore",
@@ -49,14 +54,21 @@ __all__ = [
     "DEFAULT_GEMINI_MODEL",
     "DEFAULT_LINES",
     "DEFAULT_OAUTH_MODEL",
+    "DEFAULT_THINKING_LEVEL",
     "DockSide",
     "PetSettings",
     "PetState",
     "PetStyleMode",
+    "THINKING_LEVEL_LABELS",
+    "THINKING_LEVEL_OPTIONS",
     "USER_CONFIG_DIR_NAME",
+    "format_model_display_name",
+    "format_thinking_level_label",
     "get_app_base_dir",
     "get_bundled_resource_dir",
+    "get_supported_thinking_levels",
     "get_user_config_dir",
     "normalize_gemini_model",
     "normalize_oauth_model",
+    "normalize_thinking_level",
 ]
