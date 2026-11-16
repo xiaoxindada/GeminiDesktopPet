@@ -216,6 +216,12 @@ class TestWindowLayoutFixes(unittest.TestCase):
                 self.assertFalse(bubble.geometry().intersects(qb_global))
                 self.assertFalse(bubble.geometry().intersects(pet.get_visual_sprite_bounds()))
 
+                # 默认"大"挡已到最大尺寸，切到"小"挡后再验证八向拖拽与尺寸持久化
+                pet.cycle_chat_window_size()
+                self._app.processEvents()
+                self.assertEqual((bubble.width(), bubble.height()), (560, 360))
+                self.assertFalse(bubble.geometry().intersects(qb_global))
+
                 # 验证八向边缘鼠标悬停均能切换为正确的缩放光标
                 cursor_cases = [
                     (QPoint(5, 5), Qt.CursorShape.SizeFDiagCursor),

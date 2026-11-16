@@ -41,7 +41,10 @@ def test_size_button_cycles_with_history_and_screen_limits(history_expanded, scr
                         assert pet._chat_size_btn.text().endswith(name)
                         saved = service.load()
                         assert (saved.chat_width, saved.chat_height) == (width, height)
-                        assert pet._speech_bubble.size() == pet._compute_bubble_target_size()
+                        # 实际显示高度会按快捷栏/精灵上方可用空间收缩，宽度仍跟随挡位
+                        target = pet._compute_bubble_target_size()
+                        assert pet._speech_bubble.width() == target.width()
+                        assert pet._speech_bubble.height() <= target.height()
                         assert pet._history_list.isVisible() == history_expanded
                         sizes.append((pet._speech_bubble.width(), pet._speech_bubble.height()))
                     if screen_size == (1600, 1000):

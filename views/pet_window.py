@@ -1515,6 +1515,28 @@ class PetWindow(QWidget):
         target_h = self._auto_fit_bubble_height(target_w, min_h, max_h)
         return QSize(target_w, target_h)
 
+    def _fit_bubble_size_to_placement(self, size: QSize) -> QSize:
+        """默认摆放时按快捷栏上方或精灵下方可用空间收缩高度，避免气泡压住快捷栏与立绘。"""
+        if not self._is_chat_open:
+            return size
+        gap = 8
+        sprite_rect = self.get_visual_sprite_bounds()
+        anchor_top = (
+            self._quick_bar.mapToGlobal(QPoint(0, 0)).y()
+            if self._quick_bar.isVisible() and self._quick_bar.height() > 0
+            else sprite_rect.top()
+        )
+        area = self._get_work_area(
+            self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
+        )
+        space_above = anchor_top - gap - (area.top() + 6)
+        space_below = (area.bottom() - 6) - (sprite_rect.bottom() + 1 + gap)
+        available = max(space_above, space_below)
+        if size.height() <= available:
+            return size
+        min_h = self._bubble_min_size()[1]
+        return QSize(size.width(), max(min_h, min(available, size.height())))
+
     def _compute_bubble_default_pos(self, bubble_size: QSize) -> QPoint:
         gap = 8
         bw = bubble_size.width()
@@ -1610,6 +1632,9 @@ class PetWindow(QWidget):
             self._speech_bubble.setMinimumSize(min_w, min_h)
             self._speech_bubble.setMaximumSize(max_w, max_h)
             target_size = self._compute_bubble_target_size()
+            # 用户手动调整过尺寸/位置时保留其选择，仅默认摆放时按可用空间收缩。
+            if self._bubble_custom_offset is None:
+                target_size = self._fit_bubble_size_to_placement(target_size)
             if self._speech_bubble.size() != target_size:
                 self._speech_bubble.resize(target_size)
             if self._bubble_custom_offset is not None:
