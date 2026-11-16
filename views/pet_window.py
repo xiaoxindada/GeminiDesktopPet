@@ -54,7 +54,6 @@ from PySide6.QtWidgets import (
 )
 
 from models import (
-    COSTUME_OPTIONS,
     CharacterLore,
     CharacterProfile,
     DockSide,
@@ -78,7 +77,7 @@ from services import (
     SystemMonitorService,
 )
 from services.chat_history_service import ChatHistoryService
-from services.sprite_manager import SpriteManager
+from services.sprite_manager import SpriteManager, WalkRigAssets
 from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
 
@@ -1014,9 +1013,6 @@ class PetWindow(QWidget):
         menu.setStyleSheet(STARLIGHT_MENU_QSS)
         self._context_menu = menu
 
-        act_pat = menu.addAction("♥ 摸摸猫耳")
-        act_pat.triggered.connect(self.trigger_pat)
-
         act_chat = menu.addAction("💬 聊天模式 / 选模型对话")
         act_chat.triggered.connect(self._toggle_chat)
 
@@ -1084,20 +1080,6 @@ class PetWindow(QWidget):
         for label, key in poses:
             act = pose_menu.addAction(label)
             act.triggered.connect(lambda _checked=False, k=key: self.trigger_external_sprite_preview(k))
-
-        self._costume_menu = menu.addMenu("🎊 节日换装")
-        self._costume_actions: list[tuple[str, Optional[PetState], QAction]] = []
-        costume_group = QActionGroup(self._costume_menu)
-        costume_group.setExclusive(True)
-        for opt in COSTUME_OPTIONS:
-            act = self._costume_menu.addAction(opt.label)
-            act.setCheckable(True)
-            act.setActionGroup(costume_group)
-            act.setChecked(self._settings.costume_override.lower() == opt.id.lower())
-            act.triggered.connect(
-                lambda _checked=False, cid=opt.id, cst=opt.state: self._on_costume_picked(cid, cst)
-            )
-            self._costume_actions.append((opt.id, opt.state, act))
 
         menu.addSeparator()
 
@@ -1183,10 +1165,7 @@ class PetWindow(QWidget):
                 self._suppress_loaded_default_greeting = False
             else:
                 now = datetime.now()
-                greet_state = (
-                    CharacterLore.detect_festival_state(now)
-                    or CharacterLore.get_time_greeting_state(now)
-                )
+                greet_state = CharacterLore.get_time_greeting_state(now)
                 self._set_temporary_pose(
                     greet_state,
                     5.5,
@@ -1364,8 +1343,6 @@ class PetWindow(QWidget):
         self._act_follow_ag.setChecked(self._settings.follow_antigravity)
         self._act_follow_gemini.setChecked(self._settings.follow_gemini_app)
         self._act_runtime_log.setChecked(self._settings.enable_runtime_log)
-        for cid, _cst, act in self._costume_actions:
-            act.setChecked(cid.lower() == self._settings.costume_override.lower())
 
         self._quick_bubble_btn.setText("💭 气泡已开" if self._settings.show_speech_bubble else "💭 自动气泡")
         self._quick_bubble_btn.setToolTip(
@@ -1659,26 +1636,6 @@ class PetWindow(QWidget):
 
         self.visual_bounds_changed.emit()
 
-    def _on_costume_picked(self, costume_id: str, state: Optional[PetState]) -> None:
-        self._settings.costume_override = costume_id
-        self._settings.auto_festival_costume = costume_id == "auto"
-        for cid, _cst, act in self._costume_actions:
-            act.setChecked(cid == costume_id)
-        self._settings_service.save(self._settings)
-        self.settings_synced.emit()
-
-        state_to_show = (
-            state
-            or CharacterLore.detect_festival_state(datetime.now())
-            or PetState.IDLE
-        )
-        self._set_temporary_pose(
-            state_to_show,
-            5.0,
-            CharacterLore.pick_line_for_state(state_to_show),
-        )
-        self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.55, 7)
-
     # ==================== Position & Monitors ====================
 
     def _restore_or_init_position(self) -> None:
@@ -1881,7 +1838,6 @@ class PetWindow(QWidget):
         dt = max(0.001, min(0.05, (now - self._last_tick_utc).total_seconds()))
         self._last_tick_utc = now
         self._anim_time += dt
-
         if self._shake_energy > 0:
             self._shake_energy = max(0.0, self._shake_energy - dt * 1.4)
 
@@ -1969,11 +1925,11 @@ class PetWindow(QWidget):
                 tx = math.sin(self._anim_time * 48.0) * 4.0
         elif self._is_walking:
             sx = -1.0 if self._walk_dir > 0 else 1.0
-            rig = self._sprites.walk_rig
-            if self._settings.style_mode == PetStyleMode.STANDARD and rig.std_body is not None:
+            rig = self._active_walk_rig()
+            if self._settings.style_mode == PetStyleMode.STANDARD and rig.standard_complete:
                 p = self._anim_time * 6.8
                 self._update_std_walk_rig(p, s)
-            elif rig.chibi_body is not None:
+            elif self._settings.style_mode == PetStyleMode.CHIBI and rig.chibi_complete:
                 p = self._anim_time * 7.6
                 self._update_chibi_walk_rig(p, s)
             else:
@@ -2021,6 +1977,13 @@ class PetWindow(QWidget):
         else:
             sy = 1.0 + 0.014 * math.sin(self._anim_time * 2.4)
             sx = 1.0 - 0.006 * math.sin(self._anim_time * 2.4)
+
+        if self._use_std_walk_rig and not self._is_walking:
+            self._update_std_walk_rig(self._anim_time * 6.8, self._settings.scale)
+        if self._is_dozing():
+            sy = 1.0 + 0.018 * math.sin(self._anim_time * 1.4)
+            if self._settings.docked_side != DockSide.NONE:
+                angle = (1 if self._settings.docked_side == DockSide.LEFT else -1) * 1.2 * math.sin(self._anim_time * 1.4)
 
         if self._landing_squash > 0.001:
             ls = math.sin(self._landing_squash * math.pi)
@@ -2106,7 +2069,7 @@ class PetWindow(QWidget):
             painter.restore()
 
     def _paint_chibi_walk_rig(self, painter: QPainter, rect: QRectF) -> None:
-        rig = self._sprites.walk_rig
+        rig = self._active_walk_rig()
         k = self._chibi_kinematics
         rw, rh = rect.width(), rect.height()
         rx, ry = rect.x(), rect.y()
@@ -2129,7 +2092,7 @@ class PetWindow(QWidget):
         draw_part(rig.chibi_arm_r, 0.5643, 0.5483, k["arm_r_rot"])
 
     def _paint_std_walk_rig(self, painter: QPainter, rect: QRectF) -> None:
-        rig = self._sprites.walk_rig
+        rig = self._active_walk_rig()
         k = self._std_kinematics
         rw, rh = rect.width(), rect.height()
         rx, ry = rect.x(), rect.y()
@@ -2153,13 +2116,16 @@ class PetWindow(QWidget):
         draw_leg(rig.std_back_thigh or rig.std_front_thigh, rig.std_back_shin or rig.std_front_shin, k["back_hip"], k["back_knee"])
         draw_leg(rig.std_front_thigh, rig.std_front_shin, k["front_hip"], k["front_knee"])
 
-        if rig.std_body is not None:
+        if rig.standard_complete:
             painter.save()
             painter.translate(rx + 0.5 * rw, ry + 0.46 * rh + k["body_ty"])
             painter.rotate(k["body_rot"])
             painter.translate(-0.5 * rw, -0.46 * rh)
             _draw_pixmap_uniform(painter, rig.std_body, local_rect)
             painter.restore()
+
+    def _active_walk_rig(self) -> WalkRigAssets:
+        return self._sprites.walk_rig
 
     def _refresh_sprite_visual(self) -> None:
         active = self._override_pose if self._override_pose is not None else self._current_state
@@ -2172,31 +2138,49 @@ class PetWindow(QWidget):
         ):
             active = self._resolve_resting_state()
 
+        if self._settings.doze_mode and self._settings.docked_side != DockSide.NONE:
+            active = self._resolve_resting_state()
+        self._visual_state = active
         use_walk_rig = (
             self._is_walking
             and self._override_pose is None
             and not self._is_dragging
             and self._settings.docked_side == DockSide.NONE
         )
-        rig = self._sprites.walk_rig
+        rig = self._active_walk_rig()
 
-        if use_walk_rig and self._settings.style_mode == PetStyleMode.STANDARD and rig.std_body is not None:
+        if use_walk_rig and self._settings.style_mode == PetStyleMode.STANDARD and rig.standard_complete:
             self._use_std_walk_rig = True
             self._use_chibi_walk_rig = False
             self._active_static_pixmap = None
             return
 
-        if use_walk_rig and self._settings.style_mode == PetStyleMode.CHIBI and rig.chibi_body is not None:
+        if use_walk_rig and self._settings.style_mode == PetStyleMode.CHIBI and rig.chibi_complete:
             self._use_std_walk_rig = False
             self._use_chibi_walk_rig = True
             self._active_static_pixmap = None
             return
 
-        self._use_std_walk_rig = False
+        self._use_std_walk_rig = (
+            self._settings.style_mode == PetStyleMode.STANDARD
+            and rig.standard_complete
+            and self._settings.docked_side == DockSide.NONE
+            # 现有标准骨架是侧面行走素材，不能覆盖正面待机和表情姿态。
+            and active in (PetState.RUNNING, PetState.SEARCHING)
+        )
         self._use_chibi_walk_rig = False
         self._active_static_pixmap = self._sprites.get(active, self._settings.style_mode)
+        if self._use_std_walk_rig:
+            self._update_std_walk_rig(self._anim_time * 6.8, self._settings.scale)
+
 
     def _resolve_resting_state(self) -> PetState:
+        # 打盹优先于悬停探头，左右贴边都保持闭眼。
+        if self._settings.doze_mode:
+            return {
+                DockSide.LEFT: PetState.EDGE_LEFT_SLEEP,
+                DockSide.RIGHT: PetState.EDGE_RIGHT_SLEEP,
+            }.get(self._settings.docked_side, PetState.SLEEPING)
         if self._settings.docked_side == DockSide.LEFT:
             return PetState.EDGE_LEFT_PEEK if self._is_hovering else PetState.EDGE_LEFT
         if self._settings.docked_side == DockSide.RIGHT:
@@ -2205,15 +2189,6 @@ class PetWindow(QWidget):
             return PetState.SLEEPING
         if self._settings.anti_gravity_mode:
             return PetState.FLOAT
-
-        if self._settings.costume_override.lower() != "auto":
-            for opt in COSTUME_OPTIONS:
-                if opt.id == self._settings.costume_override and opt.state is not None:
-                    return opt.state
-        elif self._settings.auto_festival_costume:
-            fest = CharacterLore.detect_festival_state(datetime.now())
-            if fest is not None:
-                return fest
 
         return PetState.IDLE
 
@@ -2225,7 +2200,7 @@ class PetWindow(QWidget):
         force_bubble: bool = False,
     ) -> None:
         self._is_walking = False
-        self._is_sleeping = state == PetState.SLEEPING
+        self._is_sleeping = state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP)
         self._override_pose = state
         self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=duration_sec)
         self._refresh_sprite_visual()
@@ -3535,11 +3510,10 @@ class PetWindow(QWidget):
         self._set_pin_on_desktop_enabled(checked)
 
     def _is_dozing(self) -> bool:
-        """打盹模式下处于常态睡姿（无临时动作、未贴边）时返回 True，用于呼吸与 Zzz 特效。"""
+        """常态睡姿包括左右贴边，用于慢呼吸和 Zzz 特效。"""
         return (
             bool(self._settings.doze_mode)
             and self._override_pose is None
-            and self._settings.docked_side == DockSide.NONE
         )
 
     def _apply_doze_transition(self) -> None:
@@ -3551,6 +3525,10 @@ class PetWindow(QWidget):
         self._is_walking = False
         self._is_sleeping = False
         self._current_state = self._resolve_resting_state()
+        if self._settings.docked_side != DockSide.NONE:
+            self._override_pose = None
+            self._refresh_sprite_visual()
+            return
         if not self._first_shown or not self.isVisible():
             return
         if doze:
@@ -3593,7 +3571,11 @@ class PetWindow(QWidget):
             self._settings.anti_gravity_mode = False
             self.move(area.left(), int(round(area.top() + (area.height() - self.height()) * 0.55)))
             self._update_dock_alignment()
-            self._set_temporary_pose(PetState.EDGE_LEFT_PEEK, 4.0, CharacterLore.pick_line("edge"))
+            if self._settings.doze_mode:
+                self._override_pose = None
+                self._refresh_sprite_visual()
+            else:
+                self._set_temporary_pose(self._resolve_resting_state(), 4.0, CharacterLore.pick_line("edge"))
         elif tag == "right":
             self._settings.docked_side = DockSide.RIGHT
             self._settings.anti_gravity_mode = False
@@ -3602,7 +3584,11 @@ class PetWindow(QWidget):
                 int(round(area.top() + (area.height() - self.height()) * 0.55)),
             )
             self._update_dock_alignment()
-            self._set_temporary_pose(PetState.EDGE_RIGHT_PEEK, 4.0, CharacterLore.pick_line("edge"))
+            if self._settings.doze_mode:
+                self._override_pose = None
+                self._refresh_sprite_visual()
+            else:
+                self._set_temporary_pose(self._resolve_resting_state(), 4.0, CharacterLore.pick_line("edge"))
         elif tag == "reset":
             self.move_to_bottom_right_corner()
             self.apply_settings_to_window()
@@ -3665,16 +3651,13 @@ class PetWindow(QWidget):
             if mode == PetStyleMode.STANDARD
             else "已切换为「Q 版猫娘」形象喵～软萌模式✦"
         )
+        # 形象选择持久化，但不改变正在执行的动作、打盹或行走状态。
         if self._settings.docked_side != DockSide.NONE:
             self._reanchor_docked_position()
-            dock_pose = (
-                PetState.EDGE_LEFT_PEEK
-                if self._settings.docked_side == DockSide.LEFT
-                else PetState.EDGE_RIGHT_PEEK
-            )
-            self._set_temporary_pose(dock_pose, 4.2, msg)
-        else:
-            self._set_temporary_pose(PetState.HAPPY, 4.2, msg)
+        self._refresh_sprite_visual()
+        self._update_sprite_transforms()
+        self._stage_canvas.update()
+        self.show_bubble(msg, 4.2)
 
         self._sound.play(PetSoundEffect.SPARKLE)
         self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.55, 8)

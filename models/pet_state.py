@@ -36,14 +36,6 @@ class PetState(str, Enum):
     GREET_AFTERNOON = "greet_afternoon"
     GREET_EVENING = "greet_evening"
     GREET_NIGHT = "greet_night"
-    FEST_SPRING = "fest_spring"
-    FEST_LANTERN = "fest_lantern"
-    FEST_DRAGON_BOAT = "fest_dragonboat"
-    FEST_MID_AUTUMN = "fest_midautumn"
-    FEST_NATIONAL = "fest_national"
-    FEST_HALLOWEEN = "fest_halloween"
-    FEST_CHRISTMAS = "fest_christmas"
-    FEST_NEW_YEAR = "fest_newyear"
     BYE = "bye"
     BUSY_LEFT = "busy_left"
     BUSY_RIGHT = "busy_right"
@@ -60,6 +52,8 @@ class PetState(str, Enum):
     EDGE_LEFT_PEEK = "edge_left_peek"
     EDGE_RIGHT = "edge_right"
     EDGE_RIGHT_PEEK = "edge_right_peek"
+    EDGE_LEFT_SLEEP = "edge_left_sleep"
+    EDGE_RIGHT_SLEEP = "edge_right_sleep"
     UPDATE = "update"
 
     def to_sprite_key(self) -> str:

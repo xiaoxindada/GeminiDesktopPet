@@ -11,12 +11,10 @@ from .character_lore import (
     AI_TONE_OPTIONS,
     APPEARANCE_TRAITS,
     BUILTIN_PRESETS,
-    COSTUME_OPTIONS,
     DEFAULT_LINES,
     AiTonePreset,
     CharacterLore,
     CharacterPreset,
-    CostumeOption,
 )
 from .character_profile import CharacterProfile, CharacterTrait
 from .pet_settings import (
@@ -41,12 +39,10 @@ __all__ = [
     "AiTonePreset",
     "AppVersion",
     "BUILTIN_PRESETS",
-    "COSTUME_OPTIONS",
     "CharacterLore",
     "CharacterPreset",
     "CharacterProfile",
     "CharacterTrait",
-    "CostumeOption",
     "DEFAULT_GEMINI_MODEL",
     "DEFAULT_LINES",
     "DEFAULT_THINKING_LEVEL",

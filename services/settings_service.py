@@ -158,10 +158,6 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     _SettingFieldSpec("system_monitor_enabled", "behavior", "system_monitor_enabled", _parse_bool, bool),
     _SettingFieldSpec("follow_antigravity", "behavior", "follow_antigravity", _parse_bool, bool),
     _SettingFieldSpec("follow_gemini_app", "behavior", "follow_gemini_app", _parse_bool, bool),
-    _SettingFieldSpec("auto_festival_costume", "costume", "auto_festival_costume", _parse_bool, bool),
-    _SettingFieldSpec(
-        "costume_override", "costume", "costume_override", _parse_nonempty_str, lambda v: v or "auto"
-    ),
     _SettingFieldSpec(
         "last_left",
         "window",

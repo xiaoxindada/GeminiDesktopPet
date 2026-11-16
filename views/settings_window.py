@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
 )
 
 from models.app_version import AppVersion
-from models.character_lore import COSTUME_OPTIONS
 from models.pet_settings import (
     DEFAULT_GEMINI_MODEL,
     THINKING_LEVEL_OPTIONS,
@@ -142,12 +141,6 @@ class SettingsWindow(QWidget):
         self._opacity_val_lbl.setStyleSheet("color: #A78BFA; background: transparent;")
         self._opacity_slider.valueChanged.connect(self._on_any_changed)
         self._add_slider_row(c_app, "透明度", self._opacity_slider, self._opacity_val_lbl)
-
-        self._costume_combo = QComboBox()
-        for opt in COSTUME_OPTIONS:
-            self._costume_combo.addItem(opt.label, opt.id)
-        self._costume_combo.currentIndexChanged.connect(self._on_any_changed)
-        self._add_labeled_row(c_app, "装扮主题", self._costume_combo)
 
         ed_btn = QPushButton("✏️ 自定义角色设定 / 台词 / 人设...")
         ed_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -487,9 +480,6 @@ class SettingsWindow(QWidget):
             self._opacity_slider.setValue(int(round(s.opacity * 100)))
             self._opacity_val_lbl.setText(f"{int(round(s.opacity * 100))}%")
 
-            idx = next((i for i, opt in enumerate(COSTUME_OPTIONS) if opt.id == s.costume_override), 0)
-            self._costume_combo.setCurrentIndex(idx)
-
             self._chk_topmost.setChecked(s.always_on_top)
             self._chk_pin.setChecked(not s.auto_walk)
             self._chk_doze.setChecked(s.doze_mode)
@@ -556,10 +546,6 @@ class SettingsWindow(QWidget):
         s.style_mode = PetStyleMode.parse(self._style_combo.currentData())
         s.scale = max(0.6, min(1.8, self._scale_slider.value() / 100.0))
         s.opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
-
-        costume_id = self._costume_combo.currentData() or "auto"
-        s.costume_override = costume_id
-        s.auto_festival_costume = costume_id == "auto"
 
         s.always_on_top = self._chk_topmost.isChecked()
         s.auto_walk = not self._chk_pin.isChecked()

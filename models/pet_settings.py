@@ -187,11 +187,9 @@ class PetSettings:
     click_through: bool = False
     system_monitor_enabled: bool = True
     show_speech_bubble: bool = False
-    auto_festival_costume: bool = True
     follow_antigravity: bool = True
     follow_gemini_app: bool = True
 
-    costume_override: str = "auto"
 
     last_left: float | None = None
     last_top: float | None = None
