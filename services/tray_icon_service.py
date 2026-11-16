@@ -21,10 +21,10 @@ class TrayIconService(QObject):
     open_chat_requested = Signal()
     pat_requested = Signal()
     reset_position_requested = Signal()
-    standby_for_antigravity_requested = Signal()
     style_toggle_requested = Signal()
     anti_gravity_toggled = Signal(bool)
     pin_on_desktop_toggled = Signal(bool)
+    doze_mode_toggled = Signal(bool)
     speech_bubble_toggled = Signal(bool)
     auto_start_toggled = Signal(bool)
     follow_antigravity_toggled = Signal(bool)
@@ -64,14 +64,11 @@ class TrayIconService(QObject):
             "🎀 切换形象：当前 Q 版 → 切至标准版", self.style_toggle_requested.emit
         )
         self._add_action("📍 回到屏幕右下角", self.reset_position_requested.emit)
-        self._add_action(
-            "💤 隐藏待机（等待联动软件启动唤醒）",
-            self.standby_for_antigravity_requested.emit,
-        )
         self._menu.addSeparator()
 
         self._anti_gravity_act = self._add_check("✨ 反重力悬浮模式", self.anti_gravity_toggled.emit)
         self._pin_act = self._add_check("📌 固定在桌面（不乱跑）", self.pin_on_desktop_toggled.emit)
+        self._doze_act = self._add_check("💤 打盹模式（原地睡觉待机）", self.doze_mode_toggled.emit)
         self._bubble_act = self._add_check("💭 自动弹出对话气泡", self.speech_bubble_toggled.emit)
         self._autostart_act = self._add_check(
             "⚡ Windows 开机自动启动", self.auto_start_toggled.emit
@@ -144,6 +141,7 @@ class TrayIconService(QObject):
         )
         self._anti_gravity_act.setChecked(settings.anti_gravity_mode)
         self._pin_act.setChecked(not settings.auto_walk)
+        self._doze_act.setChecked(settings.doze_mode)
         self._bubble_act.setChecked(settings.show_speech_bubble)
         self._follow_ag_act.setChecked(settings.follow_antigravity)
         self._follow_gemini_act.setChecked(settings.follow_gemini_app)

@@ -131,6 +131,8 @@ class SettingsWindow(QWidget):
         self._chk_topmost = self._add_check(c_beh, "窗口始终置顶（覆盖其他应用之上）")
         self._chk_pin = self._add_check(c_beh, "固定在桌面（不乱跑）")
         self._chk_pin.setToolTip("开启后停止自由漫步，仍可鼠标拖动位置")
+        self._chk_doze = self._add_check(c_beh, "打盹模式（原地睡觉待机，关闭时不会自行入睡）")
+        self._chk_doze.setToolTip("开启后停止漫步、随机动作与闲聊气泡；摸头或拖动后会继续打盹")
         self._chk_antigrav = self._add_check(c_beh, "反重力悬浮模式（Antigravity 常驻漂浮）")
         self._chk_gravity = self._add_check(c_beh, "松手重力下落与 Q 弹着陆")
         self._chk_edgedock = self._add_check(c_beh, "拖动到屏幕左右边缘时贴边偷看")
@@ -359,6 +361,7 @@ class SettingsWindow(QWidget):
 
             self._chk_topmost.setChecked(s.always_on_top)
             self._chk_pin.setChecked(not s.auto_walk)
+            self._chk_doze.setChecked(s.doze_mode)
             self._chk_antigrav.setChecked(s.anti_gravity_mode)
             self._chk_gravity.setChecked(s.gravity_enabled)
             self._chk_edgedock.setChecked(s.edge_dock_enabled)
@@ -398,6 +401,7 @@ class SettingsWindow(QWidget):
 
         s.always_on_top = self._chk_topmost.isChecked()
         s.auto_walk = not self._chk_pin.isChecked()
+        s.doze_mode = self._chk_doze.isChecked()
         s.anti_gravity_mode = self._chk_antigrav.isChecked()
         s.gravity_enabled = self._chk_gravity.isChecked()
         s.edge_dock_enabled = self._chk_edgedock.isChecked()

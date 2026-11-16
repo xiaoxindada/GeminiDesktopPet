@@ -59,6 +59,8 @@ class PetSettings:
     always_on_top: bool = True
     auto_walk: bool = True
     anti_gravity_mode: bool = False
+    # 打盹模式：开启后原地睡觉待机，关闭时不会自行入睡
+    doze_mode: bool = False
     gravity_enabled: bool = True
     edge_dock_enabled: bool = True
     sound_enabled: bool = True

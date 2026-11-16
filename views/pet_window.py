@@ -222,7 +222,6 @@ class PetWindow(QWidget):
     open_settings_requested = Signal()
     open_quota_requested = Signal()
     open_update_requested = Signal()
-    standby_requested = Signal()
     auto_start_changed = Signal(bool)
     follow_antigravity_changed = Signal(bool)
     follow_gemini_app_changed = Signal(bool)
@@ -275,6 +274,8 @@ class PetWindow(QWidget):
         self._is_walking = False
         self._walk_dir = 1  # 1 = right, -1 = left
         self._is_sleeping = False
+        # 已生效的打盹模式状态，用于检测开关变化并播放入睡/睡醒过渡
+        self._doze_applied = bool(settings.doze_mode)
         self._is_sulk = False
         self._sulk_pats_needed = 0
 
@@ -553,8 +554,8 @@ class PetWindow(QWidget):
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(4)
         row1.addStretch(1)
-        self._quick_pat_btn = make_pill("♥ 摸摸猫耳", "摸摸猫耳，增加好感度", self.trigger_pat)
-        row1.addWidget(self._quick_pat_btn)
+        self._quick_doze_btn = make_pill("💤 打盹模式", "开关打盹模式（原地睡觉待机）", self._toggle_doze_mode)
+        row1.addWidget(self._quick_doze_btn)
         self._quick_bubble_btn = make_pill("💭 自动气泡", "开关自动弹出对话气泡", self._toggle_speech_bubble)
         row1.addWidget(self._quick_bubble_btn)
         self._quick_pin_btn = make_pill("📌 固定(不乱跑)", "固定在桌面不乱跑", self._toggle_pin_on_desktop)
@@ -632,6 +633,10 @@ class PetWindow(QWidget):
         self._act_pin_on_desktop.setCheckable(True)
         self._act_pin_on_desktop.triggered.connect(self._on_menu_pin_on_desktop)
 
+        self._act_doze = menu.addAction("💤 打盹模式（原地睡觉待机）")
+        self._act_doze.setCheckable(True)
+        self._act_doze.triggered.connect(self._on_menu_doze_mode)
+
         menu.aboutToShow.connect(self._sync_auto_start_action)
 
         self._act_auto_start = menu.addAction("⚡ Windows 开机自动启动")
@@ -707,9 +712,6 @@ class PetWindow(QWidget):
 
         act_ct = menu.addAction("👻 开启鼠标穿透（托盘可取消）")
         act_ct.triggered.connect(self._on_menu_click_through)
-
-        act_standby = menu.addAction("💤 隐藏待机（等待联动软件启动）")
-        act_standby.triggered.connect(self.standby_requested)
 
         act_settings = menu.addAction("⚙️ 偏好设置...")
         act_settings.triggered.connect(self.open_settings_requested)
@@ -910,6 +912,8 @@ class PetWindow(QWidget):
         self._act_style_standard.setChecked(self._settings.style_mode == PetStyleMode.STANDARD)
         self._act_anti_gravity.setChecked(self._settings.anti_gravity_mode)
         self._act_pin_on_desktop.setChecked(pinned)
+        self._act_doze.setChecked(self._settings.doze_mode)
+        self._apply_doze_transition()
         self._act_show_bubble.setChecked(self._settings.show_speech_bubble)
         self._sync_auto_start_action()
         self._act_follow_ag.setChecked(self._settings.follow_antigravity)
@@ -933,6 +937,12 @@ class PetWindow(QWidget):
         self._quick_float_btn.setText("🌟 已悬浮" if self._settings.anti_gravity_mode else "✨ 悬浮")
         self._quick_pin_btn.setText("📌 已固定" if pinned else "📌 固定(不乱跑)")
         self._quick_pin_btn.setToolTip("已固定在桌面（点击恢复漫步）" if pinned else "固定在桌面不乱跑")
+        self._quick_doze_btn.setText("💤 打盹中" if self._settings.doze_mode else "💤 打盹模式")
+        self._quick_doze_btn.setToolTip(
+            "当前正在打盹待机（点击唤醒）"
+            if self._settings.doze_mode
+            else "开启打盹模式，原地睡觉待机"
+        )
         self._quick_log_btn.setText("📝 日志已开" if self._settings.enable_runtime_log else "📝 运行日志")
         daily_name = datetime.now().strftime("%Y-%m-%d.log")
         log_file = os.path.join(AppLogger.log_directory(), daily_name)
@@ -1359,7 +1369,7 @@ class PetWindow(QWidget):
                     -28.0,
                     1.3,
                 )
-        elif self._is_sleeping:
+        elif self._is_sleeping or self._is_dozing():
             sy = 1.0 + 0.024 * math.sin(self._anim_time * 1.4)
             if self._settings.particles_enabled and random.random() < 0.03:
                 self._spawn_particle(
@@ -1554,6 +1564,8 @@ class PetWindow(QWidget):
             return PetState.EDGE_LEFT_PEEK if self._is_hovering else PetState.EDGE_LEFT
         if self._settings.docked_side == DockSide.RIGHT:
             return PetState.EDGE_RIGHT_PEEK if self._is_hovering else PetState.EDGE_RIGHT
+        if self._settings.doze_mode:
+            return PetState.SLEEPING
         if self._settings.anti_gravity_mode:
             return PetState.FLOAT
 
@@ -1598,6 +1610,13 @@ class PetWindow(QWidget):
         ):
             return
 
+        # 打盹模式：保持原地睡觉待机，不漫步、不做随机动作也不闲聊
+        if self._settings.doze_mode:
+            self._is_walking = False
+            self._current_state = self._resolve_resting_state()
+            self._refresh_sprite_visual()
+            return
+
         if self._settings.docked_side != DockSide.NONE:
             if not self._is_hovering and random.random() < 0.35:
                 peek = (
@@ -1615,12 +1634,7 @@ class PetWindow(QWidget):
             self._refresh_sprite_visual()
             return
 
-        if not self._settings.anti_gravity_mode and datetime.now().hour < 5 and random.random() < 0.28:
-            self._is_sleeping = True
-            self._current_state = PetState.SLEEPING
-            self._refresh_sprite_visual()
-            return
-
+        # 仅在打盹模式下入睡，关闭时不再随机打盹
         self._is_sleeping = False
         roll = random.random()
 
@@ -1653,7 +1667,12 @@ class PetWindow(QWidget):
                 self.show_bubble(CharacterLore.pick_line("chatter"), 5.0)
 
     def _monitor_timer_tick(self) -> None:
-        if not self._settings.system_monitor_enabled or self._is_dragging or self._is_sulk:
+        if (
+            not self._settings.system_monitor_enabled
+            or self._settings.doze_mode
+            or self._is_dragging
+            or self._is_sulk
+        ):
             return
 
         snap = self._sys_monitor.sample()
@@ -2135,6 +2154,45 @@ class PetWindow(QWidget):
 
     def _on_menu_pin_on_desktop(self, checked: bool) -> None:
         self._set_pin_on_desktop_enabled(checked)
+
+    def _is_dozing(self) -> bool:
+        """打盹模式下处于常态睡姿（无临时动作、未贴边）时返回 True，用于呼吸与 Zzz 特效。"""
+        return (
+            bool(self._settings.doze_mode)
+            and self._override_pose is None
+            and self._settings.docked_side == DockSide.NONE
+        )
+
+    def _apply_doze_transition(self) -> None:
+        """打盹模式开关变化时播放入睡/睡醒过渡；菜单、托盘与偏好设置的改动都会经过这里。"""
+        doze = bool(self._settings.doze_mode)
+        if doze == self._doze_applied:
+            return
+        self._doze_applied = doze
+        self._is_walking = False
+        self._is_sleeping = False
+        self._current_state = self._resolve_resting_state()
+        if not self._first_shown or not self.isVisible():
+            return
+        if doze:
+            # 先打个哈欠，临时动作结束后自动回落到睡姿
+            self._set_temporary_pose(PetState.YAWN, 2.5, "那我在这里打个盹待机喵…Zzz")
+        else:
+            self._set_temporary_pose(PetState.STRETCH, 3.0, "睡醒啦～伸个懒腰继续陪你喵✦")
+
+    def set_doze_mode_enabled(self, enabled: bool) -> None:
+        if bool(enabled) == bool(self._settings.doze_mode):
+            return
+        self._settings.doze_mode = bool(enabled)
+        self._settings_service.save(self._settings)
+        self.apply_settings_to_window()
+        self.settings_synced.emit()
+
+    def _on_menu_doze_mode(self, checked: bool) -> None:
+        self.set_doze_mode_enabled(checked)
+
+    def _toggle_doze_mode(self) -> None:
+        self.set_doze_mode_enabled(not self._settings.doze_mode)
 
     def _on_menu_scale(self, scale: float) -> None:
         old_bottom = float(self.y() + self.height())
