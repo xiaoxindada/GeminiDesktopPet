@@ -42,6 +42,7 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
                 show_speech_bubble=True,
                 auto_walk=False,
                 anti_gravity_mode=True,
+                doze_mode=True,
                 costume_override="halloween",
                 last_left=640.5,
                 last_top=320.25,
@@ -68,6 +69,7 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             self.assertTrue(loaded.show_speech_bubble)
             self.assertFalse(loaded.auto_walk)
             self.assertTrue(loaded.anti_gravity_mode)
+            self.assertTrue(loaded.doze_mode)
             self.assertEqual(loaded.costume_override, "halloween")
             self.assertAlmostEqual(loaded.last_left or 0.0, 640.5, places=2)
             self.assertAlmostEqual(loaded.last_top or 0.0, 320.25, places=2)

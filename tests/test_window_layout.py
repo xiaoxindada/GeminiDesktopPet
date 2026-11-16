@@ -133,10 +133,15 @@ class TestWindowLayoutFixes(unittest.TestCase):
             sys_monitor = SystemMonitorService()
             chat = GeminiChatService()
 
-            for scale, dock in ((1.0, DockSide.NONE), (0.6, DockSide.RIGHT), (1.3, DockSide.NONE)):
+            for scale, dock, doze in (
+                (1.0, DockSide.NONE, False),
+                (0.6, DockSide.RIGHT, True),
+                (1.3, DockSide.NONE, True),
+            ):
                 settings = PetSettings(
                     scale=scale,
                     docked_side=dock,
+                    doze_mode=doze,
                     show_speech_bubble=True,
                     auto_walk=False,
                     last_left=420.0,

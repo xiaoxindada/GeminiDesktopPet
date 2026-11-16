@@ -13,7 +13,8 @@ from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication, QCheckBox
 
 from app import PetApplicationCoordinator
-from models.pet_settings import DockSide, PetSettings
+from models.pet_settings import DockSide, PetSettings, PetStyleMode
+from models.pet_state import PetState
 from services.antigravity_quota_service import (
     AntigravityQuotaService,
     QuotaBucketInfo,
@@ -142,6 +143,92 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertTrue(win._status_timer.isActive())
                     avail = (win.screen() or app.primaryScreen()).availableGeometry()
                     self.assertTrue(avail.intersects(win.frameGeometry()))
+                finally:
+                    coord.gracefully_exit(allow_respawn_watcher=False)
+                    app.processEvents()
+
+    def test_doze_mode_first_level_menus_quick_bar_and_settings_sync(self) -> None:
+        app = self._ensure_app()
+        with (
+            tempfile.TemporaryDirectory() as tmp_startup,
+            tempfile.TemporaryDirectory() as tmp_home,
+            tempfile.TemporaryDirectory() as tmp_appdata,
+        ):
+            startup_dir = Path(tmp_startup)
+            with (
+                patch.dict(os.environ, {"USERPROFILE": tmp_home, "APPDATA": tmp_appdata}),
+                patch("services.win32_ipc.get_windows_startup_dir", return_value=startup_dir),
+                patch("services.settings_service.get_windows_startup_dir", return_value=startup_dir),
+                patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
+                patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
+            ):
+                coord = PetApplicationCoordinator(app, [], MagicMock())
+                try:
+                    coord._pet.show()
+                    app.processEvents()
+
+                    # 原「隐藏待机」已由一级「打盹模式」取代，快捷栏也替换为打盹按钮
+                    self.assertFalse(
+                        any("隐藏待机" in a.text() for a in coord._pet._context_menu.actions() if not a.isSeparator())
+                    )
+                    self.assertFalse(
+                        any("隐藏待机" in a.text() for a in coord._tray._menu.actions() if not a.isSeparator())
+                    )
+                    self.assertFalse(hasattr(coord._pet, "_quick_pat_btn"))
+                    self.assertFalse(
+                        any("摸摸猫耳" in btn.text() for btn in coord._pet._quick_bar.findChildren(type(coord._pet._quick_doze_btn)))
+                    )
+
+                    pet_doze = self._find_action(coord._pet._context_menu, "打盹模式")
+                    tray_doze = self._find_action(coord._tray._menu, "打盹模式")
+                    self.assertIsNone(pet_doze.menu())
+                    self.assertIsNone(tray_doze.menu())
+                    self.assertTrue(pet_doze.isCheckable())
+                    self.assertTrue(tray_doze.isCheckable())
+                    self.assertFalse(coord._settings.doze_mode)
+                    self.assertFalse(pet_doze.isChecked())
+                    self.assertFalse(tray_doze.isChecked())
+                    self.assertEqual(coord._pet._quick_doze_btn.text(), "💤 打盹模式")
+
+                    coord.open_settings_window()
+                    app.processEvents()
+                    win = coord._settings_win
+                    assert win is not None
+                    self.assertFalse(win._chk_doze.isChecked())
+
+                    # 1. 悬浮快捷栏点击开启 -> 同步右键菜单、托盘菜单、偏好设置并持久化
+                    coord._pet._quick_doze_btn.click()
+                    app.processEvents()
+                    self.assertTrue(coord._settings.doze_mode)
+                    self.assertTrue(pet_doze.isChecked())
+                    self.assertTrue(tray_doze.isChecked())
+                    self.assertTrue(win._chk_doze.isChecked())
+                    self.assertEqual(coord._pet._quick_doze_btn.text(), "💤 打盹中")
+                    self.assertEqual(coord._pet._resolve_resting_state(), PetState.SLEEPING)
+                    self.assertTrue(SettingsService().load().doze_mode)
+
+                    # 2. 偏好设置取消勾选（同时验证 style_mode 枚举保存不报错）-> 同步回两级菜单与快捷栏
+                    win._chk_doze.setChecked(False)
+                    app.processEvents()
+                    self.assertEqual(coord._settings.style_mode, PetStyleMode.CHIBI)
+                    self.assertFalse(coord._settings.doze_mode)
+                    self.assertFalse(pet_doze.isChecked())
+                    self.assertFalse(tray_doze.isChecked())
+                    self.assertEqual(coord._pet._quick_doze_btn.text(), "💤 打盹模式")
+                    self.assertFalse(SettingsService().load().doze_mode)
+
+                    # 3. 托盘一级菜单开启、右键一级菜单关闭 -> 全链路保持一致
+                    tray_doze.trigger()
+                    app.processEvents()
+                    self.assertTrue(coord._settings.doze_mode)
+                    self.assertTrue(pet_doze.isChecked())
+                    self.assertTrue(win._chk_doze.isChecked())
+
+                    pet_doze.trigger()
+                    app.processEvents()
+                    self.assertFalse(coord._settings.doze_mode)
+                    self.assertFalse(tray_doze.isChecked())
+                    self.assertFalse(win._chk_doze.isChecked())
                 finally:
                     coord.gracefully_exit(allow_respawn_watcher=False)
                     app.processEvents()
