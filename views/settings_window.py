@@ -68,6 +68,7 @@ class SettingsWindow(QWidget):
         on_settings_applied: Callable[[], None],
         on_open_profile_editor: Optional[Callable[[], None]] = None,
         on_open_update_center: Optional[Callable[[], None]] = None,
+        on_antigravity_sync_changed: Optional[Callable[[bool], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -77,6 +78,7 @@ class SettingsWindow(QWidget):
         self._on_applied = on_settings_applied
         self._on_open_editor = on_open_profile_editor
         self._on_open_update = on_open_update_center
+        self._on_antigravity_sync_changed = on_antigravity_sync_changed
         self._models_refresh_worker: Optional[_ModelsRefreshWorker] = None
         self._draft_gemini_model: str = DEFAULT_GEMINI_MODEL
         self._loading = True
@@ -161,6 +163,10 @@ class SettingsWindow(QWidget):
         self._chk_sound = self._add_check(c_beh, "互动音效（呼噜、星铃、弹跳）")
         self._chk_sysmon = self._add_check(c_beh, "电脑状态感知（低电量打盹 / 高 CPU 提示）")
         self._chk_bubble = self._add_check(c_beh, "自动弹出宠物对话气泡（默认关闭，需要时在菜单中打开）")
+        self._chk_ag_sync = self._add_check(c_beh, "实时同步反重力对话（新消息实时显示在气泡里）")
+        self._chk_ag_sync.setToolTip(
+            "开启后跟随 Antigravity 当前对话，把新消息实时播报到气泡；与上面的气泡开关相互独立"
+        )
 
         # Follow launch card
         c_fol = self._make_card(root, "应用启动联动（后台唤醒守护）")
@@ -490,6 +496,7 @@ class SettingsWindow(QWidget):
             self._chk_sound.setChecked(s.sound_enabled)
             self._chk_sysmon.setChecked(s.system_monitor_enabled)
             self._chk_bubble.setChecked(s.show_speech_bubble)
+            self._chk_ag_sync.setChecked(s.chat_sync_enabled)
 
             self._chk_follow_ag.setChecked(s.follow_antigravity)
             self._chk_follow_gem.setChecked(s.follow_gemini_app)
@@ -557,6 +564,7 @@ class SettingsWindow(QWidget):
         s.sound_enabled = self._chk_sound.isChecked()
         s.system_monitor_enabled = self._chk_sysmon.isChecked()
         s.show_speech_bubble = self._chk_bubble.isChecked()
+        s.chat_sync_enabled = self._chk_ag_sync.isChecked()
         s.follow_antigravity = self._chk_follow_ag.isChecked()
         s.follow_gemini_app = self._chk_follow_gem.isChecked()
 
@@ -574,6 +582,7 @@ class SettingsWindow(QWidget):
             self._settings.follow_antigravity != self._chk_follow_ag.isChecked()
             or self._settings.follow_gemini_app != self._chk_follow_gem.isChecked()
         )
+        sync_before = bool(self._settings.chat_sync_enabled)
         self._commit_ui_to_settings()
         try:
             self._settings_service.save(self._settings)
@@ -588,6 +597,13 @@ class SettingsWindow(QWidget):
             err_msg = str(exc).strip() or type(exc).__name__
             self._set_feedback(f"❌ 保存失败：{err_msg}", kind="error")
             return False
+
+        # 实时同步是运行态开关，保存后要真正启停播报；启动失败时回调会把值回落成 False。
+        if (
+            self._on_antigravity_sync_changed is not None
+            and bool(self._settings.chat_sync_enabled) != sync_before
+        ):
+            self._on_antigravity_sync_changed(bool(self._settings.chat_sync_enabled))
 
         self.sync_from_settings(force=True, clear_feedback=False)
         self._set_feedback("✅ 偏好设置保存成功，已生效", kind="success")

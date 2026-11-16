@@ -1012,9 +1012,11 @@ class PetWindow(QWidget):
         row1.addStretch(1)
         self._quick_doze_btn = make_pill("💤 打盹模式", "开关打盹模式（原地睡觉待机）", self._toggle_doze_mode)
         row1.addWidget(self._quick_doze_btn)
-        self._quick_bubble_btn = make_pill("💭 自动气泡", "开关自动弹出对话气泡", self._toggle_speech_bubble)
+        self._quick_bubble_btn = make_pill(
+            "💭 自动弹出对话气泡", "开关自动弹出对话气泡", self._toggle_speech_bubble
+        )
         row1.addWidget(self._quick_bubble_btn)
-        self._quick_pin_btn = make_pill("📌 固定(不乱跑)", "固定在桌面不乱跑", self._toggle_pin_on_desktop)
+        self._quick_pin_btn = make_pill("📌 固定在桌面", "固定在桌面（不乱跑）", self._toggle_pin_on_desktop)
         row1.addWidget(self._quick_pin_btn)
         row1.addStretch(1)
         qb_layout.addLayout(row1)
@@ -1024,11 +1026,9 @@ class PetWindow(QWidget):
         row2.setSpacing(4)
         row2.addStretch(1)
         row2.addWidget(make_pill("💬 聊天模式", "打开 AI 聊天模式（支持多轮对话与模型选择）", self._toggle_chat))
-        self._quick_float_btn = make_pill("✨ 悬浮", "切换反重力悬浮", self._toggle_anti_gravity)
+        self._quick_float_btn = make_pill("✨ 反重力悬浮模式", "切换反重力悬浮模式", self._toggle_anti_gravity)
         row2.addWidget(self._quick_float_btn)
-        row2.addWidget(make_pill("📖 档案", "查看角色设定与三视图", self.open_profile_requested.emit))
-        self._quick_style_btn = make_pill("🎀 切换形象", "切换 Q 版 / 标准版形象", self.toggle_style_mode)
-        row2.addWidget(self._quick_style_btn)
+        row2.addWidget(make_pill("📖 角色档案与三视图", "查看角色档案与三视图", self.open_profile_requested.emit))
         row2.addStretch(1)
         qb_layout.addLayout(row2)
 
@@ -1036,13 +1036,24 @@ class PetWindow(QWidget):
         row3.setContentsMargins(0, 0, 0, 0)
         row3.setSpacing(4)
         row3.addStretch(1)
-        row3.addWidget(make_pill("🔄 同步", "在气泡里实时同步 Antigravity 对话", self.toggle_antigravity_sync))
-        row3.addWidget(make_pill("✏️ 角色设定", "可视化自定义角色设定", self.open_character_editor_requested.emit))
-        self._quick_log_btn = make_pill("📝 运行日志", "开关运行日志记录（排错用）", self._toggle_runtime_log)
-        row3.addWidget(self._quick_log_btn)
-        row3.addWidget(make_pill("🆕 检查更新", "检查 GitHub Releases 更新与更新日志", self.open_update_requested.emit))
+        self._quick_style_btn = make_pill("🎀 形象切换", "切换 Q 版 / 标准版形象", self.toggle_style_mode)
+        row3.addWidget(self._quick_style_btn)
+        row3.addWidget(make_pill("🔄 实时同步反重力对话", "实时同步反重力对话", self.toggle_antigravity_sync))
+        row3.addWidget(
+            make_pill("✏️ 自定义角色设定", "可视化自定义角色设定", self.open_character_editor_requested.emit)
+        )
         row3.addStretch(1)
         qb_layout.addLayout(row3)
+
+        row4 = QHBoxLayout()
+        row4.setContentsMargins(0, 0, 0, 0)
+        row4.setSpacing(4)
+        row4.addStretch(1)
+        self._quick_log_btn = make_pill("📝 记录运行日志", "开关记录运行日志（排错用）", self._toggle_runtime_log)
+        row4.addWidget(self._quick_log_btn)
+        row4.addWidget(make_pill("🆕 检查更新", "检查 GitHub Releases 更新与更新日志", self.open_update_requested.emit))
+        row4.addStretch(1)
+        qb_layout.addLayout(row4)
 
         self._quick_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._quick_bar.setVisible(False)
@@ -1064,8 +1075,9 @@ class PetWindow(QWidget):
         act_quota = menu.addAction("📊 查看反重力额度")
         act_quota.triggered.connect(self.open_quota_requested)
 
-        self._act_sync_chat = menu.addAction("💬 同步反重力对话")
-        self._act_sync_chat.triggered.connect(self.toggle_antigravity_sync)
+        self._act_sync_chat = menu.addAction("💬 实时同步反重力对话")
+        self._act_sync_chat.setCheckable(True)
+        self._act_sync_chat.triggered.connect(self._on_menu_sync_chat)
 
         menu.addSeparator()
 
@@ -1386,33 +1398,38 @@ class PetWindow(QWidget):
         self._act_doze.setChecked(self._settings.doze_mode)
         self._apply_doze_transition()
         self._act_show_bubble.setChecked(self._settings.show_speech_bubble)
+        self._act_sync_chat.setChecked(self._ag_mirror_active)
         self._sync_auto_start_action()
         self._act_follow_ag.setChecked(self._settings.follow_antigravity)
         self._act_follow_gemini.setChecked(self._settings.follow_gemini_app)
         self._act_runtime_log.setChecked(self._settings.enable_runtime_log)
 
-        self._quick_bubble_btn.setText("💭 气泡已开" if self._settings.show_speech_bubble else "💭 自动气泡")
+        self._quick_bubble_btn.setText(
+            "💭 对话气泡已开" if self._settings.show_speech_bubble else "💭 自动弹出对话气泡"
+        )
         self._quick_bubble_btn.setToolTip(
             "当前已开启自动弹出对话气泡（点击关闭）"
             if self._settings.show_speech_bubble
             else "当前已关闭自动弹出对话气泡（点击开启）"
         )
-        self._quick_style_btn.setText("🎀 切换形象")
+        self._quick_style_btn.setText("🎀 形象切换")
         self._quick_style_btn.setToolTip(
             "当前：标准立绘版（点击切换至 Q 版）"
             if self._settings.style_mode == PetStyleMode.STANDARD
             else "当前：Q 版猫娘（点击切换至标准版）"
         )
-        self._quick_float_btn.setText("🌟 已悬浮" if self._settings.anti_gravity_mode else "✨ 悬浮")
-        self._quick_pin_btn.setText("📌 已固定" if pinned else "📌 固定(不乱跑)")
-        self._quick_pin_btn.setToolTip("已固定在桌面（点击恢复漫步）" if pinned else "固定在桌面不乱跑")
+        self._quick_float_btn.setText("🌟 已悬浮" if self._settings.anti_gravity_mode else "✨ 反重力悬浮模式")
+        self._quick_pin_btn.setText("📌 已固定" if pinned else "📌 固定在桌面")
+        self._quick_pin_btn.setToolTip(
+            "已固定在桌面（点击恢复漫步）" if pinned else "固定在桌面（不乱跑）"
+        )
         self._quick_doze_btn.setText("💤 打盹中" if self._settings.doze_mode else "💤 打盹模式")
         self._quick_doze_btn.setToolTip(
             "当前正在打盹待机（点击唤醒）"
             if self._settings.doze_mode
             else "开启打盹模式，原地睡觉待机"
         )
-        self._quick_log_btn.setText("📝 日志已开" if self._settings.enable_runtime_log else "📝 运行日志")
+        self._quick_log_btn.setText("📝 日志已开" if self._settings.enable_runtime_log else "📝 记录运行日志")
         daily_name = datetime.now().strftime("%Y-%m-%d.log")
         log_file = os.path.join(AppLogger.log_directory(), daily_name)
         self._quick_log_btn.setToolTip(
@@ -1443,6 +1460,7 @@ class PetWindow(QWidget):
             not self._settings.show_speech_bubble
             and not self._is_chat_open
             and not self._is_forced_bubble_active
+            and not self._ag_mirror_active
         ):
             self._hide_speech_bubble()
 
@@ -2900,10 +2918,10 @@ class PetWindow(QWidget):
                 )
 
         menu.addSeparator()
-        act_sync = menu.addAction(
-            "⏹ 停止反重力同步" if self._ag_mirror_active else "💬 同步反重力对话"
-        )
-        act_sync.triggered.connect(self.toggle_antigravity_sync)
+        act_sync = menu.addAction("💬 实时同步反重力对话")
+        act_sync.setCheckable(True)
+        act_sync.setChecked(self._ag_mirror_active)
+        act_sync.triggered.connect(self._on_menu_sync_chat)
         menu.addSeparator()
         act_refresh = menu.addAction("🔄 获取 / 刷新官方模型")
         act_refresh.setEnabled(not self._settings.chat_offline_mode)
@@ -3221,7 +3239,7 @@ class PetWindow(QWidget):
         self._ag_playback.clear()
         self._ag_baseline = {}
         if self._act_sync_chat is not None:
-            self._act_sync_chat.setText("💬 同步反重力对话")
+            self._act_sync_chat.setChecked(False)
         try:
             record = self._chat_archive.load(session_id)
         except (OSError, ValueError):
@@ -3253,7 +3271,7 @@ class PetWindow(QWidget):
         self._ag_playback.clear()
         self._ag_baseline = {}
         if self._act_sync_chat is not None:
-            self._act_sync_chat.setText("💬 同步反重力对话")
+            self._act_sync_chat.setChecked(False)
         self._archive_error = ""
         self._last_chat_api_notice = ""
         self._clear_chat_rows()
@@ -3279,10 +3297,24 @@ class PetWindow(QWidget):
             f"点击播报：active={self._ag_mirror_active}, "
             f"bubble={self._speech_bubble.isVisible() if self._speech_bubble else 'n/a'}",
         )
-        if self._ag_mirror_active:
-            self.stop_antigravity_sync()
-        else:
-            self.start_antigravity_sync()
+        self.set_antigravity_sync_enabled(not self._ag_mirror_active)
+
+    def set_antigravity_sync_enabled(self, enabled: bool, *, silent: bool = False) -> None:
+        """按目标状态开启/停止实时同步；菜单复选框、托盘与偏好设置共用一个入口。"""
+        want = bool(enabled)
+        if want and not self._ag_mirror_active:
+            self.start_antigravity_sync(silent=silent)
+        elif not want and self._ag_mirror_active:
+            self.stop_antigravity_sync(silent=silent)
+        # 启动失败（没找到会话等）时回落到实际运行态，保证三处勾选状态一致。
+        self._settings.chat_sync_enabled = self._ag_mirror_active
+        self._settings_service.save(self._settings)
+        if self._act_sync_chat is not None:
+            self._act_sync_chat.setChecked(self._ag_mirror_active)
+        self.settings_synced.emit()
+
+    def _on_menu_sync_chat(self, checked: bool) -> None:
+        self.set_antigravity_sync_enabled(checked)
 
     def start_antigravity_sync(self, *, silent: bool = False) -> None:
         """开启反重力对话播报：新消息直接显示在桌宠气泡里。
@@ -3309,7 +3341,7 @@ class PetWindow(QWidget):
             self._settings.chat_sync_enabled = True
             self._settings_service.save(self._settings)
             if self._act_sync_chat is not None:
-                self._act_sync_chat.setText("⏹ 停止反重力播报")
+                self._act_sync_chat.setChecked(True)
             if not silent:
                 self.show_bubble("反重力对话播报已开启喵～新消息会出现在这里", 4.0)
             AppLogger.info(
@@ -3321,6 +3353,8 @@ class PetWindow(QWidget):
             self._ag_collector.reset()
             self._ag_playback.clear()
             self._ag_baseline = {}
+            if self._act_sync_chat is not None:
+                self._act_sync_chat.setChecked(False)
             AppLogger.error("ChatSync", "启动反重力播报失败", exc)
             if not silent:
                 self.show_bubble(f"反重力播报启动失败：{exc}", 5.0, force=True)
@@ -3336,7 +3370,7 @@ class PetWindow(QWidget):
             self._settings.chat_sync_enabled = False
             self._settings_service.save(self._settings)
         if self._act_sync_chat is not None:
-            self._act_sync_chat.setText("💬 同步反重力对话")
+            self._act_sync_chat.setChecked(False)
         if not silent:
             self.show_bubble("已停止反重力播报喵～", 3.0)
 
@@ -3344,7 +3378,8 @@ class PetWindow(QWidget):
         """启动时恢复上次的播报开关：静默开启，不覆盖问候气泡。"""
         if self._ag_mirror_active or not self._settings.chat_sync_enabled:
             return
-        self.start_antigravity_sync(silent=True)
+        # 找不到会话时静默回落，避免托盘/菜单/偏好设置出现"勾着却没运行"的状态。
+        self.set_antigravity_sync_enabled(True, silent=True)
 
     def _refresh_antigravity_sync(self) -> None:
         """十几拍一次的状态采集：读库 → 取差量 → 播队列。"""
@@ -3455,7 +3490,13 @@ class PetWindow(QWidget):
         if not from_sync and not force and time.monotonic() < self._sync_guard_until:
             # 正在播反重力对话，闲聊别插话把内容顶掉；强制气泡（宠物自己的回复）照常显示。
             return
-        if not force and not self._settings.show_speech_bubble and not self._is_chat_open:
+        # 实时同步播报绕过"自动弹出对话气泡"开关：同步一开，新消息始终能上气泡。
+        if (
+            not force
+            and not from_sync
+            and not self._settings.show_speech_bubble
+            and not self._is_chat_open
+        ):
             return
         if not self.isVisible():
             return
@@ -3551,7 +3592,7 @@ class PetWindow(QWidget):
         self.apply_settings_to_window()
         if enabled:
             self.show_bubble("已开启宠物对话气泡，会自动陪你聊天喵✦", 4.0, force=True)
-        elif not self._is_chat_open:
+        elif not self._is_chat_open and not self._ag_mirror_active:
             self._sync_chat_controls()
             self._hide_speech_bubble()
             self._relayout_stage_top()
@@ -3984,6 +4025,8 @@ class PetWindow(QWidget):
             self._act_auto_start.setChecked(SettingsService.is_startup_enabled())
         finally:
             self._act_auto_start.blockSignals(False)
+        # 菜单弹出时以实际运行态刷新同步复选框，临时停止后也能显示正确状态。
+        self._act_sync_chat.setChecked(self._ag_mirror_active)
 
     def _on_menu_auto_start(self, checked: bool) -> None:
         self.auto_start_changed.emit(bool(checked))

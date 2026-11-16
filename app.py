@@ -210,7 +210,7 @@ class PetApplicationCoordinator(QObject):
         self._tray.open_character_editor_requested.connect(self.open_character_editor_window)
         self._tray.open_settings_requested.connect(self.open_settings_window)
         self._tray.open_quota_requested.connect(self.toggle_quota_window)
-        self._tray.sync_antigravity_requested.connect(self._pet.toggle_antigravity_sync)
+        self._tray.sync_antigravity_toggled.connect(self._pet.set_antigravity_sync_enabled)
         self._tray.open_update_requested.connect(self.open_update_window)
         self._tray.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
 
@@ -463,6 +463,7 @@ class PetApplicationCoordinator(QObject):
                     on_settings_applied=self._sync_all_views_from_settings,
                     on_open_profile_editor=self.open_character_editor_window,
                     on_open_update_center=self.open_update_window,
+                    on_antigravity_sync_changed=self._pet.set_antigravity_sync_enabled,
                 )
             self._settings_win.sync_from_settings()
             self._show_and_focus(self._settings_win)

@@ -36,7 +36,7 @@ class TrayIconService(QObject):
     open_character_editor_requested = Signal()
     open_settings_requested = Signal()
     open_quota_requested = Signal()
-    sync_antigravity_requested = Signal()
+    sync_antigravity_toggled = Signal(bool)
     open_update_requested = Signal()
     exit_requested = Signal()
 
@@ -56,12 +56,12 @@ class TrayIconService(QObject):
         greet_act.triggered.connect(self.show_and_greet_requested)
         self._menu.addAction(greet_act)
 
-        self._add_action("📊 查看反重力额度 (Antigravity)", self.open_quota_requested.emit)
-        self._add_action("💬 同步反重力对话", self.sync_antigravity_requested.emit)
+        self._add_action("📊 查看反重力额度", self.open_quota_requested.emit)
+        self._sync_act = self._add_check("💬 实时同步反重力对话", self.sync_antigravity_toggled.emit)
         self._add_action("💬 聊天模式 / 选模型对话", self.open_chat_requested.emit)
 
         self._style_action = self._add_action(
-            "🎀 切换形象：当前 Q 版 → 切至标准版", self.style_toggle_requested.emit
+            "🎀 形象切换：当前 Q 版 → 切至标准版", self.style_toggle_requested.emit
         )
         self._add_action("📍 回到屏幕右下角", self.reset_position_requested.emit)
         self._menu.addSeparator()
@@ -88,9 +88,9 @@ class TrayIconService(QObject):
         )
 
         self._menu.addSeparator()
-        self._add_action("📖 角色档案与设定图鉴", self.open_profile_requested.emit)
+        self._add_action("📖 角色档案与三视图", self.open_profile_requested.emit)
         self._add_action("✏️ 自定义角色设定...", self.open_character_editor_requested.emit)
-        self._add_action("⚙️ 偏好设置", self.open_settings_requested.emit)
+        self._add_action("⚙️ 偏好设置...", self.open_settings_requested.emit)
         self._update_act = self._add_action(
             f"🆕 检查更新 ({AppVersion.current_display()})", self.open_update_requested.emit
         )
@@ -135,11 +135,12 @@ class TrayIconService(QObject):
             return
         self.sync_auto_start_state()
         self._style_action.setText(
-            "🎀 切换形象：当前标准版 → 切至 Q 版"
+            "🎀 形象切换：当前标准版 → 切至 Q 版"
             if settings.style_mode == PetStyleMode.STANDARD
-            else "🎀 切换形象：当前 Q 版 → 切至标准版"
+            else "🎀 形象切换：当前 Q 版 → 切至标准版"
         )
         self._anti_gravity_act.setChecked(settings.anti_gravity_mode)
+        self._sync_act.setChecked(settings.chat_sync_enabled)
         self._pin_act.setChecked(not settings.auto_walk)
         self._doze_act.setChecked(settings.doze_mode)
         self._bubble_act.setChecked(settings.show_speech_bubble)
