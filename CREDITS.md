@@ -16,5 +16,10 @@
    - **许可协议**：**[知识共享 署名-非商业性使用-相同方式共享 4.0 国际许可协议 (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)**
    - **说明**：本项目将其 WebP 素材无损转换为透明通道 PNG 以便 Windows 桌面端透明渲染，并生成 Windows `.ico` 应用图标；未作商业用途，亦依 CC BY-NC-SA 4.0 协议共享衍生部分。
 
-3. **商标说明**
+3. **标准版补充动作 (`Assets/Standard/`)**
+   - 依据上述角色原案和 Q 版动作参考，使用 AI 图像生成工具补充标准比例动作立绘。
+   - 补充立绘为 AI 辅助衍生素材，不代表原画师新增绘制；保留原角色与动作参考的署名和衍生素材许可说明。
+   - 生成提示词见 `Assets/Standard/GENERATION.md`。
+
+4. **商标说明**
    - 「Gemini」「Google」为 Google LLC 的注册商标。本项目为非官方同人桌面宠物程序，与 Google LLC 无官方关联。
