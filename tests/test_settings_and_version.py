@@ -16,7 +16,14 @@ from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication
 
 from models.app_version import AppVersion, get_app_base_dir, get_bundled_resource_dir
-from models.pet_settings import DockSide, PetSettings, PetStyleMode
+from models.pet_settings import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_OAUTH_MODEL,
+    DockSide,
+    PetSettings,
+    PetStyleMode,
+    normalize_gemini_model,
+)
 from services.antigravity_quota_service import (
     AntigravityQuotaService,
     QuotaBucketInfo,
@@ -100,7 +107,10 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             self.assertAlmostEqual(reloaded.scale, 2.2, places=2)
             self.assertIsNone(reloaded.last_left)
             self.assertIsNone(reloaded.last_top)
-            self.assertEqual(reloaded.gemini_model, "gemini-4-hydrogen")
+            self.assertEqual(reloaded.gemini_model, DEFAULT_GEMINI_MODEL)
+            self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-2.5-flash")
+            self.assertEqual(DEFAULT_OAUTH_MODEL, "gemini-2.5-flash")
+            self.assertEqual(normalize_gemini_model("gemini-2.5-pro"), "gemini-2.5-pro")
 
         # 验证默认配置目录为 %USERPROFILE%\.GeminiDesktopPet\user_config.json
         with tempfile.TemporaryDirectory() as tmp_home:

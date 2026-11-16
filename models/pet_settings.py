@@ -52,9 +52,12 @@ class ChatAuthMode(str, Enum):
         return cls.AUTO
 
 
-DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
-DEFAULT_OAUTH_MODEL = "gemini-3.8-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_OAUTH_MODEL = "gemini-2.5-flash"
 BUILTIN_OAUTH_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
     "gemini-3.8-flash",
     "gemini-4-hydrogen",
     "gemini-4-argon",
@@ -62,10 +65,8 @@ BUILTIN_OAUTH_MODELS: tuple[str, ...] = (
     "gemini-3.8-flash-low",
     "gemini-3.8-flash-medium",
     "gemini-3.8-flash-high",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
 )
-DEPRECATED_MODEL_PREFIXES = ("gemini-2.5-", "gemini-2.0-", "gemini-1.5-", "gemini-1.0-")
+DEPRECATED_MODEL_PREFIXES = ("gemini-2.0-", "gemini-1.5-", "gemini-1.0-")
 
 
 def normalize_gemini_model(model: str | None) -> str:
@@ -79,7 +80,7 @@ def normalize_gemini_model(model: str | None) -> str:
 
 
 def normalize_oauth_model(model: str | None) -> str:
-    """规范化 OAuth 对话模型名，留空时回退到官方轻量默认模型。"""
+    """规范化 OAuth 对话模型名，留空时回退到官方默认模型。"""
     cleaned = (model or "").strip()
     return cleaned if cleaned else DEFAULT_OAUTH_MODEL
 

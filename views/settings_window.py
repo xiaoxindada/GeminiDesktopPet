@@ -26,10 +26,12 @@ from models.app_version import AppVersion
 from models.character_lore import COSTUME_OPTIONS
 from models.pet_settings import (
     BUILTIN_OAUTH_MODELS,
+    DEFAULT_GEMINI_MODEL,
     DEFAULT_OAUTH_MODEL,
     ChatAuthMode,
     PetSettings,
     PetStyleMode,
+    normalize_gemini_model,
     normalize_oauth_model,
 )
 from services.app_follow_service import AppFollowService
@@ -299,7 +301,7 @@ class SettingsWindow(QWidget):
 
         c_api.addWidget(self._field_lbl("API Key 模型名称"))
         self._model_edit = QLineEdit()
-        self._model_edit.setPlaceholderText("gemini-4-hydrogen")
+        self._model_edit.setPlaceholderText(DEFAULT_GEMINI_MODEL)
         self._model_edit.textChanged.connect(self._on_api_changed)
         c_api.addWidget(self._model_edit)
 
@@ -477,7 +479,7 @@ class SettingsWindow(QWidget):
             self._auth_mode_combo.setCurrentIndex(auth_idx)
             self._sync_oauth_panel()
             self._api_key_edit.setText(s.gemini_api_key or "")
-            self._model_edit.setText(s.gemini_model or "gemini-4-hydrogen")
+            self._model_edit.setText(s.gemini_model or DEFAULT_GEMINI_MODEL)
             self._chk_autocheck.setChecked(s.auto_check_updates)
             self._upstream_btn.setText(
                 f"上游追踪源：{UpdateService.normalize_releases_url(s.update_releases_url)}"
@@ -525,7 +527,7 @@ class SettingsWindow(QWidget):
         self._settings.chat_auth_mode = ChatAuthMode.parse(self._auth_mode_combo.currentData())
         self._settings.oauth_model = normalize_oauth_model(self._oauth_model_combo.currentText())
         self._settings.gemini_api_key = self._api_key_edit.text().strip()
-        self._settings.gemini_model = self._model_edit.text().strip() or "gemini-4-hydrogen"
+        self._settings.gemini_model = normalize_gemini_model(self._model_edit.text())
         self._settings_service.save(self._settings)
         self._emit_applied()
 
