@@ -529,7 +529,7 @@ class PetApplicationCoordinator(QObject):
         if self._is_exiting:
             return
         self._silent_update_worker = _SilentUpdateWorker(
-            self._update_service, self._settings.github_releases_url, parent=self
+            self._update_service, self._settings.update_releases_url, parent=self
         )
         self._silent_update_worker.checked.connect(self._on_silent_update_checked)
         self._silent_update_worker.start()
