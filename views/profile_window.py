@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap
+from PySide6.QtCore import QRectF, QSizeF, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -27,6 +28,45 @@ from models.pet_state import PetState
 from services.sprite_manager import SpriteManager
 from services.tray_icon_service import TrayIconService
 from themes.starlight_theme import STARLIGHT_WINDOW_QSS
+
+
+class _FitImageLabel(QLabel):
+    """在实际布局区域内绘制完整原图，避免固定缩略图在小窗口中被裁剪。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._source = QPixmap()
+        # 图片大小不能反向撑大布局；始终由布局决定可用绘制区域。
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.setMinimumSize(0, 0)
+
+    def setPixmap(self, pixmap: QPixmap) -> None:
+        self._source = QPixmap(pixmap)
+        self.update()
+
+    def pixmap(self) -> QPixmap:
+        return self._source
+
+    def _image_rect(self) -> QRectF:
+        # 给发光阴影留边，耳尖、脚和三视图边缘均保持在容器内。
+        available = QRectF(self.contentsRect()).adjusted(12, 12, -12, -12)
+        if self._source.isNull() or available.width() <= 0 or available.height() <= 0:
+            return QRectF()
+        size = QSizeF(self._source.size())
+        size.scale(available.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        target = QRectF(0, 0, size.width(), size.height())
+        target.moveCenter(available.center())
+        return target
+
+    def paintEvent(self, event) -> None:
+        target = self._image_rect()
+        if target.isEmpty():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # 保留原始像素，每次按当前逻辑尺寸绘制，缩放/DPI/切页后不复用旧缩略图。
+        painter.drawPixmap(target, self._source, QRectF(self._source.rect()))
+
 
 
 class ProfileWindow(QWidget):
@@ -156,7 +196,7 @@ class ProfileWindow(QWidget):
         img_box.setStyleSheet("background-color: #130F26; border: 1px solid #2D2454; border-radius: 10px;")
         ibl = QVBoxLayout(img_box)
         ibl.setContentsMargins(6, 6, 6, 6)
-        self._standee_lbl = QLabel()
+        self._standee_lbl = _FitImageLabel()
         self._standee_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._standee_lbl.setStyleSheet("border: none; background: transparent;")
         shadow = QGraphicsDropShadowEffect(self._standee_lbl)
@@ -212,7 +252,7 @@ class ProfileWindow(QWidget):
         w.setObjectName("CardPanel")
         vl = QVBoxLayout(w)
         vl.setContentsMargins(14, 14, 14, 14)
-        self._turnaround_lbl = QLabel()
+        self._turnaround_lbl = _FitImageLabel()
         self._turnaround_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._turnaround_lbl.setStyleSheet("background: transparent; border: none;")
         shadow = QGraphicsDropShadowEffect(self._turnaround_lbl)
@@ -314,8 +354,8 @@ class ProfileWindow(QWidget):
         standee_path = p.custom_standee_path if os.path.isfile(p.custom_standee_path) else os.path.join(res_dir, "gemini_standee.png")
         turn_path = p.custom_turnaround_path if os.path.isfile(p.custom_turnaround_path) else os.path.join(res_dir, "gemini_turnaround.png")
 
-        self._standee_lbl.setPixmap(QPixmap(standee_path).scaled(260, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        self._turnaround_lbl.setPixmap(QPixmap(turn_path).scaled(780, 420, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self._standee_lbl.setPixmap(QPixmap(standee_path))
+        self._turnaround_lbl.setPixmap(QPixmap(turn_path))
 
         while self._traits_container.count():
             item = self._traits_container.takeAt(0)
