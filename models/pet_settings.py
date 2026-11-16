@@ -77,6 +77,9 @@ class PetSettings:
 
     last_left: float | None = None
     last_top: float | None = None
+    # 用户拖拽缩放后的对话窗口记忆尺寸（None 表示按内容自动适配）
+    chat_width: int | None = None
+    chat_height: int | None = None
     docked_side: DockSide = DockSide.NONE
 
     total_pats: int = 0

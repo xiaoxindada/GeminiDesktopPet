@@ -87,6 +87,21 @@ def _parse_nonneg_int(raw: Any, current: int) -> int:
         return current
 
 
+def _make_optional_clamped_int(min_val: int, max_val: int) -> Callable[[Any, Optional[int]], Optional[int]]:
+    def _parser(raw: Any, _current: Optional[int]) -> Optional[int]:
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            text = raw.strip() if isinstance(raw, str) else raw
+            if text == "":
+                return None
+            return max(min_val, min(max_val, int(round(float(text)))))
+        except (TypeError, ValueError):
+            return None
+
+    return _parser
+
+
 def _parse_nonempty_str(raw: Any, current: str) -> str:
     if raw is None:
         return current
@@ -161,6 +176,20 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
         "last_top",
         _parse_optional_float,
         lambda v: round(float(v), 2) if v is not None else None,
+    ),
+    _SettingFieldSpec(
+        "chat_width",
+        "window",
+        "chat_width",
+        _make_optional_clamped_int(280, 760),
+        lambda v: int(v) if v is not None else None,
+    ),
+    _SettingFieldSpec(
+        "chat_height",
+        "window",
+        "chat_height",
+        _make_optional_clamped_int(136, 620),
+        lambda v: int(v) if v is not None else None,
     ),
     _SettingFieldSpec(
         "docked_side",

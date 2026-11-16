@@ -46,6 +46,8 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
                 costume_override="halloween",
                 last_left=640.5,
                 last_top=320.25,
+                chat_width=420,
+                chat_height=230,
                 docked_side=DockSide.RIGHT,
                 total_pats=17,
                 favorability=68,
@@ -73,6 +75,8 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
             self.assertEqual(loaded.costume_override, "halloween")
             self.assertAlmostEqual(loaded.last_left or 0.0, 640.5, places=2)
             self.assertAlmostEqual(loaded.last_top or 0.0, 320.25, places=2)
+            self.assertEqual(loaded.chat_width, 420)
+            self.assertEqual(loaded.chat_height, 230)
             self.assertEqual(loaded.docked_side, DockSide.RIGHT)
             self.assertEqual(loaded.total_pats, 17)
             self.assertEqual(loaded.favorability, 68)

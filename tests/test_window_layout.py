@@ -11,7 +11,8 @@ import unittest
 if os.name != "nt" and not os.environ.get("DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from models.pet_settings import DockSide, PetSettings
@@ -183,6 +184,158 @@ class TestWindowLayoutFixes(unittest.TestCase):
             reloaded = settings_svc.load()
             self.assertAlmostEqual(reloaded.last_left or 0.0, 777.0, places=1)
             self.assertAlmostEqual(reloaded.last_top or 0.0, 333.0, places=1)
+
+    def test_chat_bubble_default_size_no_clipping_and_edge_drag_resize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_svc = SettingsService(tmp)
+            sound = SoundService()
+            sprites = SpriteManager()
+            sys_monitor = SystemMonitorService()
+            chat = GeminiChatService()
+
+            settings = PetSettings(scale=0.6, last_left=400.0, last_top=360.0)
+            pet = PetWindow(settings, settings_svc, sprites, sound, sys_monitor, chat)
+            try:
+                pet.show()
+                pet._is_hovering = True
+                pet._quick_bar.setVisible(True)
+                pet.open_chat_dialog()
+                self._app.processEvents()
+
+                bubble = pet._speech_bubble
+                self.assertTrue(bubble.isVisible())
+                self.assertGreaterEqual(bubble.width(), 320)
+                self.assertGreaterEqual(bubble.height(), 136)
+                self.assertFalse(pet._bubble_scroll.verticalScrollBar().isVisible())
+                ph_width = pet._chat_input.fontMetrics().horizontalAdvance(
+                    pet._chat_input.placeholderText()
+                )
+                self.assertGreater(pet._chat_input.width(), ph_width)
+
+                qb_global = QRect(pet._quick_bar.mapToGlobal(QPoint(0, 0)), pet._quick_bar.size())
+                self.assertFalse(bubble.geometry().intersects(qb_global))
+                self.assertFalse(bubble.geometry().intersects(pet.get_visual_sprite_bounds()))
+
+                # 验证八向边缘鼠标悬停均能切换为正确的缩放光标
+                cursor_cases = [
+                    (QPoint(5, 5), Qt.CursorShape.SizeFDiagCursor),
+                    (QPoint(bubble.width() - 6, bubble.height() - 6), Qt.CursorShape.SizeFDiagCursor),
+                    (QPoint(bubble.width() - 6, 5), Qt.CursorShape.SizeBDiagCursor),
+                    (QPoint(5, bubble.height() - 6), Qt.CursorShape.SizeBDiagCursor),
+                    (QPoint(2, bubble.height() // 2), Qt.CursorShape.SizeHorCursor),
+                    (QPoint(bubble.width() - 2, bubble.height() // 2), Qt.CursorShape.SizeHorCursor),
+                    (QPoint(bubble.width() // 2, 2), Qt.CursorShape.SizeVerCursor),
+                    (QPoint(bubble.width() // 2, bubble.height() - 2), Qt.CursorShape.SizeVerCursor),
+                ]
+                for pt, expected_cursor in cursor_cases:
+                    move_ev = QMouseEvent(
+                        QMouseEvent.Type.MouseMove,
+                        QPointF(pt),
+                        QPointF(bubble.mapToGlobal(pt)),
+                        Qt.MouseButton.NoButton,
+                        Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                    bubble.mouseMoveEvent(move_ev)
+                    self.assertEqual(bubble.cursor().shape(), expected_cursor)
+
+                # 拖拽右下角放大 (+90, +70)，并验证左上角锚定、文本随宽重排与尺寸持久化
+                se_local = QPoint(bubble.width() - 6, bubble.height() - 6)
+                se_global = bubble.mapToGlobal(se_local)
+                orig_geom = QRect(bubble.geometry())
+                bubble.mousePressEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseButtonPress,
+                        QPointF(se_local),
+                        QPointF(se_global),
+                        Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                se_end = se_global + QPoint(90, 70)
+                bubble.mouseMoveEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseMove,
+                        QPointF(bubble.mapFromGlobal(se_end)),
+                        QPointF(se_end),
+                        Qt.MouseButton.NoButton,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                bubble.mouseReleaseEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseButtonRelease,
+                        QPointF(bubble.mapFromGlobal(se_end)),
+                        QPointF(se_end),
+                        Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                self._app.processEvents()
+                self.assertEqual(bubble.width(), orig_geom.width() + 90)
+                self.assertEqual(bubble.height(), orig_geom.height() + 70)
+                self.assertEqual(bubble.geometry().topLeft(), orig_geom.topLeft())
+                self.assertGreater(pet._bubble_text_lbl.width(), 350)
+                persisted = settings_svc.load()
+                self.assertEqual(persisted.chat_width, bubble.width())
+                self.assertEqual(persisted.chat_height, bubble.height())
+
+                # 拖拽左上角放大 (-40, -30)，验证右下角保持不动
+                nw_local = QPoint(5, 5)
+                nw_global = bubble.mapToGlobal(nw_local)
+                before_nw = QRect(bubble.geometry())
+                bubble.mousePressEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseButtonPress,
+                        QPointF(nw_local),
+                        QPointF(nw_global),
+                        Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                nw_end = nw_global + QPoint(-40, -30)
+                bubble.mouseMoveEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseMove,
+                        QPointF(bubble.mapFromGlobal(nw_end)),
+                        QPointF(nw_end),
+                        Qt.MouseButton.NoButton,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                bubble.mouseReleaseEvent(
+                    QMouseEvent(
+                        QMouseEvent.Type.MouseButtonRelease,
+                        QPointF(bubble.mapFromGlobal(nw_end)),
+                        QPointF(nw_end),
+                        Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+                )
+                self._app.processEvents()
+                self.assertEqual(bubble.width(), before_nw.width() + 40)
+                self.assertEqual(bubble.height(), before_nw.height() + 30)
+                self.assertEqual(bubble.geometry().bottomRight(), before_nw.bottomRight())
+
+                # 验证桌宠移动时对话窗跟随移动，隐藏时同步收起
+                old_pos = bubble.pos()
+                pet.move(pet.x() + 24, pet.y() + 12)
+                self._app.processEvents()
+                self.assertEqual(bubble.pos(), old_pos + QPoint(24, 12))
+
+                pet.hide()
+                self._app.processEvents()
+                self.assertFalse(bubble.isVisible())
+            finally:
+                pet.close()
+                pet.deleteLater()
+                self._app.processEvents()
 
 
 if __name__ == "__main__":

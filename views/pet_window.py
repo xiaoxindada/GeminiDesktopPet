@@ -29,9 +29,11 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontMetrics,
     QGuiApplication,
     QMouseEvent,
     QPainter,
+    QPen,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -198,6 +200,150 @@ class _PetStageCanvas(QWidget):
         self._owner._on_stage_mouse_release(event)
 
 
+class _SpeechBubbleWindow(QFrame):
+    """独立无边框对话与气泡浮窗，支持鼠标拖动八向边缘缩放大小。"""
+
+    RESIZE_MARGIN = 8
+
+    def __init__(self, owner: "PetWindow") -> None:
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if owner._settings.always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        super().__init__(owner, flags)
+        self._owner = owner
+        self.setObjectName("SpeechBubble")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setMouseTracking(True)
+
+        self._resizing_edges: Optional[tuple[bool, bool, bool, bool]] = None
+        self._resize_start_global = QPoint()
+        self._resize_start_geom = QRect()
+
+    def is_resizing(self) -> bool:
+        return self._resizing_edges is not None
+
+    def minimumSizeHint(self) -> QSize:
+        min_w, min_h = self._owner._bubble_min_size()
+        return QSize(min_w, min_h)
+
+    def _hit_test_edges(self, pos: QPoint) -> tuple[bool, bool, bool, bool]:
+        r = self.rect()
+        m = self.RESIZE_MARGIN
+        return (
+            pos.x() <= m,
+            pos.y() <= m,
+            pos.x() >= r.width() - m,
+            pos.y() >= r.height() - m,
+        )
+
+    def _update_resize_cursor(self, pos: QPoint) -> None:
+        left, top, right, bottom = self._hit_test_edges(pos)
+        if (left and top) or (right and bottom):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif (right and top) or (left and bottom):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif left or right:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif top or bottom:
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._owner._sync_bubble_window_styles()
+
+    def leaveEvent(self, event) -> None:
+        if self._resizing_edges is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape and self._owner._is_chat_open:
+            self._owner._close_bubble_click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            edges = self._hit_test_edges(event.position().toPoint())
+            if any(edges):
+                self._resizing_edges = edges
+                self._resize_start_global = event.globalPosition().toPoint()
+                self._resize_start_geom = self.geometry()
+                self._owner._bubble_timer.stop()
+                self.grabMouse()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._resizing_edges is not None:
+            delta = event.globalPosition().toPoint() - self._resize_start_global
+            g = QRect(self._resize_start_geom)
+            min_w, min_h = self._owner._bubble_min_size()
+            area = self._owner._get_work_area(float(g.center().x()), float(g.center().y()))
+            max_w, max_h = self._owner._bubble_max_size(float(g.center().x()), float(g.center().y()))
+            left, top, right, bottom = self._resizing_edges
+
+            if left:
+                new_left = max(area.left() + 4, g.right() + 1 - max_w, min(g.left() + delta.x(), g.right() + 1 - min_w))
+                g.setLeft(new_left)
+            if right:
+                new_right = min(area.right() - 4, g.left() - 1 + max_w, max(g.right() + delta.x(), g.left() - 1 + min_w))
+                g.setRight(new_right)
+            if top:
+                new_top = max(area.top() + 4, g.bottom() + 1 - max_h, min(g.top() + delta.y(), g.bottom() + 1 - min_h))
+                g.setTop(new_top)
+            if bottom:
+                new_bottom = min(area.bottom() - 4, g.top() - 1 + max_h, max(g.bottom() + delta.y(), g.top() - 1 + min_h))
+                g.setBottom(new_bottom)
+
+            self.setGeometry(g)
+            self._owner._on_bubble_resized_by_user(g)
+            event.accept()
+            return
+
+        self._update_resize_cursor(event.position().toPoint())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._resizing_edges is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._resizing_edges = None
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            self._update_resize_cursor(event.position().toPoint())
+            self._owner._on_bubble_resize_finished(self.geometry())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        del event
+        w = self.width()
+        h = self.height()
+        if w <= 2 or h <= 2:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 顶层 WA_TranslucentBackground 窗口在 Qt 中不会自动绘制自身 QSS 背景，显式绘制圆角卡片与边框
+        bg_rect = QRectF(0.75, 0.75, float(w) - 1.5, float(h) - 1.5)
+        painter.setBrush(QColor(23, 19, 45, 242))
+        painter.setPen(QPen(QColor("#7C5CFF"), 1.5))
+        painter.drawRoundedRect(bg_rect, 14.0, 14.0)
+
+        if w >= 40 and h >= 40:
+            grip_pen = QPen(QColor(167, 139, 250, 165), 1.3)
+            grip_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(grip_pen)
+            # 右下角绘制极简缩放指示纹，提示八向边缘均可拖拽缩放
+            painter.drawLine(w - 11, h - 5, w - 5, h - 11)
+            painter.drawLine(w - 8, h - 5, w - 5, h - 8)
+        painter.end()
+
+
 def _draw_pixmap_uniform(painter: QPainter, pixmap: Optional[QPixmap], target: QRectF) -> None:
     """按原始宽高比将 QPixmap 等比缩放并居中绘制到目标矩形内。"""
     if pixmap is None or pixmap.isNull() or target.width() <= 0 or target.height() <= 0:
@@ -329,6 +475,8 @@ class PetWindow(QWidget):
         self._suppress_loaded_default_greeting = False
         self._is_forced_bubble_active = False
         self._is_chat_open = False
+        self._transient_bubble_size: Optional[QSize] = None
+        self._bubble_custom_offset: Optional[QPoint] = None
         self._last_monitor_bubble_utc = datetime.min.replace(tzinfo=timezone.utc)
         self._first_shown = False
         self._closing_handled = False
@@ -349,7 +497,7 @@ class PetWindow(QWidget):
     def _build_ui(self) -> None:
         self._stage_canvas = _PetStageCanvas(self)
 
-        # Top stage container (SpeechBubble + QuickBar) overlaid in upper region
+        # Top stage container (QuickBar) overlaid above character sprite
         self._stage_top_panel = QWidget(self)
         self._stage_top_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._stage_top_panel.setMouseTracking(True)
@@ -358,26 +506,18 @@ class PetWindow(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(6)
 
-        # --- Speech Bubble ---
-        self._speech_bubble = QFrame(self._stage_top_panel)
-        self._speech_bubble.setObjectName("SpeechBubble")
-        self._speech_bubble.setMaximumWidth(288)
-        self._speech_bubble.setMouseTracking(True)
-        self._speech_bubble.setStyleSheet(
-            """
-            QFrame#SpeechBubble {
-                background-color: rgba(23, 19, 45, 237);
-                border: 1.5px solid #7C5CFF;
-                border-radius: 14px;
-            }
-            """
-        )
+        # --- Floating Resizable Speech Bubble / Chat Window ---
+        self._speech_bubble = _SpeechBubbleWindow(self)
+        self._speech_bubble.setFrameShape(QFrame.Shape.NoFrame)
 
-        bubble_layout = QVBoxLayout(self._speech_bubble)
-        bubble_layout.setContentsMargins(12, 9, 12, 9)
-        bubble_layout.setSpacing(4)
+        self._bubble_layout = QVBoxLayout(self._speech_bubble)
+        self._bubble_layout.setContentsMargins(12, 10, 12, 10)
+        self._bubble_layout.setSpacing(6)
 
-        header_row = QHBoxLayout()
+        self._bubble_header_widget = QWidget(self._speech_bubble)
+        self._bubble_header_widget.setStyleSheet("background: transparent;")
+        self._bubble_header_widget.setCursor(Qt.CursorShape.ArrowCursor)
+        header_row = QHBoxLayout(self._bubble_header_widget)
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(0)
 
@@ -418,10 +558,14 @@ class PetWindow(QWidget):
         )
         close_bubble_btn.clicked.connect(self._close_bubble_click)
         header_row.addWidget(close_bubble_btn)
-        bubble_layout.addLayout(header_row)
+        self._bubble_layout.addWidget(self._bubble_header_widget)
 
         self._bubble_scroll = QScrollArea(self._speech_bubble)
         self._bubble_scroll.setWidgetResizable(True)
+        self._bubble_scroll.setMinimumHeight(24)
+        self._bubble_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._bubble_scroll.setCursor(Qt.CursorShape.ArrowCursor)
+        self._bubble_scroll.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         self._bubble_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._bubble_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._bubble_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -453,21 +597,24 @@ class PetWindow(QWidget):
 
         self._bubble_text_lbl = QLabel("喵～Gemini 上线！")
         self._bubble_text_lbl.setWordWrap(True)
+        self._bubble_text_lbl.setCursor(Qt.CursorShape.ArrowCursor)
         self._bubble_text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._bubble_text_lbl.setStyleSheet(
-            "color: #F6F3FF; font-size: 12.5px; background: transparent;"
+            "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
         )
         self._bubble_scroll.setWidget(self._bubble_text_lbl)
-        bubble_layout.addWidget(self._bubble_scroll)
+        self._bubble_layout.addWidget(self._bubble_scroll, 1)
 
         # Inline Chat Input Panel
         self._chat_input_panel = QWidget(self._speech_bubble)
         self._chat_input_panel.setStyleSheet("background: transparent;")
+        self._chat_input_panel.setCursor(Qt.CursorShape.ArrowCursor)
         chat_row = QHBoxLayout(self._chat_input_panel)
-        chat_row.setContentsMargins(0, 4, 0, 0)
+        chat_row.setContentsMargins(0, 2, 0, 0)
         chat_row.setSpacing(6)
 
         self._chat_input = QLineEdit(self._chat_input_panel)
+        self._chat_input.setMinimumWidth(140)
         self._chat_input.setPlaceholderText("想问什么或打个指令试试…")
         self._chat_input.setStyleSheet(
             """
@@ -507,10 +654,9 @@ class PetWindow(QWidget):
         chat_row.addWidget(send_btn)
 
         self._chat_input_panel.setVisible(False)
-        bubble_layout.addWidget(self._chat_input_panel)
+        self._bubble_layout.addWidget(self._chat_input_panel)
 
         self._speech_bubble.setVisible(False)
-        top_layout.addWidget(self._speech_bubble, 0, Qt.AlignmentFlag.AlignHCenter)
 
         # --- Quick Hover Action Bar ---
         self._quick_bar = QFrame(self._stage_top_panel)
@@ -801,7 +947,23 @@ class PetWindow(QWidget):
         for worker in list(self._active_chat_workers):
             if worker.isRunning():
                 worker.wait(400)
+        if getattr(self, "_ui_ready", False):
+            self._speech_bubble.close()
+            self._speech_bubble.deleteLater()
         super().closeEvent(event)
+
+    def hideEvent(self, event) -> None:
+        if getattr(self, "_ui_ready", False):
+            self._is_chat_open = False
+            self._is_forced_bubble_active = False
+            self._chat_input_panel.setVisible(False)
+            self._hide_speech_bubble()
+        super().hideEvent(event)
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        if getattr(self, "_ui_ready", False):
+            self._reposition_speech_bubble_on_move()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if not getattr(self, "_ui_ready", False):
@@ -813,7 +975,11 @@ class PetWindow(QWidget):
                 self._on_hover_entered()
             elif etype == QEvent.Type.Leave:
                 self._is_bubble_hovered = False
-                if not self._is_chat_open and self._speech_bubble.isVisible():
+                if (
+                    not self._is_chat_open
+                    and self._speech_bubble.isVisible()
+                    and not self._speech_bubble.is_resizing()
+                ):
                     self._bubble_timer.stop()
                     self._bubble_timer.start(2500)
                 self._schedule_hover_leave_check()
@@ -824,10 +990,7 @@ class PetWindow(QWidget):
                 self._schedule_hover_leave_check()
         elif watched is self._chat_input and etype == QEvent.Type.KeyPress:
             if getattr(event, "key", lambda: None)() == Qt.Key.Key_Escape:
-                self._is_chat_open = False
-                self._chat_input_panel.setVisible(False)
-                self._speech_bubble.setVisible(False)
-                self._relayout_stage_top()
+                self._close_bubble_click()
                 return True
         return super().eventFilter(watched, event)
 
@@ -866,10 +1029,14 @@ class PetWindow(QWidget):
             )
             still_inside = qb_rect.contains(local_pos)
         if not still_inside and self._speech_bubble.isVisible():
-            sb_rect = QRect(self._speech_bubble.mapTo(self, QPoint(0, 0)), self._speech_bubble.size()).adjusted(
-                -6, -6, 6, 6
-            )
-            still_inside = sb_rect.contains(local_pos)
+            if self._speech_bubble.is_resizing():
+                still_inside = True
+            else:
+                sb_rect = QRect(
+                    self._speech_bubble.mapToGlobal(QPoint(0, 0)),
+                    self._speech_bubble.size(),
+                ).adjusted(-6, -6, 6, 6)
+                still_inside = sb_rect.contains(global_pos)
         if not still_inside:
             self._is_hovering = False
             if not self._is_chat_open and not self._is_bubble_hovered:
@@ -900,7 +1067,9 @@ class PetWindow(QWidget):
 
         s = max(0.5, min(2.0, float(self._settings.scale)))
         sprite_h = self._sprite_height_px()
-        self.setWindowOpacity(max(0.35, min(1.0, float(self._settings.opacity))))
+        opacity = max(0.35, min(1.0, float(self._settings.opacity)))
+        self.setWindowOpacity(opacity)
+        self._speech_bubble.setWindowOpacity(opacity)
         self._sound.enabled = bool(self._settings.sound_enabled)
 
         pinned = not self._settings.auto_walk
@@ -975,8 +1144,7 @@ class PetWindow(QWidget):
             and not self._is_chat_open
             and not self._is_forced_bubble_active
         ):
-            self._bubble_timer.stop()
-            self._speech_bubble.setVisible(False)
+            self._hide_speech_bubble()
 
         self._update_dock_alignment()
         self._apply_win32_extended_styles()
@@ -991,7 +1159,21 @@ class PetWindow(QWidget):
         _ensure_tool_window_ex_style(hwnd)
         _apply_win32_topmost(hwnd, bool(self._settings.always_on_top))
         set_click_through_ex_style(hwnd, bool(self._settings.click_through))
+        self._sync_bubble_window_styles()
         self.visual_bounds_changed.emit()
+
+    def _sync_bubble_window_styles(self) -> None:
+        if not self._speech_bubble.isVisible():
+            return
+        bubble_hwnd = int(self._speech_bubble.winId())
+        if not bubble_hwnd:
+            return
+        _ensure_tool_window_ex_style(bubble_hwnd)
+        _apply_win32_topmost(bubble_hwnd, bool(self._settings.always_on_top))
+        set_click_through_ex_style(
+            bubble_hwnd,
+            bool(self._settings.click_through) and not self._is_chat_open,
+        )
 
     def _update_dock_alignment(self) -> None:
         if self._settings.docked_side == DockSide.LEFT:
@@ -1001,37 +1183,145 @@ class PetWindow(QWidget):
         else:
             align = Qt.AlignmentFlag.AlignHCenter
 
-        self._top_layout.setAlignment(self._speech_bubble, align)
         self._top_layout.setAlignment(self._quick_bar, align)
         self._relayout_stage_top()
 
-    def _relayout_stage_top(self) -> None:
-        w = self.width()
-        h = self.height()
-        sprite_h = self._sprite_height_px()
-        avail_h = max(80, int(h - sprite_h - 4))
-        max_top_w = max(240, w - 12)
+    def _bubble_min_size(self) -> tuple[int, int]:
+        return (280, 136) if self._is_chat_open else (220, 86)
 
-        self._quick_bar.adjustSize()
-        bubble_max_w = min(288, max_top_w)
-        self._speech_bubble.setMaximumWidth(bubble_max_w)
-        quick_h = self._quick_bar.sizeHint().height() + 8 if self._quick_bar.isVisible() else 0
-        chat_h = self._chat_input_panel.sizeHint().height() + 6 if self._chat_input_panel.isVisible() else 0
-        # 限制气泡文字滚动区高度，并将打开的输入框高度纳入预算，防止挤压底部角色区域
-        max_scroll_h = max(28, avail_h - quick_h - chat_h - 48)
-        label_w = max(120, min(260, bubble_max_w - 28))
-        self._bubble_text_lbl.setMaximumWidth(label_w)
+    def _bubble_max_size(self, center_x: float, center_y: float) -> tuple[int, int]:
+        area = self._get_work_area(center_x, center_y)
+        min_w, min_h = self._bubble_min_size()
+        return (
+            min(760, max(min_w, area.width() - 24)),
+            min(620, max(min_h, area.height() - 40)),
+        )
+
+    def _auto_fit_bubble_height(self, target_w: int, min_h: int, max_h: int) -> int:
+        margins = self._bubble_layout.contentsMargins()
+        spacing = max(0, self._bubble_layout.spacing())
+        label_w = max(140, target_w - margins.left() - margins.right() - 8)
         text_h = (
             self._bubble_text_lbl.heightForWidth(label_w)
             if self._bubble_text_lbl.hasHeightForWidth()
             else self._bubble_text_lbl.sizeHint().height()
         )
-        self._bubble_scroll.setFixedHeight(min(max(22, text_h + 2), max_scroll_h))
+        min_scroll = 44 if self._is_chat_open else 26
+        scroll_h = min(max(min_scroll, text_h + 10), 260)
+        header_h = max(18, self._bubble_header_widget.sizeHint().height())
+        chrome_h = margins.top() + margins.bottom() + header_h + spacing
+        if self._chat_input_panel.isVisible():
+            chrome_h += max(30, self._chat_input_panel.sizeHint().height()) + spacing
+        return max(min_h, min(max_h, chrome_h + scroll_h))
 
+    def _compute_bubble_target_size(self) -> QSize:
+        min_w, min_h = self._bubble_min_size()
+        max_w, max_h = self._bubble_max_size(
+            self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
+        )
+        if self._is_chat_open:
+            target_w = (
+                int(self._settings.chat_width)
+                if self._settings.chat_width is not None
+                else 340
+            )
+            target_w = max(min_w, min(max_w, target_w))
+            if self._settings.chat_height is not None:
+                target_h = max(min_h, min(max_h, int(self._settings.chat_height)))
+            else:
+                target_h = self._auto_fit_bubble_height(target_w, min_h, max_h)
+            return QSize(target_w, target_h)
+
+        if self._transient_bubble_size is not None:
+            return QSize(
+                max(min_w, min(max_w, self._transient_bubble_size.width())),
+                max(min_h, min(max_h, self._transient_bubble_size.height())),
+            )
+
+        fm = QFontMetrics(self._bubble_text_lbl.font())
+        text = self._bubble_text_lbl.text() or ""
+        longest_line = max((fm.horizontalAdvance(ln) for ln in text.splitlines()), default=0)
+        target_w = max(240, min(330, longest_line + 52))
+        target_w = max(min_w, min(max_w, target_w))
+        target_h = self._auto_fit_bubble_height(target_w, min_h, max_h)
+        return QSize(target_w, target_h)
+
+    def _compute_bubble_default_pos(self, bubble_size: QSize) -> QPoint:
+        gap = 8
+        bw = bubble_size.width()
+        bh = bubble_size.height()
+        sprite_rect = self.get_visual_sprite_bounds()
+        if self._quick_bar.isVisible() and self._quick_bar.height() > 0:
+            anchor_rect = QRect(
+                self._quick_bar.mapToGlobal(QPoint(0, 0)),
+                self._quick_bar.size(),
+            )
+        else:
+            anchor_rect = sprite_rect
+
+        if self._settings.docked_side == DockSide.LEFT:
+            target_x = anchor_rect.left()
+        elif self._settings.docked_side == DockSide.RIGHT:
+            target_x = anchor_rect.right() + 1 - bw
+        else:
+            target_x = anchor_rect.center().x() - bw // 2
+
+        target_y = anchor_rect.top() - gap - bh
+        area = self._get_work_area(float(anchor_rect.center().x()), float(anchor_rect.center().y()))
+        # 若角色贴近屏幕顶端导致上方空间不足，优先放到精灵下方避免遮挡头顶与快捷栏
+        if target_y < area.top() + 6 and sprite_rect.bottom() + 1 + gap + bh <= area.bottom() - 6:
+            target_y = sprite_rect.bottom() + 1 + gap
+
+        target_x = max(area.left() + 6, min(target_x, area.right() + 1 - bw - 6))
+        target_y = max(area.top() + 6, min(target_y, area.bottom() + 1 - bh - 6))
+        return QPoint(target_x, target_y)
+
+    def _clamp_bubble_pos_to_screen(self, pos: QPoint, size: QSize) -> QPoint:
+        area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
+        cx = max(area.left() + 6, min(pos.x(), area.right() + 1 - size.width() - 6))
+        cy = max(area.top() + 6, min(pos.y(), area.bottom() + 1 - size.height() - 6))
+        return QPoint(cx, cy)
+
+    def _reposition_speech_bubble_on_move(self) -> None:
+        if not self._speech_bubble.isVisible() or self._speech_bubble.is_resizing():
+            return
+        bsize = self._speech_bubble.size()
+        if self._bubble_custom_offset is not None:
+            pos = self._clamp_bubble_pos_to_screen(self.pos() + self._bubble_custom_offset, bsize)
+        else:
+            pos = self._compute_bubble_default_pos(bsize)
+        if self._speech_bubble.pos() != pos:
+            self._speech_bubble.move(pos)
+            self.visual_bounds_changed.emit()
+
+    def _on_bubble_resized_by_user(self, geom: QRect) -> None:
+        self._bubble_custom_offset = geom.topLeft() - self.pos()
+        if self._is_chat_open:
+            self._settings.chat_width = geom.width()
+            self._settings.chat_height = geom.height()
+        else:
+            self._transient_bubble_size = geom.size()
+        self.visual_bounds_changed.emit()
+
+    def _on_bubble_resize_finished(self, geom: QRect) -> None:
+        self._on_bubble_resized_by_user(geom)
+        if self._is_chat_open:
+            self._settings_service.save(self._settings)
+        elif not self._is_bubble_hovered and self._speech_bubble.isVisible():
+            self._bubble_timer.stop()
+            self._bubble_timer.start(2500)
+
+    def _relayout_stage_top(self) -> None:
+        w = self.width()
+        h = self.height()
+        sprite_h = self._sprite_height_px()
+        max_top_w = max(240, w - 12)
+
+        self._quick_bar.adjustSize()
         self._stage_top_panel.setFixedWidth(max_top_w)
         self._top_layout.activate()
         self._stage_top_panel.adjustSize()
-        top_h = self._stage_top_panel.height()
+        top_h = self._stage_top_panel.height() if self._quick_bar.isVisible() else 0
         if self._settings.docked_side == DockSide.LEFT:
             top_x = 6
         elif self._settings.docked_side == DockSide.RIGHT:
@@ -1041,6 +1331,39 @@ class PetWindow(QWidget):
         top_y = max(2, int(round(h - sprite_h - 2 - top_h)))
         self._stage_top_panel.move(top_x, top_y)
         self._stage_top_panel.raise_()
+
+        if self._speech_bubble.isVisible() and not self._speech_bubble.is_resizing():
+            min_w, min_h = self._bubble_min_size()
+            max_w, max_h = self._bubble_max_size(
+                self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
+            )
+            self._speech_bubble.setMinimumSize(min_w, min_h)
+            self._speech_bubble.setMaximumSize(max_w, max_h)
+            target_size = self._compute_bubble_target_size()
+            if self._speech_bubble.size() != target_size:
+                self._speech_bubble.resize(target_size)
+            if self._bubble_custom_offset is not None:
+                target_pos = self._clamp_bubble_pos_to_screen(
+                    self.pos() + self._bubble_custom_offset, target_size
+                )
+                # 快捷栏新出现且会遮挡用户调节过的对话框时，仅将其上推避免重叠
+                if self._quick_bar.isVisible() and self._quick_bar.height() > 0:
+                    qb_global = QRect(
+                        self._quick_bar.mapToGlobal(QPoint(0, 0)),
+                        self._quick_bar.size(),
+                    )
+                    cand_rect = QRect(target_pos, target_size)
+                    if cand_rect.intersects(qb_global):
+                        pushed_y = qb_global.top() - 8 - target_size.height()
+                        target_pos = self._clamp_bubble_pos_to_screen(
+                            QPoint(target_pos.x(), pushed_y), target_size
+                        )
+            else:
+                target_pos = self._compute_bubble_default_pos(target_size)
+            if self._speech_bubble.pos() != target_pos:
+                self._speech_bubble.move(target_pos)
+            self._speech_bubble.raise_()
+
         self.visual_bounds_changed.emit()
 
     def _on_costume_picked(self, costume_id: str, state: Optional[PetState]) -> None:
@@ -1078,6 +1401,7 @@ class PetWindow(QWidget):
     def move_to_bottom_right_corner(self) -> None:
         self._settings.docked_side = DockSide.NONE
         self._is_falling = False
+        self._bubble_custom_offset = None
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
         new_x = area.right() + 1 - self.width() - 28
         new_y = area.bottom() + 1 - self.height()
@@ -1952,33 +2276,52 @@ class PetWindow(QWidget):
 
     # ==================== Speech Bubble & Inline Gemini Chat ====================
 
+    def _hide_speech_bubble(self) -> None:
+        self._bubble_timer.stop()
+        self._bubble_custom_offset = None
+        self._transient_bubble_size = None
+        self._speech_bubble.setVisible(False)
+        self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
     def show_bubble(self, message: str, duration_sec: float, force: bool = False) -> None:
         if not force and not self._settings.show_speech_bubble and not self._is_chat_open:
+            return
+        if not self.isVisible():
             return
 
         self._is_forced_bubble_active = force
         self._bubble_text_lbl.setText(message)
+        self._speech_bubble.setAttribute(
+            Qt.WidgetAttribute.WA_ShowWithoutActivating, not self._is_chat_open
+        )
         self._speech_bubble.setVisible(True)
+        self._sync_bubble_window_styles()
         self._relayout_stage_top()
         self._bubble_timer.stop()
         self._bubble_timer.start(max(200, int(round(duration_sec * 1000.0))))
 
     def _on_bubble_timeout(self) -> None:
         self._is_forced_bubble_active = False
-        if not self._is_chat_open and not self._is_bubble_hovered:
-            self._speech_bubble.setVisible(False)
+        if (
+            not self._is_chat_open
+            and not self._is_bubble_hovered
+            and not self._speech_bubble.is_resizing()
+        ):
+            self._hide_speech_bubble()
             self._relayout_stage_top()
 
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
         if not self._speech_bubble.isVisible():
             self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
-        self._speech_bubble.setVisible(True)
         self._chat_input_panel.setVisible(True)
+        self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self._speech_bubble.setVisible(True)
+        self._sync_bubble_window_styles()
         self._relayout_stage_top()
         self._bubble_timer.stop()
-        self.activateWindow()
-        self.raise_()
+        self._speech_bubble.raise_()
+        self._speech_bubble.activateWindow()
         self._chat_input.setFocus()
         self._set_temporary_pose(PetState.LISTENING, 10.0)
 
@@ -1989,8 +2332,7 @@ class PetWindow(QWidget):
             self.show_bubble("已开启宠物对话气泡，会自动陪你聊天喵✦", 4.0, force=True)
         elif not self._is_chat_open:
             self._chat_input_panel.setVisible(False)
-            self._speech_bubble.setVisible(False)
-            self._bubble_timer.stop()
+            self._hide_speech_bubble()
             self._relayout_stage_top()
 
     def _toggle_chat(self) -> None:
@@ -1999,20 +2341,19 @@ class PetWindow(QWidget):
             return
         self._is_chat_open = False
         self._chat_input_panel.setVisible(False)
+        self._sync_bubble_window_styles()
         if self._settings.show_speech_bubble:
             self._bubble_timer.stop()
             self._bubble_timer.start(3000)
         else:
-            self._bubble_timer.stop()
-            self._speech_bubble.setVisible(False)
+            self._hide_speech_bubble()
         self._relayout_stage_top()
 
     def _close_bubble_click(self) -> None:
         self._is_chat_open = False
         self._is_forced_bubble_active = False
         self._chat_input_panel.setVisible(False)
-        self._speech_bubble.setVisible(False)
-        self._bubble_timer.stop()
+        self._hide_speech_bubble()
         self._relayout_stage_top()
 
     def _submit_chat(self) -> None:
@@ -2207,6 +2548,7 @@ class PetWindow(QWidget):
         self.settings_synced.emit()
 
     def _on_menu_dock(self, tag: str) -> None:
+        self._bubble_custom_offset = None
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
         if tag == "left":
             self._settings.docked_side = DockSide.LEFT
