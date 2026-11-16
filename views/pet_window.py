@@ -6,7 +6,7 @@ import ctypes
 import math
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -51,12 +51,8 @@ from PySide6.QtWidgets import (
 
 from models import (
     COSTUME_OPTIONS,
-    DEFAULT_GEMINI_MODEL,
-    DEFAULT_OAUTH_MODEL,
-    DEFAULT_THINKING_LEVEL,
     CharacterLore,
     CharacterProfile,
-    ChatAuthMode,
     DockSide,
     PetSettings,
     PetState,
@@ -65,7 +61,6 @@ from models import (
     format_thinking_level_label,
     get_supported_thinking_levels,
     normalize_gemini_model,
-    normalize_oauth_model,
     normalize_thinking_level,
 )
 from services import (
@@ -78,7 +73,6 @@ from services import (
     SystemMetrics,
     SystemMonitorService,
 )
-from services.antigravity_quota_service import AntigravityQuotaService
 from services.sprite_manager import SpriteManager
 from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
@@ -177,35 +171,22 @@ class _ChatWorker(QThread):
 
 
 class _ChatModelsDiscoveryWorker(QThread):
-    """后台刷新聊天模式可选的官方实时模型列表，避免阻塞桌面宠动画循环。"""
+    """后台通过 API Key 获取官方模型，使用请求开始时的配置快照。"""
 
-    completed = Signal(str, object, str)
+    completed = Signal(object, str, bool)
 
-    def __init__(
-        self,
-        channel: str,
-        chat: GeminiChatService,
-        settings: PetSettings,
-        parent: Optional[QObject] = None,
-    ) -> None:
+    def __init__(self, chat: GeminiChatService, settings: PetSettings, *, explicit: bool = False, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._channel = channel
         self._chat = chat
-        self._settings = settings
+        self._settings = replace(settings)
+        self._explicit = explicit
 
     def run(self) -> None:
         try:
-            if self._channel == "oauth" and self._chat.oauth_service is not None:
-                models = self._chat.oauth_service.refresh_models_for_current_session()
-            elif self._channel == "agy":
-                models = GeminiChatService.discover_agy_models(force_refresh=True)
-            elif self._channel == "api_key":
-                models = GeminiChatService.fetch_api_key_models(self._settings.gemini_api_key)
-            else:
-                models = []
-            self.completed.emit(self._channel, models, "")
+            models = self._chat.fetch_models_for_chat(self._settings)
+            self.completed.emit(models, "", self._explicit)
         except Exception as exc:
-            self.completed.emit(self._channel, [], str(exc))
+            self.completed.emit([], str(exc), self._explicit)
 
 
 class _PetStageCanvas(QWidget):
@@ -587,13 +568,19 @@ class PetWindow(QWidget):
         )
         header_row.addWidget(self._bond_badge_lbl)
 
-        self._chat_channel_badge = QLabel("离线")
+        self._chat_channel_badge = QPushButton("离线模式")
+        self._chat_channel_badge.setObjectName("ChatChannelBadge")
+        self._chat_channel_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chat_channel_badge.setToolTip("Gemini API Key 连接状态（点击获取模型或打开设置）")
         self._chat_channel_badge.setStyleSheet(
+            "QPushButton#ChatChannelBadge { "
             "background-color: rgba(251, 191, 36, 36); color: #FDE68A; "
             "border: 1px solid rgba(251, 191, 36, 90); border-radius: 7px; "
-            "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
+            "font-size: 9.5px; font-weight: bold; padding: 1px 7px; margin-left: 6px; }"
         )
+        self._chat_channel_badge.clicked.connect(self._open_chat_connection_menu)
         self._chat_channel_badge.setVisible(False)
+        self._last_chat_api_notice: str = ""
         header_row.addWidget(self._chat_channel_badge)
         header_row.addStretch(1)
 
@@ -621,7 +608,7 @@ class PetWindow(QWidget):
 
         self._bubble_settings_btn = QPushButton("⚙")
         self._bubble_settings_btn.setFixedSize(18, 18)
-        self._bubble_settings_btn.setToolTip("设置对话连接方式 (OAuth 个人账号 / API Key)")
+        self._bubble_settings_btn.setToolTip("设置 Gemini 官方 API Key")
         self._bubble_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._bubble_settings_btn.setStyleSheet(
             """
@@ -670,7 +657,7 @@ class PetWindow(QWidget):
         toolbar_row.setContentsMargins(0, 0, 0, 0)
         toolbar_row.setSpacing(6)
 
-        self._chat_model_btn = QPushButton("Gemini 2.5 Flash · 自动   ▾", self._chat_toolbar)
+        self._chat_model_btn = QPushButton(f"{format_model_display_name(None)} · 自动   ▾", self._chat_toolbar)
         self._chat_model_btn.setObjectName("ChatModelBtn")
         self._chat_model_btn.setToolTip("点击切换当前对话模型与思考强度")
         self._chat_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2509,48 +2496,17 @@ class PetWindow(QWidget):
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
     def _resolve_active_chat_channel_and_models(self) -> tuple[str, str, list[str], str]:
-        """解析当前聊天渠道标签、动态可用模型列表与已选模型（不写死静态模型清单）。"""
-        provider = self._chat.resolve_chat_provider(self._settings)
-        oauth_svc = self._chat.oauth_service
-
-        def dedupe(items: list[str]) -> list[str]:
-            seen: list[str] = []
-            for item in items:
-                val = (item or "").strip()
-                if val and val not in seen:
-                    seen.append(val)
-            return seen
-
-        if provider == "oauth":
-            session = oauth_svc.load_session() if oauth_svc is not None else None
-            current = normalize_oauth_model(self._settings.oauth_model) or DEFAULT_OAUTH_MODEL
-            discovered = list(session.available_models) if session and session.available_models else []
-            models = dedupe([*discovered, current])
-            return ("oauth", "OAuth", models, current)
-
-        if provider == "agy":
-            current = normalize_oauth_model(self._settings.oauth_model) or DEFAULT_OAUTH_MODEL
-            discovered = GeminiChatService.get_cached_agy_models()
-            active_cli = AntigravityQuotaService.read_active_cli_model() or ""
-            resolved_eff, _ = GeminiChatService.resolve_agy_model_and_effort(
-                current, self._settings.thinking_level, discovered
-            )
-            models = dedupe([*discovered, active_cli, current, resolved_eff])
-            return ("agy", "Antigravity", models, current)
-
-        if provider == "api_key":
-            current = normalize_gemini_model(self._settings.gemini_model) or DEFAULT_GEMINI_MODEL
-            cached = GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
-            models = dedupe([*cached, current])
-            return ("api_key", "API Key", models, current)
-
-        if self._settings.chat_auth_mode == ChatAuthMode.OAUTH:
-            current = normalize_oauth_model(self._settings.oauth_model) or DEFAULT_OAUTH_MODEL
-            return ("oauth", "离线 · 未登录", dedupe([current]), current)
-
-        current = normalize_gemini_model(self._settings.gemini_model) or DEFAULT_GEMINI_MODEL
+        """返回 API Key 连接状态、官方模型缓存及已选模型。"""
+        current = normalize_gemini_model(self._settings.gemini_model)
         cached = GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
-        return ("api_key", "离线 · 本地", dedupe([*cached, current]), current)
+        models = list(dict.fromkeys([*cached, current]))
+        if self._chat.get_api_error(self._settings):
+            badge = "⚠️ API Key 不可用"
+        elif self._chat.resolve_chat_provider(self._settings):
+            badge = "在线 · API Key"
+        else:
+            badge = "离线模式"
+        return "api_key", badge, models, current
 
     _CHAT_WINDOW_SIZE_PRESETS: tuple[tuple[str, int, int], ...] = (
         ("小", 360, 240),
@@ -2603,46 +2559,89 @@ class PetWindow(QWidget):
         if not in_chat:
             return
 
-        channel, badge_text, _models, current = self._resolve_active_chat_channel_and_models()
+        _channel, badge_text, _models, current = self._resolve_active_chat_channel_and_models()
+        error = self._chat.get_api_error(self._settings)
         self._chat_channel_badge.setText(badge_text)
-        if badge_text in ("OAuth", "Antigravity"):
-            self._chat_channel_badge.setStyleSheet(
-                "background-color: rgba(52, 211, 153, 36); color: #6EE7B7; "
-                "border: 1px solid rgba(52, 211, 153, 95); border-radius: 7px; "
-                "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
-            )
-        elif badge_text == "API Key":
-            self._chat_channel_badge.setStyleSheet(
-                "background-color: rgba(96, 165, 250, 36); color: #93C5FD; "
-                "border: 1px solid rgba(96, 165, 250, 95); border-radius: 7px; "
-                "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
-            )
+        if error:
+            color, rgb = "#FCA5A5", "248, 113, 113"
+            tooltip = f"{error}\n点击可打开 API Key 设置或重新获取模型"
+        elif self._chat.resolve_chat_provider(self._settings):
+            self._last_chat_api_notice = ""
+            color, rgb = "#93C5FD", "96, 165, 250"
+            tooltip = "使用 Gemini 官方 API Key（点击可获取模型或打开设置）"
         else:
-            self._chat_channel_badge.setStyleSheet(
-                "background-color: rgba(251, 191, 36, 36); color: #FDE68A; "
-                "border: 1px solid rgba(251, 191, 36, 95); border-radius: 7px; "
-                "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
-            )
-
-        thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
-        thinking_label = format_thinking_level_label(thinking_lvl)
-        shown_model = current
-        if channel == "agy" and current.lower() in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest", "gemini-pro-latest"):
-            shown_model, _ = GeminiChatService.resolve_agy_model_and_effort(
-                current, thinking_lvl, GeminiChatService.get_cached_agy_models()
-            )
-        disp_name = format_model_display_name(shown_model)
-        self._chat_model_btn.setProperty(
-            "target_field", "oauth_model" if channel in ("oauth", "agy") else "gemini_model"
+            color, rgb = "#FDE68A", "251, 191, 36"
+            tooltip = "当前处于离线模式，点击可切换为官方 API Key 联网对话"
+        self._chat_channel_badge.setToolTip(tooltip)
+        self._chat_channel_badge.setStyleSheet(
+            "QPushButton#ChatChannelBadge { "
+            f"background-color: rgba({rgb}, 36); color: {color}; "
+            f"border: 1px solid rgba({rgb}, 95); border-radius: 7px; "
+            "font-size: 9.5px; font-weight: bold; padding: 1px 7px; margin-left: 6px; }"
+            f"QPushButton#ChatChannelBadge:hover {{ border-color: {color}; }}"
         )
+        thinking = normalize_thinking_level(self._settings.thinking_level)
+        self._chat_model_btn.setProperty("target_field", "gemini_model")
         self._chat_model_btn.setProperty("current_model_id", current)
-        self._chat_model_btn.setProperty("current_thinking_level", thinking_lvl)
-        self._chat_model_btn.setText(f"{disp_name}  ·  {thinking_label}   ▾")
+        self._chat_model_btn.setProperty("current_thinking_level", thinking)
+        self._chat_model_btn.setText(
+            f"{format_model_display_name(current)}  ·  {format_thinking_level_label(thinking)}   ▾"
+        )
         self._update_chat_size_btn_label()
 
+    def _populate_connection_menu(self, menu: QMenu) -> None:
+        modes = QActionGroup(menu)
+        modes.setExclusive(True)
+        for offline, label in ((True, "🌙 离线陪伴"), (False, "🌐 在线 · 官方 API Key")):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self._settings.chat_offline_mode == offline)
+            action.setData(("chat_mode", "offline" if offline else "api_key"))
+            modes.addAction(action)
+            action.triggered.connect(lambda _checked=False, value=offline: self.select_chat_offline_mode(value))
+        menu.addSeparator()
+        refresh = menu.addAction("🔄 获取 / 刷新官方模型")
+        refresh.setEnabled(not self._settings.chat_offline_mode)
+        refresh.triggered.connect(lambda: self._refresh_chat_models_async(explicit=True))
+        settings = menu.addAction("⚙️ 设置 API Key...")
+        settings.triggered.connect(self.open_settings_requested)
+
+    def select_chat_offline_mode(self, offline: bool) -> None:
+        previous = self._settings.chat_offline_mode
+        if previous == offline:
+            return
+        self._settings.chat_offline_mode = offline
+        try:
+            self._settings_service.save(self._settings)
+        except Exception as exc:
+            self._settings.chat_offline_mode = previous
+            self._show_chat_status_notice(f"⚠️ 保存聊天模式失败：{exc}", is_error=True, force=True)
+            return
+        self._chat.reset_conversation()
+        self._sync_chat_controls()
+        self.settings_synced.emit()
+        if offline:
+            notice = "✦ 已切换为离线陪伴，可以继续聊天和使用本地互动指令"
+        elif self._settings.gemini_api_key.strip():
+            notice = "✦ 已切换为官方 API Key 在线模式"
+        else:
+            notice = "请先在偏好设置中填写 Gemini API Key，当前继续使用离线陪伴"
+        self._show_chat_status_notice(notice, force=True)
+
+    def _open_chat_connection_menu(self) -> None:
+        menu = QMenu(self._speech_bubble)
+        menu.setStyleSheet(STARLIGHT_MENU_QSS)
+        hdr = menu.addAction("聊天模式")
+        hdr.setEnabled(False)
+        menu.addSeparator()
+        self._populate_connection_menu(menu)
+        self._chat_model_menu = menu
+        anchor = self._chat_channel_badge.mapToGlobal(QPoint(0, self._chat_channel_badge.height() + 4))
+        menu.popup(anchor)
+
     def _build_chat_model_menu(self) -> QMenu:
-        """构建级联式模型与思考强度菜单（参考现代桌面助手菜单风格，无新/旧标记）。"""
-        channel, _badge_text, models, current = self._resolve_active_chat_channel_and_models()
+        """构建级联式模型、思考强度与 API Key 设置菜单（不展示新/旧标签）。"""
+        channel, badge_text, models, current = self._resolve_active_chat_channel_and_models()
         current_thinking = normalize_thinking_level(self._settings.thinking_level)
 
         menu = QMenu(self._speech_bubble)
@@ -2650,7 +2649,7 @@ class PetWindow(QWidget):
             STARLIGHT_MENU_QSS
             + """
             QMenu {
-                min-width: 240px;
+                min-width: 245px;
                 padding: 6px 4px;
             }
             QMenu::item {
@@ -2658,6 +2657,14 @@ class PetWindow(QWidget):
             }
             """
         )
+
+        status = menu.addAction(badge_text)
+        status.setEnabled(False)
+        connection_menu = menu.addMenu("🌐 聊天模式")
+        connection_menu.setStyleSheet(STARLIGHT_MENU_QSS)
+        self._populate_connection_menu(connection_menu)
+
+        menu.addSeparator()
         hdr = menu.addAction("模型")
         hdr.setEnabled(False)
         menu.addSeparator()
@@ -2687,52 +2694,86 @@ class PetWindow(QWidget):
 
         menu.addSeparator()
         act_refresh = menu.addAction("🔄 获取 / 刷新官方模型")
-        act_refresh.triggered.connect(self._refresh_chat_models_async)
-        act_quota = menu.addAction("📊 查看用量 / 额度")
-        act_quota.triggered.connect(self.open_quota_requested)
-        act_settings = menu.addAction("⚙️ 模型与连接设置...")
+        act_refresh.setEnabled(not self._settings.chat_offline_mode)
+        act_refresh.triggered.connect(
+            lambda: self._refresh_chat_models_async(explicit=True)
+        )
+        act_settings = menu.addAction("⚙️ API Key 与模型设置...")
         act_settings.triggered.connect(self.open_settings_requested)
         self._chat_model_menu = menu
         return menu
 
     def _open_chat_model_menu(self) -> None:
-        channel, _badge_text, models, _current = self._resolve_active_chat_channel_and_models()
-        if (channel == "agy" and not GeminiChatService.get_cached_agy_models()) or (
-            channel == "api_key"
-            and not GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
-        ):
+        if self._chat.resolve_chat_provider(self._settings) and not GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key):
             self._refresh_chat_models_async()
         menu = self._build_chat_model_menu()
         anchor_pos = self._chat_model_btn.mapToGlobal(QPoint(0, self._chat_model_btn.height() + 4))
         menu.popup(anchor_pos)
 
-    def _refresh_chat_models_async(self) -> None:
-        provider = self._chat.resolve_chat_provider(self._settings)
-        if not provider:
+    def _show_chat_status_notice(
+        self, notice_text: str, *, is_error: bool = False, force: bool = False
+    ) -> None:
+        if not self._is_chat_open:
             return
-        if (
-            self._chat_models_discovery_worker is not None
-            and self._chat_models_discovery_worker.isRunning()
-        ):
+        if not force and is_error and notice_text == self._last_chat_api_notice:
             return
-        worker = _ChatModelsDiscoveryWorker(provider, self._chat, self._settings, parent=self)
+        if is_error:
+            self._last_chat_api_notice = notice_text
+        if self._chat_message_rows:
+            self._append_chat_turn(role="system", sender="", text=notice_text)
+        else:
+            self._chat_messages_panel.setVisible(False)
+            self._bubble_text_lbl.setVisible(True)
+            color = "#FCA5A5" if is_error else "#F6F3FF"
+            self._bubble_text_lbl.setStyleSheet(
+                f"color: {color}; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+            )
+            self._bubble_text_lbl.setText(notice_text)
+        self._bubble_timer.stop()
+        self._relayout_stage_top()
+
+    def _refresh_chat_models_async(self, *, explicit: bool = False) -> None:
+        if self._settings.chat_offline_mode:
+            return
+        if self._chat_models_discovery_worker is not None and self._chat_models_discovery_worker.isRunning():
+            return
+        if not self._settings.gemini_api_key.strip():
+            if explicit:
+                self._show_chat_status_notice("请先在偏好设置中填写 Gemini API Key", force=True)
+            return
+        worker = _ChatModelsDiscoveryWorker(self._chat, self._settings, explicit=explicit, parent=self)
         worker.completed.connect(self._on_chat_models_discovered)
         self._chat_models_discovery_worker = worker
         worker.start()
 
-    def _on_chat_models_discovered(self, channel: str, models: list[str], err_msg: str) -> None:
-        if self._chat_models_discovery_worker is not None:
-            self._chat_models_discovery_worker.deleteLater()
+    def _on_chat_models_discovered(self, models: list[str], err_msg: str, explicit: bool = False) -> None:
+        worker = self._chat_models_discovery_worker
+        if worker is not None:
+            worker.finished.connect(worker.deleteLater)
+            if worker.isFinished():
+                worker.deleteLater()
             self._chat_models_discovery_worker = None
-        if err_msg or not models:
-            return
+            if worker._settings.gemini_api_key != self._settings.gemini_api_key:
+                return
         self._sync_chat_controls()
-        if self._is_chat_open and self._chat_message_rows:
+        # 切换离线后忽略先前已发出的模型请求结果，避免出现联网成功提示。
+        if self._settings.chat_offline_mode:
+            return
+        if err_msg:
+            if explicit or self._chat.get_api_error(self._settings):
+                self._show_chat_status_notice(f"⚠️ 获取官方模型失败：{err_msg}", is_error=True, force=explicit)
+            return
+        if not models:
+            if explicit:
+                self._show_chat_status_notice("⚠️ 未返回可用模型，请检查 API Key 和模型权限", force=True)
+            return
+        self._last_chat_api_notice = ""
+        if self._is_chat_open and (explicit or self._chat_message_rows):
             self._append_chat_turn(
-                role="system",
-                sender="",
-                text=f"✦ 已同步 {len(models)} 个可用模型，点击上方模型按钮可切换",
+                role="system", sender="",
+                text=f"✦ 已同步 {len(models)} 个官方可用模型，点击上方模型按钮可切换",
             )
+            self._relayout_stage_top()
 
     def select_chat_model(
         self, model_id: str, thinking_level: Optional[str] = None
@@ -2742,18 +2783,9 @@ class PetWindow(QWidget):
         if not cleaned:
             return
 
-        channel, _badge_text, _models, _cur = self._resolve_active_chat_channel_and_models()
-        model_changed = False
-        if channel in ("oauth", "agy"):
-            normalized_model = normalize_oauth_model(cleaned)
-            if self._settings.oauth_model != normalized_model:
-                self._settings.oauth_model = normalized_model
-                model_changed = True
-        else:
-            normalized_model = normalize_gemini_model(cleaned)
-            if self._settings.gemini_model != normalized_model:
-                self._settings.gemini_model = normalized_model
-                model_changed = True
+        normalized_model = normalize_gemini_model(cleaned)
+        model_changed = self._settings.gemini_model != normalized_model
+        self._settings.gemini_model = normalized_model
 
         thinking_changed = False
         if thinking_level is not None:
@@ -2890,12 +2922,16 @@ class PetWindow(QWidget):
             oldest.deleteLater()
 
     def _clear_chat_history(self) -> None:
+        self._last_chat_api_notice = ""
         for row in self._chat_message_rows:
             self._chat_messages_layout.removeWidget(row)
             row.deleteLater()
         self._chat_message_rows.clear()
         self._chat.reset_conversation()
         self._chat_messages_panel.setVisible(False)
+        self._bubble_text_lbl.setStyleSheet(
+            "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+        )
         self._bubble_text_lbl.setText("已清空聊天记录，想聊什么呀喵✦")
         self._bubble_text_lbl.setVisible(True)
         self._relayout_stage_top()
@@ -2913,6 +2949,9 @@ class PetWindow(QWidget):
                 self._append_chat_turn(role="system", sender="", text=message)
             else:
                 self._chat_messages_panel.setVisible(False)
+                self._bubble_text_lbl.setStyleSheet(
+                    "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+                )
                 self._bubble_text_lbl.setVisible(True)
                 self._bubble_text_lbl.setText(message)
             self._sync_chat_controls()
@@ -2925,6 +2964,9 @@ class PetWindow(QWidget):
 
         self._is_forced_bubble_active = force
         self._chat_messages_panel.setVisible(False)
+        self._bubble_text_lbl.setStyleSheet(
+            "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+        )
         self._bubble_text_lbl.setVisible(True)
         self._bubble_text_lbl.setText(message)
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -2947,14 +2989,34 @@ class PetWindow(QWidget):
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
         self._sync_chat_controls()
+        invalid_reason = self._chat.get_api_error(self._settings)
         if self._chat_message_rows:
             self._bubble_text_lbl.setVisible(False)
             self._chat_messages_panel.setVisible(True)
+            if invalid_reason:
+                self._show_chat_status_notice(
+                    f"⚠️ API Key 不可用（{invalid_reason}），请检查 API Key 后重新获取模型",
+                    is_error=True,
+                    force=False,
+                )
             QTimer.singleShot(0, self._scroll_chat_to_bottom)
         else:
             self._chat_messages_panel.setVisible(False)
             self._bubble_text_lbl.setVisible(True)
-            if not self._speech_bubble.isVisible():
+            if invalid_reason:
+                notice = (
+                    f"⚠️ API Key 不可用（{invalid_reason}）\n"
+                    "请在偏好设置中检查 Gemini API Key，再点击顶部状态重新获取模型。"
+                )
+                self._last_chat_api_notice = notice
+                self._bubble_text_lbl.setStyleSheet(
+                    "color: #FCA5A5; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+                )
+                self._bubble_text_lbl.setText(notice)
+            elif not self._speech_bubble.isVisible() or self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用"):
+                self._bubble_text_lbl.setStyleSheet(
+                    "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+                )
                 self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         self._speech_bubble.setVisible(True)
@@ -3012,10 +3074,6 @@ class PetWindow(QWidget):
         thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
         if provider:
             shown_model = active_model
-            if provider == "agy":
-                shown_model, _ = GeminiChatService.resolve_agy_model_and_effort(
-                    active_model, thinking_lvl, GeminiChatService.get_cached_agy_models()
-                )
             disp_model = format_model_display_name(shown_model)
             model_tag = (
                 f"{disp_model} · {format_thinking_level_label(thinking_lvl)}"
@@ -3110,10 +3168,6 @@ class PetWindow(QWidget):
             thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
             if provider:
                 shown_model = active_model
-                if provider == "agy":
-                    shown_model, _ = GeminiChatService.resolve_agy_model_and_effort(
-                        active_model, thinking_lvl, GeminiChatService.get_cached_agy_models()
-                    )
                 disp_model = format_model_display_name(shown_model)
                 model_tag = (
                     f"{disp_model} · {format_thinking_level_label(thinking_lvl)}"

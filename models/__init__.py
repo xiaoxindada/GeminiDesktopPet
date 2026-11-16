@@ -21,11 +21,9 @@ from .character_lore import (
 from .character_profile import CharacterProfile, CharacterTrait
 from .pet_settings import (
     DEFAULT_GEMINI_MODEL,
-    DEFAULT_OAUTH_MODEL,
     DEFAULT_THINKING_LEVEL,
     THINKING_LEVEL_LABELS,
     THINKING_LEVEL_OPTIONS,
-    ChatAuthMode,
     DockSide,
     PetSettings,
     PetStyleMode,
@@ -33,7 +31,6 @@ from .pet_settings import (
     format_thinking_level_label,
     get_supported_thinking_levels,
     normalize_gemini_model,
-    normalize_oauth_model,
     normalize_thinking_level,
 )
 from .pet_state import PetState
@@ -49,11 +46,9 @@ __all__ = [
     "CharacterPreset",
     "CharacterProfile",
     "CharacterTrait",
-    "ChatAuthMode",
     "CostumeOption",
     "DEFAULT_GEMINI_MODEL",
     "DEFAULT_LINES",
-    "DEFAULT_OAUTH_MODEL",
     "DEFAULT_THINKING_LEVEL",
     "DockSide",
     "PetSettings",
@@ -69,6 +64,5 @@ __all__ = [
     "get_supported_thinking_levels",
     "get_user_config_dir",
     "normalize_gemini_model",
-    "normalize_oauth_model",
     "normalize_thinking_level",
 ]

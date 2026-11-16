@@ -16,14 +16,11 @@ from models.app_version import (
 )
 from models.pet_settings import (
     DEFAULT_GEMINI_MODEL,
-    DEFAULT_OAUTH_MODEL,
     DEFAULT_THINKING_LEVEL,
-    ChatAuthMode,
     DockSide,
     PetSettings,
     PetStyleMode,
     normalize_gemini_model,
-    normalize_oauth_model,
     normalize_thinking_level,
 )
 from services.win32_ipc import (
@@ -202,13 +199,7 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     ),
     _SettingFieldSpec("total_pats", "stats", "total_pats", _parse_nonneg_int, int),
     _SettingFieldSpec("favorability", "stats", "favorability", _parse_nonneg_int, int),
-    _SettingFieldSpec(
-        "chat_auth_mode",
-        "gemini",
-        "auth_mode",
-        lambda raw, _cur: ChatAuthMode.parse(str(raw)) if raw is not None else _cur,
-        lambda v: v.value,
-    ),
+    _SettingFieldSpec("chat_offline_mode", "gemini", "offline_mode", _parse_bool, bool),
     _SettingFieldSpec(
         "gemini_api_key",
         "gemini",
@@ -223,13 +214,6 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
         "model",
         lambda raw, _cur: normalize_gemini_model(str(raw)) if raw is not None else _cur,
         lambda v: v or DEFAULT_GEMINI_MODEL,
-    ),
-    _SettingFieldSpec(
-        "oauth_model",
-        "gemini",
-        "oauth_model",
-        lambda raw, _cur: normalize_oauth_model(str(raw)) if raw is not None else _cur,
-        lambda v: v or DEFAULT_OAUTH_MODEL,
     ),
     _SettingFieldSpec(
         "thinking_level",
@@ -276,14 +260,12 @@ class SettingsService:
             except Exception:
                 pass
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
-        settings.oauth_model = normalize_oauth_model(settings.oauth_model)
         settings.thinking_level = normalize_thinking_level(settings.thinking_level)
         return settings
 
     def save(self, settings: PetSettings) -> None:
         self.settings_folder.mkdir(parents=True, exist_ok=True)
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
-        settings.oauth_model = normalize_oauth_model(settings.oauth_model)
         settings.thinking_level = normalize_thinking_level(settings.thinking_level)
         settings.gemini_api_key = (settings.gemini_api_key or "").strip()
         self.settings_path.write_text(self._serialize_json(settings), encoding="utf-8")

@@ -9,15 +9,6 @@ from services.followed_app_probe import (
     ProcessProbeInfo,
 )
 from services.gemini_chat_service import ChatReply, GeminiChatService
-from services.oauth_auth_service import (
-    OAuthAuthService,
-    OAuthClientConfig,
-    OAuthError,
-    OAuthLoopbackFlow,
-    OAuthSession,
-    mask_email,
-    parse_oauth_client_json,
-)
 from services.settings_service import SettingsService
 from services.config_cleanup_service import CleanupReport, CleanupTargets, ConfigCleanupService
 from services.sound_service import PetSoundEffect, SoundService
@@ -42,12 +33,6 @@ __all__ = [
     "FollowWatcherOptions",
     "FollowedAppProbe",
     "GeminiChatService",
-    "OAuthAuthService",
-    "OAuthClientConfig",
-    "OAuthError",
-    "OAuthLoopbackFlow",
-    "OAuthSession",
-    "parse_oauth_client_json",
     "PetSoundEffect",
     "ProcessProbeInfo",
     "ReleaseAssetInfo",
@@ -57,5 +42,4 @@ __all__ = [
     "SystemMonitorService",
     "UpdateCheckResult",
     "UpdateService",
-    "mask_email",
 ]

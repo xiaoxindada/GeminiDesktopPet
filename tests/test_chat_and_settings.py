@@ -1,0 +1,258 @@
+"""官方 API Key 模型获取与偏好设置测试。"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+
+if os.name != "nt" and not os.environ.get("DISPLAY"):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication, QMenu
+
+from models.pet_settings import DEFAULT_GEMINI_MODEL, PetSettings, format_model_display_name
+from services.app_follow_service import AppFollowService
+from services.gemini_chat_service import GeminiChatService
+from services.settings_service import SettingsService
+from views.settings_window import SettingsWindow
+
+
+def _isolated_env(home_dir: str, appdata_dir: str) -> dict[str, str]:
+    clean_path = os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if "agy" not in p.lower()
+    )
+    return {
+        "USERPROFILE": home_dir,
+        "HOME": home_dir,
+        "APPDATA": appdata_dir,
+        "LOCALAPPDATA": appdata_dir,
+        "PATH": clean_path,
+    }
+
+
+class TestChatAndSettings(unittest.TestCase):
+    @staticmethod
+    def _ensure_app() -> QApplication:
+        app = QApplication.instance() or QApplication([])
+        app.setQuitOnLastWindowClosed(False)
+        return app
+
+    def test_api_key_chat_uses_official_client_and_keeps_context(self) -> None:
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.interactions.create.side_effect = [
+            SimpleNamespace(id="demo-turn-1", output_text="第一轮回复"),
+            SimpleNamespace(id="demo-turn-2", output_text="第二轮回复"),
+        ]
+        settings = PetSettings(gemini_api_key="demo-api-key", gemini_model="gemini-3.1-flash-lite")
+        chat = GeminiChatService()
+        with patch("google.genai.Client", return_value=client) as factory:
+            self.assertEqual(chat.ask("分析一下这段算法", settings).text, "第一轮回复")
+            self.assertEqual(chat.ask("继续解释", settings).text, "第二轮回复")
+        self.assertEqual(factory.call_count, 2)
+        for call in factory.call_args_list:
+            self.assertFalse(call.kwargs["vertexai"])
+            self.assertEqual(call.kwargs["api_key"], "demo-api-key")
+            self.assertEqual(call.kwargs["http_options"]["base_url"], "https://generativelanguage.googleapis.com")
+        first, second = client.interactions.create.call_args_list
+        self.assertNotIn("previous_interaction_id", first.kwargs)
+        self.assertEqual(second.kwargs["previous_interaction_id"], "demo-turn-1")
+
+    def test_missing_key_stays_offline_without_creating_client(self) -> None:
+        chat = GeminiChatService()
+        settings = PetSettings()
+        with patch("google.genai.Client") as factory:
+            self.assertIsNone(chat.resolve_chat_provider(settings))
+            self.assertTrue(chat.ask("你好呀", settings).text)
+            with self.assertRaisesRegex(ValueError, "API Key"):
+                chat.fetch_models_for_chat(settings)
+            factory.assert_not_called()
+
+    def test_chat_menu_offline_mode_preserves_key_and_persists(self) -> None:
+        from services.sound_service import SoundService
+        from services.sprite_manager import SpriteManager
+        from services.system_monitor_service import SystemMonitorService
+        from views.pet_window import PetWindow
+
+        app = self._ensure_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = PetSettings(gemini_api_key="demo-api-key", auto_walk=False)
+            service = SettingsService(tmp)
+            service.save(settings)
+            chat = GeminiChatService()
+            pet = PetWindow(settings, service, SpriteManager(), SoundService(), SystemMonitorService(), chat)
+            try:
+                pet.open_chat_dialog()
+                menu = QMenu(pet)
+                pet._populate_connection_menu(menu)
+                offline = next(a for a in menu.actions() if a.data() == ("chat_mode", "offline"))
+                online = next(a for a in menu.actions() if a.data() == ("chat_mode", "api_key"))
+                self.assertTrue(online.isChecked())
+                with (
+                    patch.object(chat, "_call_gemini_api", return_value="在线回复") as request,
+                    patch.object(chat, "fetch_api_key_models") as fetch,
+                ):
+                    offline.trigger()
+                    self.assertTrue(service.load().chat_offline_mode)
+                    self.assertEqual(settings.gemini_api_key, "demo-api-key")
+                    self.assertEqual(pet._chat_channel_badge.text(), "离线模式")
+                    self.assertTrue(chat.ask("陪我聊聊吧", settings).text)
+                    self.assertEqual(chat.fetch_models_for_chat(settings), [])
+                    pet._refresh_chat_models_async(explicit=True)
+                    self.assertIsNone(pet._chat_models_discovery_worker)
+                    request.assert_not_called()
+                    fetch.assert_not_called()
+
+                    rebuilt = pet._build_chat_model_menu()
+                    refresh = next(a for a in rebuilt.actions() if "获取 / 刷新官方模型" in a.text())
+                    self.assertFalse(refresh.isEnabled())
+                    online.trigger()
+                    self.assertFalse(service.load().chat_offline_mode)
+                    self.assertEqual(pet._chat_channel_badge.text(), "在线 · API Key")
+                    self.assertEqual(chat.ask("继续解释算法", settings).text, "在线回复")
+                    request.assert_called_once()
+                    self.assertEqual(request.call_args.args[2], "gemini-3.1-flash-lite")
+            finally:
+                pet.close()
+                pet.deleteLater()
+                app.processEvents()
+
+    def test_default_model_and_explicit_choice_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = SettingsService(tmp)
+            settings = service.load()
+            self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.1-flash-lite")
+            self.assertEqual(settings.gemini_model, DEFAULT_GEMINI_MODEL)
+            self.assertEqual(format_model_display_name(None), "Gemini 3.1 Flash-Lite")
+            settings.gemini_model = "gemini-2.5-flash"
+            service.save(settings)
+            self.assertEqual(service.load().gemini_model, "gemini-2.5-flash")
+            settings.gemini_model = ""
+            service.save(settings)
+            self.assertEqual(service.load().gemini_model, DEFAULT_GEMINI_MODEL)
+
+    def test_api_key_error_does_not_follow_a_changed_key(self) -> None:
+        from google.genai.errors import ClientError
+
+        settings = PetSettings(gemini_api_key="demo-invalid-key")
+        chat = GeminiChatService()
+        with patch.object(chat, "_call_gemini_api", side_effect=ClientError(403, {"error": {"message": "Permission denied"}})):
+            self.assertIn("API Key", chat.ask("解释这个算法", settings).text)
+        self.assertIn("API Key", chat.get_api_error(settings))
+        settings.gemini_api_key = "demo-replacement-key"
+        self.assertEqual(chat.get_api_error(settings), "")
+
+    def test_api_key_fetch_models_settings_manual_confirm_and_save_feedback(self) -> None:
+        app = self._ensure_app()
+        fake_models = [
+            MagicMock(name="models/gemini-2.5-pro", supported_actions=["generateContent"]),
+            MagicMock(name="models/gemini-embedding-001", supported_actions=["embedContent"]),
+            MagicMock(name="models/gemini-3.1-flash-lite", supported_actions=["generateContent", "countTokens"]),
+            MagicMock(name="models/imagen-3.0-generate-002", supported_actions=["predict"]),
+            MagicMock(name="models/gemini-3-flash-preview", supported_actions=["createInteraction"]),
+        ]
+        # MagicMock(name=...) sets the mock repr name, so assign `.name` explicitly as model field
+        for obj, model_name in zip(
+            fake_models,
+            [
+                "models/gemini-2.5-pro",
+                "models/gemini-embedding-001",
+                "models/gemini-3.1-flash-lite",
+                "models/imagen-3.0-generate-002",
+                "models/gemini-3-flash-preview",
+            ],
+        ):
+            obj.name = model_name
+
+        fake_client = MagicMock()
+        fake_client.__enter__.return_value = fake_client
+        fake_client.__exit__.return_value = False
+        fake_client.models.list.return_value = fake_models
+
+        GeminiChatService._api_models_cache.clear()
+        with patch("google.genai.Client", return_value=fake_client):
+            fetched = GeminiChatService.fetch_api_key_models("AIza-test-models")
+        self.assertEqual(fetched, ["gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-3-flash-preview"])
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as tmp_home,
+            tempfile.TemporaryDirectory() as tmp_appdata,
+        ):
+            with patch.dict(os.environ, _isolated_env(tmp_home, tmp_appdata)):
+                svc = SettingsService(tmp)
+                settings = PetSettings(gemini_api_key="AIza-test-models")
+                svc.save(settings)
+                follow_svc = AppFollowService(svc)
+                applied_calls = 0
+
+                def on_applied() -> None:
+                    nonlocal applied_calls
+                    applied_calls += 1
+
+                with patch("views.settings_window.FollowedAppProbe.sample_antigravity_activity") as mock_ag, patch(
+                    "views.settings_window.FollowedAppProbe.sample_gemini_activity"
+                ) as mock_gem:
+                    mock_ag.return_value = MagicMock(is_running=False)
+                    mock_gem.return_value = MagicMock(is_running=False)
+                    GeminiChatService._api_models_cache.clear()
+                    win = SettingsWindow(
+                        settings=settings,
+                        settings_service=svc,
+                        app_follow_service=follow_svc,
+                        on_settings_applied=on_applied,
+                    )
+                    try:
+                        # 获取前不写死大模型清单，仅显示当前配置的默认模型
+                        self.assertEqual(win._model_combo.currentText(), "gemini-3.1-flash-lite")
+                        self.assertEqual(
+                            [win._model_combo.itemText(i) for i in range(win._model_combo.count())],
+                            ["gemini-3.1-flash-lite"],
+                        )
+                        # 验证 对话模型 / Gemini API Key / 思考强度 三行均采用统一水平标签布局
+                        self.assertIsNotNone(win._model_combo.parentWidget())
+                        # 模拟获取官方 API Key 模型结果并填充下拉列表
+                        with patch("google.genai.Client", return_value=fake_client):
+                            fetched = GeminiChatService.fetch_api_key_models(settings.gemini_api_key)
+                        win._on_models_refreshed(fetched, "")
+                        combo_items = [win._model_combo.itemText(i) for i in range(win._model_combo.count())]
+                        self.assertIn("gemini-2.5-pro", combo_items)
+                        self.assertIn("gemini-3-flash-preview", combo_items)
+                        self.assertIn("已获取 3 个官方可用模型", win._api_models_hint_lbl.text())
+
+                        # 修改草稿后、未点确认前：既不触发 on_applied 也不写盘，可点击还原修改恢复
+                        win._model_combo.setEditText("gemini-2.5-pro")
+                        app.processEvents()
+                        self.assertEqual(settings.gemini_model, "gemini-3.1-flash-lite")
+                        self.assertEqual(applied_calls, 0)
+                        self.assertTrue(win.has_unsaved_changes())
+                        win._discard_btn.click()
+                        app.processEvents()
+                        self.assertFalse(win.has_unsaved_changes())
+                        self.assertEqual(win._model_combo.currentText(), "gemini-3.1-flash-lite")
+
+                        # 再次修改并点击确认修改 -> 写盘并显示保存成功
+                        win._model_combo.setEditText("gemini-2.5-pro")
+                        win._confirm_btn.click()
+                        app.processEvents()
+                        self.assertEqual(settings.gemini_model, "gemini-2.5-pro")
+                        self.assertEqual(svc.load().gemini_model, "gemini-2.5-pro")
+                        self.assertEqual(applied_calls, 1)
+                        self.assertIn("保存成功", win._save_feedback_lbl.text())
+
+                        # 当磁盘保存失败时，应回滚运行态改动并明确提示保存失败
+                        win._model_combo.setEditText("gemini-3-flash-preview")
+                        with patch.object(svc, "save", side_effect=PermissionError("只读目录")):
+                            win._confirm_btn.click()
+                            app.processEvents()
+                        self.assertEqual(settings.gemini_model, "gemini-2.5-pro")
+                        self.assertTrue(win.has_unsaved_changes())
+                        self.assertIn("保存失败", win._save_feedback_lbl.text())
+                        self.assertIn("只读目录", win._save_feedback_lbl.text())
+                    finally:
+                        win.close()
+                        win.deleteLater()
+                        app.processEvents()

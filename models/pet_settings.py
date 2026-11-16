@@ -35,25 +35,7 @@ class PetStyleMode(str, Enum):
         return cls.CHIBI
 
 
-class ChatAuthMode(str, Enum):
-    """联网对话认证模式：自动优先 OAuth、强制 OAuth 个人账号或 Gemini API Key。"""
-
-    AUTO = "auto"
-    OAUTH = "oauth"
-    API_KEY = "api_key"
-
-    @classmethod
-    def parse(cls, raw: str | None) -> ChatAuthMode:
-        if raw:
-            low = raw.strip().lower()
-            for item in cls:
-                if item.value.lower() == low:
-                    return item
-        return cls.AUTO
-
-
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-DEFAULT_OAUTH_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_THINKING_LEVEL = "auto"
 
 DEPRECATED_MODEL_PREFIXES = ("gemini-2.0-", "gemini-1.5-", "gemini-1.0-")
@@ -73,9 +55,7 @@ THINKING_LEVEL_LABELS: dict[str, str] = dict(THINKING_LEVEL_OPTIONS)
 
 def format_model_display_name(model_id: str | None) -> str:
     """将动态获取的模型 ID 格式化为简洁可读名称（不写死静态清单，也不显示新/旧标签）。"""
-    cleaned = (model_id or "").strip()
-    if not cleaned:
-        return "Gemini 2.5 Flash"
+    cleaned = (model_id or "").strip() or DEFAULT_GEMINI_MODEL
     if cleaned.startswith("models/"):
         cleaned = cleaned[len("models/") :]
     low = cleaned.lower()
@@ -188,14 +168,6 @@ def normalize_gemini_model(model: str | None) -> str:
     return cleaned
 
 
-def normalize_oauth_model(model: str | None) -> str:
-    """规范化 OAuth 对话模型名，留空或已废弃旧版本时回退到官方默认模型。"""
-    cleaned = (model or "").strip()
-    if not cleaned or cleaned.lower().startswith(DEPRECATED_MODEL_PREFIXES):
-        return DEFAULT_OAUTH_MODEL
-    return cleaned
-
-
 @dataclass
 class PetSettings:
     """Persists user configuration and bond progression for Gemini-chan."""
@@ -231,10 +203,9 @@ class PetSettings:
     total_pats: int = 0
     favorability: int = 20
 
-    chat_auth_mode: ChatAuthMode = ChatAuthMode.AUTO
+    chat_offline_mode: bool = False
     gemini_api_key: str = ""
     gemini_model: str = DEFAULT_GEMINI_MODEL
-    oauth_model: str = DEFAULT_OAUTH_MODEL
     thinking_level: str = DEFAULT_THINKING_LEVEL
 
     update_releases_url: str = "https://github.com/xiaoxindada/GeminiDesktopPet/releases"

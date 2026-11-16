@@ -21,7 +21,6 @@ from services import (
     AppLogger,
     CharacterProfileService,
     GeminiChatService,
-    OAuthAuthService,
     SettingsService,
     SoundService,
     SystemMonitorService,
@@ -140,8 +139,7 @@ class PetApplicationCoordinator(QObject):
         self._sound = SoundService()
         self._sound.enabled = self._settings.sound_enabled
         self._sys_monitor = SystemMonitorService()
-        self._oauth_service = OAuthAuthService(self._settings_service.settings_folder)
-        self._chat = GeminiChatService(oauth_service=self._oauth_service)
+        self._chat = GeminiChatService()
         self._quota_service = AntigravityQuotaService()
         self._update_service = UpdateService()
         self._watcher = AntigravityWatcherService()
@@ -464,23 +462,11 @@ class PetApplicationCoordinator(QObject):
                     on_settings_applied=self._sync_all_views_from_settings,
                     on_open_profile_editor=self.open_character_editor_window,
                     on_open_update_center=self.open_update_window,
-                    oauth_service=self._oauth_service,
-                    on_oauth_changed=self._on_oauth_session_changed,
                 )
             self._settings_win.sync_from_settings()
             self._show_and_focus(self._settings_win)
         except Exception as exc:
             AppLogger.error(f"[App] open settings window failed: {exc}")
-
-    def _on_oauth_session_changed(self) -> None:
-        self._chat.reset_conversation()
-        self._pet.apply_settings_to_window()
-        if not self._pet.isVisible():
-            return
-        if self._oauth_service.is_logged_in():
-            self._pet.show_bubble("Google 个人账号登录成功，现在可以直接和我聊天啦喵✦", 4.0, force=True)
-        else:
-            self._pet.show_bubble("已退出 Google 个人账号登录喵～", 3.5, force=True)
 
     def open_update_window(self) -> None:
         if self._update_win is None:

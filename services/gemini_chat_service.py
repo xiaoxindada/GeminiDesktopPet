@@ -1,48 +1,26 @@
-"""本地快捷意图对话、离线台词陪伴，以及支持 OAuth 个人账号 / Gemini API Key 的实时对话服务。"""
+"""本地快捷互动、离线陪伴与 Gemini 官方 API Key 对话服务。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
-import json
-import os
-from pathlib import Path
 import random
-import subprocess
-import tempfile
-import time
 from typing import Any, Optional
-import uuid
 
-import requests
-
-from models.app_version import get_user_config_dir
 from models.character_lore import CharacterLore
 from models.pet_settings import (
     DEFAULT_GEMINI_MODEL,
-    DEFAULT_OAUTH_MODEL,
-    DEFAULT_THINKING_LEVEL,
-    ChatAuthMode,
     PetSettings,
     normalize_gemini_model,
-    normalize_oauth_model,
     normalize_thinking_level,
 )
 from models.pet_state import PetState
-from services.antigravity_quota_service import AntigravityQuotaService
 from services.app_logger import AppLogger
-from services.oauth_auth_service import (
-    GEMINI_API_BASE_URL,
-    HUB_USER_AGENT,
-    V1_INTERNAL_CHAT_BASE_URLS,
-    OAuthAuthService,
-    OAuthError,
-    OAuthSession,
-)
 from services.system_monitor_service import SystemMetrics
 
-_MAX_OAUTH_HISTORY_MESSAGES = 20
+_MAX_HISTORY_MESSAGES = 20
+_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com"
 
 
 @dataclass(frozen=True)
@@ -52,129 +30,79 @@ class ChatReply:
 
 
 class GeminiChatService:
-    """结合本地快捷动作、OAuth / Antigravity / Gemini API Key 多端实时模型的对话服务。"""
+    """通过官方 Gemini SDK 和用户填写的 API Key 提供实时对话。"""
 
     _api_models_cache: dict[str, list[str]] = {}
-    _agy_models_cache: Optional[list[str]] = None
 
-    def __init__(self, oauth_service: Optional[OAuthAuthService] = None) -> None:
-        self._oauth_service = oauth_service
+    def __init__(self) -> None:
         self._last_interaction_id: Optional[str] = None
         self._last_session_sig: Optional[tuple[str, str, str]] = None
         self._api_fallback_history: list[dict[str, Any]] = []
-        self._oauth_history: list[dict[str, Any]] = []
-        self._oauth_session_sig: Optional[tuple[str, str, str]] = None
-        self._oauth_session_id: str = str(uuid.uuid4())
-        self._agy_conversation_id: Optional[str] = None
-        self._agy_session_sig: Optional[tuple[str, str]] = None
+        self._last_api_error = ""
+        self._failed_key_hash = ""
 
-    @property
-    def oauth_service(self) -> Optional[OAuthAuthService]:
-        return self._oauth_service
+    @staticmethod
+    def is_api_key_error(exc_or_msg: Exception | str) -> bool:
+        code = getattr(exc_or_msg, "status_code", getattr(exc_or_msg, "code", None))
+        low = str(exc_or_msg).lower()
+        return code in (401, 403) or any(term in low for term in (
+            "api key not valid", "api_key_invalid", "api key 无效", "permission_denied",
+            "unauthenticated", "http 401", "http 403",
+        ))
+
+    @staticmethod
+    def _key_hash(api_key: str) -> str:
+        return hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()[:16]
+
+    def clear_api_error(self) -> None:
+        self._last_api_error = ""
+        self._failed_key_hash = ""
+
+    def get_api_error(self, settings: PetSettings) -> str:
+        if settings.chat_offline_mode:
+            return ""
+        if settings.gemini_api_key.strip() and self._failed_key_hash == self._key_hash(settings.gemini_api_key):
+            return self._last_api_error
+        return ""
+
+    def _record_api_error(self, exc: Exception, api_key: str) -> None:
+        if self.is_api_key_error(exc):
+            self._last_api_error = self._format_api_error(exc)
+            self._failed_key_hash = self._key_hash(api_key)
 
     def reset_conversation(self) -> None:
         self._last_interaction_id = None
         self._last_session_sig = None
         self._api_fallback_history = []
-        self._oauth_history = []
-        self._oauth_session_sig = None
-        self._oauth_session_id = str(uuid.uuid4())
-        self._agy_conversation_id = None
-        self._agy_session_sig = None
+        self.clear_api_error()
 
     @staticmethod
-    def has_agy_cli() -> bool:
-        return bool(AntigravityQuotaService.resolve_agy_executable())
+    def resolve_chat_provider(settings: PetSettings) -> Optional[str]:
+        if settings.chat_offline_mode:
+            return None
+        return "api_key" if (settings.gemini_api_key or "").strip() else None
 
-    @classmethod
-    def get_cached_agy_models(cls) -> list[str]:
-        return list(cls._agy_models_cache) if cls._agy_models_cache else []
-
-    @classmethod
-    def clear_agy_models_cache(cls) -> None:
-        cls._agy_models_cache = None
-
-    @staticmethod
-    def _normalize_agy_model_entry(raw_id: str) -> str:
-        cleaned = (raw_id or "").strip()
-        if not cleaned:
-            return ""
-        low = cleaned.lower()
-        for prefix in ("gemini-4-argon-", "gemini-4-hydrogen-", "gemini-4-carbon-", "gemini-3.8-flash-", "claude-opus-5-5-", "claude-sonnet-5-5-"):
-            if low.startswith(prefix):
-                suffix = low[len(prefix) :]
-                if suffix in ("low", "medium", "high", "xhigh"):
-                    return cleaned[: len(prefix) - 1]
-        return cleaned
-
-    @classmethod
-    def discover_agy_models(cls, force_refresh: bool = False) -> list[str]:
-        if cls._agy_models_cache is not None and not force_refresh:
-            return list(cls._agy_models_cache)
-        agy_path = AntigravityQuotaService.resolve_agy_executable()
-        if not agy_path:
+    def fetch_models_for_chat(self, settings: PetSettings) -> list[str]:
+        if settings.chat_offline_mode:
             return []
-
-        cmd = [agy_path, "models"]
-        if agy_path.lower().endswith((".cmd", ".bat")):
-            cmd = [os.environ.get("ComSpec", "cmd.exe"), "/d", "/c", *cmd]
-        creationflags = 0x08000000 if os.name == "nt" else 0
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=tempfile.gettempdir(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=creationflags,
-            )
-            out, _ = proc.communicate(timeout=15.0)
-        except Exception:
-            return []
+            models = self.fetch_api_key_models(settings.gemini_api_key)
+        except Exception as exc:
+            self._record_api_error(exc, settings.gemini_api_key)
+            raise
+        self.clear_api_error()
+        return models
 
-        if proc.returncode != 0 or not out:
-            return []
+    @staticmethod
+    def _create_api_client(api_key: str, timeout_ms: int):
+        from google import genai
 
-        discovered: list[str] = []
-        for line in out.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            model_id = stripped.split("\t", 1)[0].split(None, 1)[0].strip()
-            normalized = cls._normalize_agy_model_entry(model_id)
-            if normalized and normalized not in discovered:
-                discovered.append(normalized)
-        if discovered:
-            cls._agy_models_cache = list(discovered)
-        return discovered
-
-    def resolve_chat_provider(self, settings: PetSettings) -> Optional[str]:
-        has_oauth = self._oauth_service is not None and self._oauth_service.is_logged_in()
-        oauth_opted_out = self._oauth_service is not None and self._oauth_service.is_local_opted_out()
-        has_api_key = bool((settings.gemini_api_key or "").strip())
-        has_agy = (not oauth_opted_out) and self.has_agy_cli()
-        mode = settings.chat_auth_mode
-
-        if mode == ChatAuthMode.OAUTH:
-            if has_oauth:
-                return "oauth"
-            return "agy" if has_agy else None
-        if mode == ChatAuthMode.API_KEY:
-            return "api_key" if has_api_key else None
-        # 自动模式下优先直连 OAuth -> 已填 API Key -> 本机已登录的 Antigravity CLI
-        if has_oauth:
-            return "oauth"
-        if has_api_key:
-            return "api_key"
-        if has_agy:
-            return "agy"
-        return None
-
-    def _resolve_chat_provider(self, settings: PetSettings) -> Optional[str]:
-        return self.resolve_chat_provider(settings)
+        # 显式指定官方 API Key 渠道和地址，避免环境配置切换后端或中转地址。
+        return genai.Client(
+            vertexai=False,
+            api_key=api_key,
+            http_options={"base_url": _GEMINI_API_BASE_URL, "timeout": timeout_ms},
+        )
 
     def _try_handle_strict_pet_command(self, text: str) -> Optional[ChatReply]:
         """当真实模型已接入时，仅响应明确的短宠物动作口令，避免截胡用户的正常提问。"""
@@ -196,252 +124,28 @@ class GeminiChatService:
         text = (user_input or "").strip()
         if not text:
             return ChatReply("喵？想和我聊什么呀～✦", PetState.LISTENING)
-
-        provider = self._resolve_chat_provider(settings)
-        if provider is None:
+        api_key = (settings.gemini_api_key or "").strip()
+        # 手动离线优先于已保存的 Key，确保聊天不会隐式恢复联网。
+        if self.resolve_chat_provider(settings) is None:
             local_reply = self._try_handle_local_intent(text, settings, metrics)
-            if local_reply is not None:
-                return local_reply
-            return ChatReply(self._generate_offline_chatter(text), PetState.THINKING)
+            return local_reply or ChatReply(self._generate_offline_chatter(text), PetState.THINKING)
 
         strict_cmd = self._try_handle_strict_pet_command(text)
         if strict_cmd is not None:
             return strict_cmd
-
-        thinking_level = normalize_thinking_level(getattr(settings, "thinking_level", DEFAULT_THINKING_LEVEL))
-        if provider == "oauth":
-            model = normalize_oauth_model(settings.oauth_model) or DEFAULT_OAUTH_MODEL
-            try:
-                ai_text = self._call_oauth_chat(text, model, thinking_level=thinking_level)
-                return ChatReply(ai_text, PetState.HAPPY)
-            except Exception as exc:
-                AppLogger.error("Chat", f"OAuth 对话调用失败 (Model={model}, Thinking={thinking_level})", exc)
-                return ChatReply(
-                    f"喵呜…连线失败了（{self._format_api_error(exc)}），先用本地模式陪你喵！",
-                    PetState.OOPS,
-                )
-
-        if provider == "agy":
-            model = normalize_oauth_model(settings.oauth_model) or DEFAULT_OAUTH_MODEL
-            try:
-                ai_text = self._call_agy_chat(text, model, thinking_level=thinking_level)
-                return ChatReply(ai_text, PetState.HAPPY)
-            except Exception as exc:
-                AppLogger.error("Chat", f"Antigravity CLI 对话调用失败 (Model={model}, Thinking={thinking_level})", exc)
-                return ChatReply(
-                    f"喵呜…请求模型失败了（{self._format_api_error(exc)}），请检查模型选择或网络连线～",
-                    PetState.OOPS,
-                )
-
-        if provider == "api_key":
-            api_key = (settings.gemini_api_key or "").strip()
-            model = normalize_gemini_model(settings.gemini_model) or DEFAULT_GEMINI_MODEL
-            try:
-                ai_text = self._call_gemini_api(text, api_key, model, thinking_level=thinking_level)
-                return ChatReply(ai_text, PetState.HAPPY)
-            except Exception as exc:
-                AppLogger.error("Chat", f"Gemini API 调用失败 (Model={model}, Thinking={thinking_level})", exc)
-                return ChatReply(
-                    f"喵呜…连线失败了（{self._format_api_error(exc)}），先用本地模式陪你喵！",
-                    PetState.OOPS,
-                )
-
-        return ChatReply(self._generate_offline_chatter(text), PetState.THINKING)
-
-    @staticmethod
-    def resolve_agy_model_and_effort(
-        model: str,
-        thinking_level: str = "auto",
-        available_models: Optional[list[str]] = None,
-    ) -> tuple[str, Optional[str]]:
-        """将当前所选模型和思考强度映射为 agy CLI 可执行的参数组合。"""
-        cleaned = (model or "").strip()
-        if cleaned.startswith("models/"):
-            cleaned = cleaned[len("models/") :]
-        low = cleaned.lower()
-
-        known_agy = {m.lower(): m for m in (available_models or []) if m}
-        direct_agy_prefixes = (
-            "gemini-4-argon",
-            "gemini-4-hydrogen",
-            "gemini-4-carbon",
-            "gemini-3.8-flash",
-            "gemini-pro-orchestrator",
-            "claude-",
-            "gpt-oss-",
-        )
-
-        if low in known_agy:
-            resolved_model = known_agy[low]
-        elif low.startswith(direct_agy_prefixes):
-            resolved_model = cleaned
-        elif "pro" in low:
-            resolved_model = known_agy.get("gemini-4-argon", "gemini-4-argon")
-        else:
-            resolved_model = known_agy.get("gemini-3.8-flash", "gemini-3.8-flash")
-
-        lvl = normalize_thinking_level(thinking_level)
-        rlow = resolved_model.lower()
-        if lvl == "auto" or rlow.startswith(("gemini-pro-orchestrator", "gpt-oss-")):
-            effort: Optional[str] = None
-        elif lvl in ("off", "minimal", "low"):
-            effort = "low"
-        elif lvl == "medium":
-            effort = "medium"
-        elif lvl == "high":
-            effort = "high"
-        elif lvl == "xhigh":
-            effort = "xhigh" if rlow.startswith(("gemini-4-hydrogen", "gemini-4-carbon")) else "high"
-        else:
-            effort = None
-        return resolved_model, effort
-
-    @staticmethod
-    def _get_agy_chat_sandbox_dir() -> str:
+        thinking_level = normalize_thinking_level(settings.thinking_level)
+        model = normalize_gemini_model(settings.gemini_model)
         try:
-            sandbox = Path(get_user_config_dir()) / "chat_sandbox"
-            sandbox.mkdir(parents=True, exist_ok=True)
-            return str(sandbox)
-        except Exception:
-            return tempfile.gettempdir()
-
-    @staticmethod
-    def _run_agy_chat_once(
-        agy_path: str,
-        *,
-        model: str,
-        effort: Optional[str],
-        conversation_id: Optional[str],
-        prompt: str,
-    ) -> tuple[int, str, str]:
-        base_args = [
-            "--model",
-            model,
-            "--output-format",
-            "json",
-            "--disable-slash-commands",
-            "--print-timeout",
-            "60s",
-        ]
-        if effort:
-            base_args.extend(["--effort", effort])
-        if conversation_id:
-            base_args.extend(["--conversation", conversation_id])
-        base_args.append(f"--print={prompt}")
-
-        if agy_path.lower().endswith((".cmd", ".bat")):
-            cmd = [os.environ.get("ComSpec", "cmd.exe"), "/d", "/c", agy_path, *base_args]
-        else:
-            cmd = [agy_path, *base_args]
-        creationflags = 0x08000000 if os.name == "nt" else 0
-        proc = subprocess.Popen(
-            cmd,
-            cwd=GeminiChatService._get_agy_chat_sandbox_dir(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=creationflags,
-        )
-        try:
-            out, err = proc.communicate(timeout=65.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise RuntimeError("模型响应超时")
-        return proc.returncode, out or "", err or ""
-
-    @staticmethod
-    def _parse_agy_json_output(out: str, err: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        text = (out or "").strip()
-        for candidate in (text, *reversed(text.splitlines())):
-            cand = candidate.strip()
-            if not cand.startswith("{"):
-                continue
-            try:
-                data = json.loads(cand)
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            status = str(data.get("status") or "").strip().upper()
-            conv_id = str(data.get("conversation_id") or "").strip() or None
-            resp_text = data.get("response") or data.get("result")
-            err_msg = data.get("error")
-            if status == "ERROR" or (err_msg and not resp_text):
-                return conv_id, None, str(err_msg or "模型调用失败").strip()
-            if isinstance(resp_text, str) and resp_text.strip():
-                return conv_id, resp_text.strip(), None
-        if text and not text.startswith("{"):
-            return None, text, None
-        return None, None, (err or text or "模型无响应").strip()[:120]
-
-    def _call_agy_chat(self, prompt: str, model: str, thinking_level: str = "auto") -> str:
-        agy_path = AntigravityQuotaService.resolve_agy_executable()
-        if not agy_path:
-            raise RuntimeError("未找到本机 Antigravity CLI")
-
-        resolved_model, effort = self.resolve_agy_model_and_effort(
-            model, thinking_level, self.get_cached_agy_models()
-        )
-        system_prompt = CharacterLore.build_effective_system_prompt()
-        sig = (resolved_model, system_prompt)
-        if self._agy_session_sig != sig:
-            self._agy_conversation_id = None
-            self._agy_session_sig = sig
-
-        def build_effective_prompt(conv_id: Optional[str]) -> str:
-            if conv_id:
-                return prompt
-            return (
-                f"[角色设定（请在后续对话中保持以下人设与口吻自然回复，直接回答用户，不修改任何文件）]\n"
-                f"{system_prompt}\n\n"
-                f"用户：{prompt}"
+            ai_text = self._call_gemini_api(text, api_key, model, thinking_level=thinking_level)
+            self.clear_api_error()
+            return ChatReply(ai_text, PetState.HAPPY)
+        except Exception as exc:
+            AppLogger.error("Chat", f"Gemini API 调用失败 (Model={model}, Thinking={thinking_level})", exc)
+            self._record_api_error(exc, api_key)
+            return ChatReply(
+                f"喵呜…请求失败了（{self._format_api_error(exc)}），请检查 API Key、模型或网络后重试～",
+                PetState.OOPS,
             )
-
-        conv_id = self._agy_conversation_id
-        code, out, err = self._run_agy_chat_once(
-            agy_path,
-            model=resolved_model,
-            effort=effort,
-            conversation_id=conv_id,
-            prompt=build_effective_prompt(conv_id),
-        )
-        new_conv_id, reply_text, err_detail = self._parse_agy_json_output(out, err)
-
-        # 若旧会话失效或模型不接受特定 effort 参数，分别降级重试一次
-        if reply_text is None and conv_id:
-            self._agy_conversation_id = None
-            code, out, err = self._run_agy_chat_once(
-                agy_path,
-                model=resolved_model,
-                effort=effort,
-                conversation_id=None,
-                prompt=build_effective_prompt(None),
-            )
-            new_conv_id, reply_text, err_detail = self._parse_agy_json_output(out, err)
-
-        if reply_text is None and effort is not None and err_detail and any(
-            tok in err_detail.lower() for tok in ("effort", "model", "invalid", "xhigh")
-        ):
-            fallback_effort = "high" if effort == "xhigh" else None
-            code, out, err = self._run_agy_chat_once(
-                agy_path,
-                model=resolved_model,
-                effort=fallback_effort,
-                conversation_id=self._agy_conversation_id,
-                prompt=build_effective_prompt(self._agy_conversation_id),
-            )
-            new_conv_id, reply_text, err_detail = self._parse_agy_json_output(out, err)
-
-        if reply_text is None:
-            raise RuntimeError(err_detail or f"模型调用失败 (退出码 {code})")
-
-        if new_conv_id:
-            self._agy_conversation_id = new_conv_id
-        return reply_text
 
     @staticmethod
     def _contains_any(haystack: str, *needles: str) -> bool:
@@ -509,7 +213,7 @@ class GeminiChatService:
         if text.endswith(("?", "？")) or "吗" in text or "呢" in text:
             return random.choice(
                 [
-                    "让我想想喵…嗯，我觉得很有道理✦（想让我真正联网回答，可以在「设置」里登录 Google 个人账号或填上 Gemini API Key 哦）",
+                    "让我想想喵…嗯，我觉得很有道理✦（想让我真正联网回答，可以在「设置」里填上 Gemini API Key 哦）",
                     "两个选项都挺不错的喵～不如听听你的直觉？✦",
                     "猫耳天线正在思考中…离线模式下我也可以陪你聊天、摸头、巡逻和撒娇喵！",
                 ]
@@ -522,359 +226,6 @@ class GeminiChatService:
                 "好耶喵！需要我切到「反重力悬浮」或打开「角色档案」陪你吗？",
             ]
         )
-
-    @staticmethod
-    def _build_rest_thinking_config(model: str, thinking_level: str) -> Optional[dict[str, Any]]:
-        level = normalize_thinking_level(thinking_level)
-        if level == "auto":
-            return None
-        if level == "off":
-            if "2.5" in (model or "").lower():
-                return {"thinkingBudget": 0}
-            return {"thinkingLevel": "MINIMAL"}
-        return {"thinkingLevel": level.upper()}
-
-    @staticmethod
-    def _downgrade_rest_thinking_config(gen_cfg: dict[str, Any], err_text: str) -> bool:
-        tcfg = gen_cfg.get("thinkingConfig")
-        if not isinstance(tcfg, dict):
-            return False
-        low = (err_text or "").lower()
-        if not any(tok in low for tok in ("thinking", "level", "budget", "xhigh", "unsupported", "invalid")):
-            return False
-        if tcfg.get("thinkingLevel") == "XHIGH":
-            tcfg["thinkingLevel"] = "HIGH"
-            return True
-        gen_cfg.pop("thinkingConfig", None)
-        return True
-
-    def _call_oauth_chat(self, prompt: str, model: str, thinking_level: str = "auto") -> str:
-        if self._oauth_service is None:
-            raise OAuthError("OAuth 服务未初始化", status_code=401)
-
-        session = self._oauth_service.ensure_fresh_access_token()
-        system_prompt = CharacterLore.build_effective_system_prompt()
-        sig = (session.email, model, system_prompt)
-        if self._oauth_session_sig != sig:
-            self._oauth_history = []
-            self._oauth_session_sig = sig
-            self._oauth_session_id = str(uuid.uuid4())
-
-        contents = [*self._oauth_history, {"role": "user", "parts": [{"text": prompt}]}]
-        if session.api_backend == "v1internal":
-            reply_text = self._request_v1internal_sse(
-                session,
-                model=model,
-                contents=contents,
-                system_prompt=system_prompt,
-                thinking_level=thinking_level,
-            )
-        else:
-            reply_text = self._request_generativelanguage_sse(
-                session,
-                model=model,
-                contents=contents,
-                system_prompt=system_prompt,
-                thinking_level=thinking_level,
-            )
-
-        final_text = reply_text.strip() or "喵～✦"
-        self._oauth_history.append({"role": "user", "parts": [{"text": prompt}]})
-        self._oauth_history.append({"role": "model", "parts": [{"text": final_text}]})
-        if len(self._oauth_history) > _MAX_OAUTH_HISTORY_MESSAGES:
-            self._oauth_history = self._oauth_history[-_MAX_OAUTH_HISTORY_MESSAGES:]
-        return final_text
-
-    def _request_generativelanguage_sse(
-        self,
-        session: OAuthSession,
-        *,
-        model: str,
-        contents: list[dict[str, Any]],
-        system_prompt: str,
-        thinking_level: str = "auto",
-    ) -> str:
-        """通过 Google 官方 Gemini v1beta REST + Bearer OAuth Token 发起流式对话。"""
-        assert self._oauth_service is not None
-        model_id = model[len("models/") :] if model.startswith("models/") else model
-        url = f"{GEMINI_API_BASE_URL}/models/{model_id}:streamGenerateContent?alt=sse"
-        gen_cfg: dict[str, Any] = {"maxOutputTokens": 2048}
-        tcfg = self._build_rest_thinking_config(model_id, thinking_level)
-        if tcfg is not None:
-            gen_cfg["thinkingConfig"] = tcfg
-        payload = {
-            "contents": contents,
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "generationConfig": gen_cfg,
-        }
-
-        refreshed_once = False
-        while True:
-            headers: dict[str, str] = {
-                "Authorization": f"Bearer {session.access_token}",
-                "Content-Type": "application/json",
-            }
-            if session.project_id:
-                headers["x-goog-user-project"] = session.project_id
-            try:
-                resp = requests.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    stream=True,
-                    timeout=(10, 45),
-                )
-            except requests.RequestException as exc:
-                raise OAuthError(f"连接 Gemini 对话服务失败：{exc}") from exc
-
-            if (
-                resp.status_code == 401
-                and not refreshed_once
-                and session.can_refresh(self._oauth_service.get_client_config())
-            ):
-                resp.close()
-                refreshed_once = True
-                session = self._oauth_service.ensure_fresh_access_token(force_refresh=True)
-                continue
-
-            if not resp.ok:
-                err_text = self._read_error_response(resp)
-                resp.close()
-                if resp.status_code == 400 and self._downgrade_rest_thinking_config(gen_cfg, err_text):
-                    continue
-                raise OAuthError(err_text, status_code=resp.status_code)
-
-            try:
-                return self._parse_sse_candidates_response(resp, wrapped_in_response=False)
-            finally:
-                resp.close()
-
-    def _request_v1internal_sse(
-        self,
-        session: OAuthSession,
-        *,
-        model: str,
-        contents: list[dict[str, Any]],
-        system_prompt: str,
-        thinking_level: str = "auto",
-    ) -> str:
-        assert self._oauth_service is not None
-        payload = self._build_v1internal_payload(
-            project_id=(session.project_id or "").strip(),
-            session_id=self._oauth_session_id,
-            model=model,
-            contents=contents,
-            system_prompt=system_prompt,
-            thinking_level=thinking_level,
-        )
-
-        # 使用 Daily -> Sandbox 顺序调用 v1internal:streamGenerateContent?alt=sse，并在 401 时强制刷新一次 Token 重试
-        refreshed_once = False
-        last_error: Optional[Exception] = None
-
-        for base_url in V1_INTERNAL_CHAT_BASE_URLS:
-            url = f"{base_url}:streamGenerateContent?alt=sse"
-            while True:
-                headers = {
-                    "Authorization": f"Bearer {session.access_token}",
-                    "Content-Type": "application/json",
-                    "User-Agent": HUB_USER_AGENT,
-                }
-                try:
-                    resp = requests.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        stream=True,
-                        timeout=(10, 45),
-                    )
-                except requests.RequestException as exc:
-                    last_error = OAuthError(f"连接上游对话服务失败：{exc}")
-                    break
-
-                if (
-                    resp.status_code == 401
-                    and not refreshed_once
-                    and session.can_refresh(self._oauth_service.get_client_config())
-                ):
-                    resp.close()
-                    refreshed_once = True
-                    session = self._oauth_service.ensure_fresh_access_token(force_refresh=True)
-                    continue
-
-                if not resp.ok:
-                    err_text = self._read_error_response(resp)
-                    resp.close()
-                    req_obj = payload.get("request")
-                    gen_cfg = req_obj.get("generationConfig") if isinstance(req_obj, dict) else None
-                    if (
-                        resp.status_code == 400
-                        and isinstance(gen_cfg, dict)
-                        and self._downgrade_rest_thinking_config(gen_cfg, err_text)
-                    ):
-                        continue
-                    err = OAuthError(err_text, status_code=resp.status_code)
-                    if self._should_try_next_v1internal_endpoint(resp.status_code, base_url):
-                        last_error = err
-                        break
-                    raise err
-
-                try:
-                    return self._parse_sse_candidates_response(resp, wrapped_in_response=True)
-                finally:
-                    resp.close()
-
-        if last_error is not None:
-            raise last_error
-        raise OAuthError("上游对话端点均不可用")
-
-    @staticmethod
-    def _build_v1internal_payload(
-        *,
-        project_id: str,
-        session_id: str,
-        model: str,
-        contents: list[dict[str, Any]],
-        system_prompt: str,
-        thinking_level: str = "auto",
-    ) -> dict[str, Any]:
-        conv_hex = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
-        traj_hex = uuid.uuid4().hex[:8]
-        ts_ms = int(time.time() * 1000)
-        request_id = f"agent/{conv_hex}/{ts_ms}/{traj_hex}/{len(contents)}"
-        gen_cfg: dict[str, Any] = {"maxOutputTokens": 2048}
-        tcfg = GeminiChatService._build_rest_thinking_config(model, thinking_level)
-        if tcfg is not None:
-            gen_cfg["thinkingConfig"] = tcfg
-        return {
-            "project": project_id,
-            "requestId": request_id,
-            "request": {
-                "contents": contents,
-                "systemInstruction": {
-                    "role": "user",
-                    "parts": [{"text": system_prompt}],
-                },
-                "generationConfig": gen_cfg,
-                "sessionId": session_id,
-            },
-            "model": model,
-            "userAgent": "antigravity",
-        }
-
-    @staticmethod
-    def _should_try_next_v1internal_endpoint(status_code: int, base_url: str) -> bool:
-        if status_code == 400 and "sandbox" in base_url.lower():
-            return True
-        return status_code in (404, 408) or 500 <= status_code < 600
-
-    @staticmethod
-    def _decode_response_text(resp: requests.Response) -> str:
-        raw_bytes = getattr(resp, "content", None)
-        if isinstance(raw_bytes, (bytes, bytearray)):
-            return bytes(raw_bytes).decode("utf-8", errors="replace")
-        return str(getattr(resp, "text", "") or "")
-
-    @staticmethod
-    def _read_error_response(resp: requests.Response) -> str:
-        raw = GeminiChatService._decode_response_text(resp)
-        try:
-            obj = json.loads(raw)
-            if isinstance(obj, dict):
-                err = obj.get("error")
-                if isinstance(err, dict):
-                    msg = err.get("message") or err.get("status")
-                    if isinstance(msg, str) and msg.strip():
-                        return msg.strip()
-        except Exception:
-            pass
-        cleaned = raw.strip()
-        return cleaned[:160] if len(cleaned) > 160 else (cleaned or f"HTTP {resp.status_code}")
-
-    @staticmethod
-    def _extract_chunk_parts(
-        chunk: dict[str, Any], *, wrapped_in_response: bool = True
-    ) -> list[str]:
-        actual = chunk["response"] if (wrapped_in_response and isinstance(chunk.get("response"), dict)) else chunk
-        if isinstance(actual.get("error"), dict):
-            err_obj = actual["error"]
-            code = err_obj.get("code")
-            msg = str(err_obj.get("message") or err_obj.get("status") or "上游返回错误").strip()
-            raise OAuthError(msg, status_code=int(code) if isinstance(code, int) else None)
-
-        candidates = actual.get("candidates")
-        if not isinstance(candidates, list) or not candidates:
-            return []
-        first_cand = candidates[0]
-        if not isinstance(first_cand, dict):
-            return []
-        content = first_cand.get("content")
-        if not isinstance(content, dict):
-            return []
-        parts = content.get("parts")
-        if not isinstance(parts, list):
-            return []
-
-        texts: list[str] = []
-        for part in parts:
-            if not isinstance(part, dict):
-                continue
-            # 仅提取非思维链的正文文本输出到桌宠对话气泡
-            if part.get("thought") is True:
-                continue
-            txt = part.get("text")
-            if isinstance(txt, str) and txt:
-                texts.append(txt)
-        return texts
-
-    @staticmethod
-    def _parse_sse_candidates_response(
-        resp: requests.Response, *, wrapped_in_response: bool = True
-    ) -> str:
-        # 响应头缺少 charset 时 requests 默认按 ISO-8859-1 解码会导致中文乱码，强制读取原始字节按 UTF-8 解码
-        answer_parts: list[str] = []
-        raw_lines: list[str] = []
-        seen_sse_data = False
-
-        for raw_line in resp.iter_lines(decode_unicode=False):
-            if not raw_line:
-                continue
-            line = (
-                bytes(raw_line).decode("utf-8", errors="replace").strip()
-                if isinstance(raw_line, (bytes, bytearray))
-                else str(raw_line).strip()
-            )
-            if not line:
-                continue
-            raw_lines.append(line)
-            if not line.startswith("data:"):
-                continue
-            seen_sse_data = True
-            json_part = line[5:].strip()
-            if not json_part or json_part == "[DONE]":
-                continue
-            try:
-                chunk = json.loads(json_part)
-            except Exception:
-                continue
-            if isinstance(chunk, dict):
-                answer_parts.extend(
-                    GeminiChatService._extract_chunk_parts(chunk, wrapped_in_response=wrapped_in_response)
-                )
-
-        if not seen_sse_data and raw_lines:
-            try:
-                parsed = json.loads("\n".join(raw_lines))
-                items = parsed if isinstance(parsed, list) else [parsed]
-                for item in items:
-                    if isinstance(item, dict):
-                        answer_parts.extend(
-                            GeminiChatService._extract_chunk_parts(item, wrapped_in_response=wrapped_in_response)
-                        )
-            except Exception:
-                pass
-
-        return "".join(answer_parts).strip()
 
     @staticmethod
     def _extract_chat_model_id(name: str, actions: Any) -> Optional[str]:
@@ -915,10 +266,8 @@ class GeminiChatService:
         if not cleaned_key:
             raise ValueError("请先填写 Gemini API Key")
 
-        from google import genai
-
         try:
-            with genai.Client(api_key=cleaned_key, http_options={"timeout": 15000}) as client:
+            with cls._create_api_client(cleaned_key, 15000) as client:
                 raw_models = list(client.models.list(config={"page_size": 100}))
         except Exception as exc:
             raise RuntimeError(cls._format_api_error(exc)) from exc
@@ -987,7 +336,6 @@ class GeminiChatService:
     def _call_gemini_api(
         self, prompt: str, api_key: str, model: str, thinking_level: str = "auto"
     ) -> str:
-        from google import genai
         from google.genai import errors, types
 
         level = normalize_thinking_level(thinking_level)
@@ -999,7 +347,7 @@ class GeminiChatService:
             self._last_session_sig = session_sig
 
         # 使用官方 google-genai >= 3.2 Interactions API，并按每轮重传 system_instruction 与 generation_config
-        with genai.Client(api_key=api_key, http_options={"timeout": 25000}) as client:
+        with self._create_api_client(api_key, 25000) as client:
             if level == "off" and "2.5" in (model or "").lower():
                 return self._call_gemini_generate_content_fallback(
                     client,
@@ -1110,26 +458,17 @@ class GeminiChatService:
         final_text = (getattr(resp, "text", None) or "").strip() or "喵～✦"
         self._api_fallback_history.append({"role": "user", "parts": [{"text": prompt}]})
         self._api_fallback_history.append({"role": "model", "parts": [{"text": final_text}]})
-        if len(self._api_fallback_history) > _MAX_OAUTH_HISTORY_MESSAGES:
-            self._api_fallback_history = self._api_fallback_history[-_MAX_OAUTH_HISTORY_MESSAGES:]
+        if len(self._api_fallback_history) > _MAX_HISTORY_MESSAGES:
+            self._api_fallback_history = self._api_fallback_history[-_MAX_HISTORY_MESSAGES:]
         return final_text
 
     @staticmethod
     def _format_api_error(exc: Exception) -> str:
         code = getattr(exc, "code", None)
+        if code is None:
+            code = getattr(exc, "status_code", None)
         msg = str(exc).strip()
         low = msg.lower()
-        if isinstance(exc, OAuthError):
-            if "validation_required" in low or "verify your account" in low or "validation_url" in low:
-                return "当前 Google 账号需先完成安全验证"
-            if code in (401, 403):
-                return "OAuth 授权无效或权限不足，请在设置中重新登录"
-            if code == 404:
-                return "当前模型不可用，请在设置中切换模型"
-            if code == 429:
-                return "触发个人账号额度或频率限制"
-            return msg[:80] if len(msg) > 80 else (msg or "OAuth 对话请求失败")
-
         if code == 401 or code == 403:
             return "API Key 无效或权限不足"
         if code == 429:
