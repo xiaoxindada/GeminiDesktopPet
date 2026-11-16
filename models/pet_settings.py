@@ -35,7 +35,36 @@ class PetStyleMode(str, Enum):
         return cls.CHIBI
 
 
+class ChatAuthMode(str, Enum):
+    """联网对话认证模式：自动优先 OAuth、强制 OAuth 个人账号或 Gemini API Key。"""
+
+    AUTO = "auto"
+    OAUTH = "oauth"
+    API_KEY = "api_key"
+
+    @classmethod
+    def parse(cls, raw: str | None) -> ChatAuthMode:
+        if raw:
+            low = raw.strip().lower()
+            for item in cls:
+                if item.value.lower() == low:
+                    return item
+        return cls.AUTO
+
+
 DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
+DEFAULT_OAUTH_MODEL = "gemini-3.8-flash"
+BUILTIN_OAUTH_MODELS: tuple[str, ...] = (
+    "gemini-3.8-flash",
+    "gemini-4-hydrogen",
+    "gemini-4-argon",
+    "gemini-3-flash-preview",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+)
 DEPRECATED_MODEL_PREFIXES = ("gemini-2.5-", "gemini-2.0-", "gemini-1.5-", "gemini-1.0-")
 
 
@@ -47,6 +76,12 @@ def normalize_gemini_model(model: str | None) -> str:
     if cleaned.lower().startswith(DEPRECATED_MODEL_PREFIXES):
         return DEFAULT_GEMINI_MODEL
     return cleaned
+
+
+def normalize_oauth_model(model: str | None) -> str:
+    """规范化 OAuth 对话模型名，留空时回退到官方轻量默认模型。"""
+    cleaned = (model or "").strip()
+    return cleaned if cleaned else DEFAULT_OAUTH_MODEL
 
 
 @dataclass
@@ -85,8 +120,10 @@ class PetSettings:
     total_pats: int = 0
     favorability: int = 20
 
+    chat_auth_mode: ChatAuthMode = ChatAuthMode.AUTO
     gemini_api_key: str = ""
     gemini_model: str = DEFAULT_GEMINI_MODEL
+    oauth_model: str = DEFAULT_OAUTH_MODEL
 
     update_releases_url: str = "https://github.com/xiaoxindada/GeminiDesktopPet/releases"
     auto_check_updates: bool = True

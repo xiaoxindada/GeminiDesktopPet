@@ -539,6 +539,28 @@ class PetWindow(QWidget):
         header_row.addWidget(self._bond_badge_lbl)
         header_row.addStretch(1)
 
+        self._bubble_settings_btn = QPushButton("⚙")
+        self._bubble_settings_btn.setFixedSize(18, 18)
+        self._bubble_settings_btn.setToolTip("设置对话连接方式 (OAuth 个人账号 / API Key)")
+        self._bubble_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._bubble_settings_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                color: #9B92C7;
+                border: none;
+                font-size: 11px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #FFFFFF;
+            }
+            """
+        )
+        self._bubble_settings_btn.clicked.connect(self.open_settings_requested.emit)
+        self._bubble_settings_btn.setVisible(False)
+        header_row.addWidget(self._bubble_settings_btn)
+
         close_bubble_btn = QPushButton("✕")
         close_bubble_btn.setFixedSize(18, 18)
         close_bubble_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -956,6 +978,7 @@ class PetWindow(QWidget):
         if getattr(self, "_ui_ready", False):
             self._is_chat_open = False
             self._is_forced_bubble_active = False
+            self._bubble_settings_btn.setVisible(False)
             self._chat_input_panel.setVisible(False)
             self._hide_speech_bubble()
         super().hideEvent(event)
@@ -2314,6 +2337,7 @@ class PetWindow(QWidget):
         self._is_chat_open = True
         if not self._speech_bubble.isVisible():
             self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
+        self._bubble_settings_btn.setVisible(True)
         self._chat_input_panel.setVisible(True)
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         self._speech_bubble.setVisible(True)
@@ -2331,6 +2355,7 @@ class PetWindow(QWidget):
         if enabled:
             self.show_bubble("已开启宠物对话气泡，会自动陪你聊天喵✦", 4.0, force=True)
         elif not self._is_chat_open:
+            self._bubble_settings_btn.setVisible(False)
             self._chat_input_panel.setVisible(False)
             self._hide_speech_bubble()
             self._relayout_stage_top()
@@ -2340,6 +2365,7 @@ class PetWindow(QWidget):
             self.open_chat_dialog()
             return
         self._is_chat_open = False
+        self._bubble_settings_btn.setVisible(False)
         self._chat_input_panel.setVisible(False)
         self._sync_bubble_window_styles()
         if self._settings.show_speech_bubble:
@@ -2352,6 +2378,7 @@ class PetWindow(QWidget):
     def _close_bubble_click(self) -> None:
         self._is_chat_open = False
         self._is_forced_bubble_active = False
+        self._bubble_settings_btn.setVisible(False)
         self._chat_input_panel.setVisible(False)
         self._hide_speech_bubble()
         self._relayout_stage_top()

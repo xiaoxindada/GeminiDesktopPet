@@ -16,10 +16,13 @@ from models.app_version import (
 )
 from models.pet_settings import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_OAUTH_MODEL,
+    ChatAuthMode,
     DockSide,
     PetSettings,
     PetStyleMode,
     normalize_gemini_model,
+    normalize_oauth_model,
 )
 from services.win32_ipc import (
     get_windows_startup_dir,
@@ -201,6 +204,13 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     _SettingFieldSpec("total_pats", "stats", "total_pats", _parse_nonneg_int, int),
     _SettingFieldSpec("favorability", "stats", "favorability", _parse_nonneg_int, int),
     _SettingFieldSpec(
+        "chat_auth_mode",
+        "gemini",
+        "auth_mode",
+        lambda raw, _cur: ChatAuthMode.parse(str(raw)) if raw is not None else _cur,
+        lambda v: v.value,
+    ),
+    _SettingFieldSpec(
         "gemini_api_key",
         "gemini",
         "api_key",
@@ -214,6 +224,13 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
         "model",
         lambda raw, _cur: normalize_gemini_model(str(raw)) if raw is not None else _cur,
         lambda v: v or DEFAULT_GEMINI_MODEL,
+    ),
+    _SettingFieldSpec(
+        "oauth_model",
+        "gemini",
+        "oauth_model",
+        lambda raw, _cur: normalize_oauth_model(str(raw)) if raw is not None else _cur,
+        lambda v: v or DEFAULT_OAUTH_MODEL,
     ),
     _SettingFieldSpec(
         "update_releases_url", "updates", "releases_url", _parse_nonempty_str, lambda v: v or ""
@@ -253,11 +270,13 @@ class SettingsService:
             except Exception:
                 pass
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
+        settings.oauth_model = normalize_oauth_model(settings.oauth_model)
         return settings
 
     def save(self, settings: PetSettings) -> None:
         self.settings_folder.mkdir(parents=True, exist_ok=True)
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
+        settings.oauth_model = normalize_oauth_model(settings.oauth_model)
         settings.gemini_api_key = (settings.gemini_api_key or "").strip()
         self.settings_path.write_text(self._serialize_json(settings), encoding="utf-8")
 
