@@ -2161,17 +2161,10 @@ class PetWindow(QWidget):
             self._active_static_pixmap = None
             return
 
-        self._use_std_walk_rig = (
-            self._settings.style_mode == PetStyleMode.STANDARD
-            and rig.standard_complete
-            and self._settings.docked_side == DockSide.NONE
-            # 现有标准骨架是侧面行走素材，不能覆盖正面待机和表情姿态。
-            and active in (PetState.RUNNING, PetState.SEARCHING)
-        )
+        # 骨架只用于实际移动；动作预览和搜索状态使用各自的独立立绘。
+        self._use_std_walk_rig = False
         self._use_chibi_walk_rig = False
         self._active_static_pixmap = self._sprites.get(active, self._settings.style_mode)
-        if self._use_std_walk_rig:
-            self._update_std_walk_rig(self._anim_time * 6.8, self._settings.scale)
 
 
     def _resolve_resting_state(self) -> PetState:

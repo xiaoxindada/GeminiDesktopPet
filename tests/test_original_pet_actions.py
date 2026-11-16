@@ -2,7 +2,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from models.pet_settings import DockSide, PetSettings, PetStyleMode
@@ -34,29 +34,25 @@ def test_standard_pose_joints_animate_and_sleep_is_static(app, sprites, tmp_path
     pet = PetWindow(settings, SettingsService(str(tmp_path)), sprites,
                     MagicMock(), MagicMock(), MagicMock())
     try:
-        poses = {}
         for state in PetState:
             pet._set_temporary_pose(state, 2)
-            if state in (PetState.RUNNING, PetState.SEARCHING):
-                assert pet._use_std_walk_rig
-                pet._anim_time = 0.8
-                pet._update_sprite_transforms()
-                assert all(isfinite(v) for v in pet._std_kinematics.values())
-                poses[state] = dict(pet._std_kinematics)
-                canvas = QPixmap(pet.size())
-                canvas.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(canvas)
-                pet._paint_stage(painter)
-                painter.end()
-                assert not canvas.isNull()
-            else:
-                assert not pet._use_std_walk_rig
+            assert not pet._use_std_walk_rig
+            assert pet._active_static_pixmap.toImage() == sprites.get(state, PetStyleMode.STANDARD).toImage()
         # 真正停止行走后必须恢复正面，而不是继续绘制侧面骨架。
         pet._override_pose = None
         pet._is_sleeping = False
         pet._is_walking = True
         pet._refresh_sprite_visual()
         assert pet._use_std_walk_rig
+        pet._anim_time = 0.8
+        pet._update_sprite_transforms()
+        assert all(isfinite(v) for v in pet._std_kinematics.values())
+        canvas = QPixmap(pet.size())
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        pet._paint_stage(painter)
+        painter.end()
+        assert not canvas.isNull()
         pet._is_walking = False
         pet._refresh_sprite_visual()
         assert not pet._use_std_walk_rig
@@ -88,6 +84,28 @@ def test_original_standard_sleep_uses_front_sleep_asset(sprites):
     sleep = sprites.get(PetState.SLEEPING, PetStyleMode.STANDARD)
     assert sleep.toImage() == QPixmap(str(base / "sleeping.png")).toImage()
     assert sleep.toImage() != QPixmap(str(base / "back.png")).toImage()
+
+
+def test_standard_actions_have_distinct_transparent_assets(sprites):
+    from hashlib import sha256
+    from pathlib import Path
+    from models.app_version import get_bundled_resource_dir
+
+    base = Path(get_bundled_resource_dir()) / "Assets/Standard"
+    hashes = set()
+    for state in PetState:
+        path = base / ("standee.png" if state == PetState.IDLE else f"{state.value}.png")
+        assert path.is_file(), state.value
+        digest = sha256(path.read_bytes()).hexdigest()
+        assert digest not in hashes, f"Duplicate action: {state.value}"
+        hashes.add(digest)
+        expected = QPixmap(str(path))
+        assert not expected.isNull(), state.value
+        assert expected.hasAlphaChannel(), state.value
+        rgba = expected.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+        alpha = bytes(rgba.bits())[3::4]
+        assert alpha.count(0) > len(alpha) * 0.1, f"Missing transparent background: {state.value}"
+        assert sprites.get(state, PetStyleMode.STANDARD).toImage() == expected.toImage()
 
 
 def test_retired_settings_are_ignored_and_removed_on_save(tmp_path):
