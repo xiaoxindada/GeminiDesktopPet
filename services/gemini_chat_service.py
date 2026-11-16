@@ -40,6 +40,7 @@ class GeminiChatService:
         self._api_fallback_history: list[dict[str, Any]] = []
         self._last_api_error = ""
         self._failed_key_hash = ""
+        self._restored_conversation = False
 
     @staticmethod
     def is_api_key_error(exc_or_msg: Exception | str) -> bool:
@@ -74,7 +75,19 @@ class GeminiChatService:
         self._last_interaction_id = None
         self._last_session_sig = None
         self._api_fallback_history = []
+        self._restored_conversation = False
         self.clear_api_error()
+
+    def restore_conversation(self, messages: list[dict]) -> None:
+        """从本地消息恢复上下文，不持久化远端会话标识或连接凭据。"""
+        self.reset_conversation()
+        self._api_fallback_history = [
+            {"role": "user" if message["role"] == "user" else "model",
+             "parts": [{"text": message["text"]}]}
+            for message in messages
+            if message.get("role") in ("user", "assistant") and message.get("text")
+        ][-_MAX_HISTORY_MESSAGES:]
+        self._restored_conversation = True
 
     @staticmethod
     def resolve_chat_provider(settings: PetSettings) -> Optional[str]:
@@ -343,12 +356,14 @@ class GeminiChatService:
         session_sig = (api_key, model, system_prompt)
         if self._last_session_sig != session_sig:
             self._last_interaction_id = None
-            self._api_fallback_history = []
+            if not self._restored_conversation:
+                self._api_fallback_history = []
             self._last_session_sig = session_sig
 
         # 使用官方 google-genai >= 3.2 Interactions API，并按每轮重传 system_instruction 与 generation_config
         with self._create_api_client(api_key, 25000) as client:
-            if level == "off" and "2.5" in (model or "").lower():
+            # 本地恢复的会话通过官方多轮 contents 继续，避免误接到另一远端会话。
+            if self._restored_conversation or (level == "off" and "2.5" in (model or "").lower()):
                 return self._call_gemini_generate_content_fallback(
                     client,
                     types,
