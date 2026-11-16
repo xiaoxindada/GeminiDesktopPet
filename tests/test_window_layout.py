@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import os
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 if os.name != "nt" and not os.environ.get("DISPLAY"):
@@ -14,7 +15,8 @@ from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from models.pet_settings import DockSide, PetSettings
+from models.pet_settings import DockSide, PetSettings, PetStyleMode
+from models.pet_state import PetState
 from services.antigravity_quota_service import (
     AntigravityQuotaService,
     QuotaBucketInfo,
@@ -121,6 +123,39 @@ class TestWindowLayoutFixes(unittest.TestCase):
         win.close()
         win.deleteLater()
         self._app.processEvents()
+
+    def test_quota_lookup_reacts_with_chibi_and_standard_sprites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_svc = SettingsService(tmp)
+            sound = SoundService()
+            sprites = SpriteManager()
+            sprites.preload_all()
+            sys_monitor = SystemMonitorService()
+            chat = GeminiChatService()
+
+            for mode in (PetStyleMode.CHIBI, PetStyleMode.STANDARD):
+                settings = PetSettings(style_mode=mode, show_speech_bubble=True, auto_walk=False)
+                pet = PetWindow(settings, settings_svc, sprites, sound, sys_monitor, chat)
+                try:
+                    pet.show()
+                    self._app.processEvents()
+
+                    pet.react_quota_lookup_started()
+                    self.assertEqual(pet._override_pose, PetState.SEARCHING)
+                    self.assertIsNotNone(pet._active_static_pixmap)
+
+                    pet.react_quota_lookup_finished(SimpleNamespace(success=True))
+                    self.assertEqual(pet._override_pose, PetState.HAPPY)
+                    self.assertIsNotNone(pet._active_static_pixmap)
+                    self.assertIn("查好", pet._bubble_text_lbl.text())
+
+                    pet.react_quota_lookup_finished(SimpleNamespace(success=False))
+                    self.assertEqual(pet._override_pose, PetState.OOPS)
+                    self.assertIsNotNone(pet._active_static_pixmap)
+                finally:
+                    pet.close()
+                    pet.deleteLater()
+                    self._app.processEvents()
 
     def test_pet_window_quick_bar_never_clips_and_standby_close_preserves_coords(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

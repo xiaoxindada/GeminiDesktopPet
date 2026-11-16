@@ -405,6 +405,8 @@ class PetApplicationCoordinator(QObject):
                 anchor_pet=self._pet,
                 auto_close_after=True,
             )
+            self._quota_win.query_started.connect(self._pet.react_quota_lookup_started)
+            self._quota_win.query_finished.connect(self._pet.react_quota_lookup_finished)
         else:
             self._quota_win.set_anchor(self._pet)
             self._quota_win.set_auto_close_enabled(True)
