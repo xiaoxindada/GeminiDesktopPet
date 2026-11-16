@@ -385,7 +385,8 @@ class SettingsWindow(QWidget):
         if self._loading:
             return
         s = self._settings
-        s.style_mode = self._style_combo.currentData() or PetStyleMode.CHIBI
+        # QComboBox 会把 str 枚举数据转成普通 str，需解析回 PetStyleMode 才能正常序列化保存
+        s.style_mode = PetStyleMode.parse(self._style_combo.currentData())
         s.scale = max(0.6, min(1.8, self._scale_slider.value() / 100.0))
         s.opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
         self._scale_val_lbl.setText(f"{s.scale:.2f}x")
