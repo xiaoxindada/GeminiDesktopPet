@@ -14,6 +14,7 @@ from models.pet_settings import (
     PetSettings,
     normalize_gemini_model,
     normalize_thinking_level,
+    resolve_effective_thinking_level,
 )
 from models.pet_state import PetState
 from services.app_logger import AppLogger
@@ -146,8 +147,9 @@ class GeminiChatService:
         strict_cmd = self._try_handle_strict_pet_command(text)
         if strict_cmd is not None:
             return strict_cmd
-        thinking_level = normalize_thinking_level(settings.thinking_level)
         model = normalize_gemini_model(settings.gemini_model)
+        # 模型不支持的思考档位按该模型默认档发送，避免界面显示与请求行为不一致。
+        thinking_level = resolve_effective_thinking_level(model, settings.thinking_level)
         try:
             ai_text = self._call_gemini_api(text, api_key, model, thinking_level=thinking_level)
             self.clear_api_error()

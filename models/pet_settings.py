@@ -124,6 +124,13 @@ def format_thinking_level_label(level: str | None) -> str:
     return THINKING_LEVEL_LABELS.get(normalized, "自动")
 
 
+def resolve_effective_thinking_level(model_id: str | None, level: str | None) -> str:
+    """返回当前模型可用的思考档位，未支持的档位回落到该模型的默认档。"""
+    normalized = normalize_thinking_level(level)
+    supported = get_supported_thinking_levels(model_id)
+    return normalized if normalized in supported else supported[0]
+
+
 def get_supported_thinking_levels(model_id: str | None) -> tuple[str, ...]:
     """根据模型系列返回支持的思考强度档位（兼容官方公开模型与动态发现模型）。"""
     low = (model_id or "").strip().lower()
@@ -189,6 +196,8 @@ class PetSettings:
     show_speech_bubble: bool = False
     follow_antigravity: bool = True
     follow_gemini_app: bool = True
+    # 反重力对话播报：记住上次的开关状态，重启桌宠后自动恢复
+    chat_sync_enabled: bool = False
 
 
     last_left: float | None = None

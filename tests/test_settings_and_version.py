@@ -21,6 +21,7 @@ from models.pet_settings import (
     PetSettings,
     PetStyleMode,
     normalize_gemini_model,
+    resolve_effective_thinking_level,
 )
 from services.antigravity_quota_service import (
     AntigravityQuotaService,
@@ -36,6 +37,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestSettingsAndProjectConfig(unittest.TestCase):
+    def test_unsupported_thinking_level_falls_back_to_model_default(self) -> None:
+        self.assertEqual(resolve_effective_thinking_level("gemini-3.1-flash-lite", "xhigh"), "auto")
+        self.assertEqual(resolve_effective_thinking_level("gemini-4-hydrogen", "xhigh"), "xhigh")
+
     def test_settings_json_roundtrip_and_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             svc = SettingsService(tmp)

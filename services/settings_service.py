@@ -157,6 +157,7 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     _SettingFieldSpec("system_monitor_enabled", "behavior", "system_monitor_enabled", _parse_bool, bool),
     _SettingFieldSpec("follow_antigravity", "behavior", "follow_antigravity", _parse_bool, bool),
     _SettingFieldSpec("follow_gemini_app", "behavior", "follow_gemini_app", _parse_bool, bool),
+    _SettingFieldSpec("chat_sync_enabled", "behavior", "chat_sync_enabled", _parse_bool, bool),
     _SettingFieldSpec(
         "last_left",
         "window",

@@ -36,6 +36,7 @@ class TrayIconService(QObject):
     open_character_editor_requested = Signal()
     open_settings_requested = Signal()
     open_quota_requested = Signal()
+    sync_antigravity_requested = Signal()
     open_update_requested = Signal()
     exit_requested = Signal()
 
@@ -56,6 +57,7 @@ class TrayIconService(QObject):
         self._menu.addAction(greet_act)
 
         self._add_action("📊 查看反重力额度 (Antigravity)", self.open_quota_requested.emit)
+        self._add_action("💬 同步反重力对话", self.sync_antigravity_requested.emit)
         self._add_action("💬 聊天模式 / 选模型对话", self.open_chat_requested.emit)
 
         self._style_action = self._add_action(

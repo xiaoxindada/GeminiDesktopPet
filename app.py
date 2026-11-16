@@ -210,6 +210,7 @@ class PetApplicationCoordinator(QObject):
         self._tray.open_character_editor_requested.connect(self.open_character_editor_window)
         self._tray.open_settings_requested.connect(self.open_settings_window)
         self._tray.open_quota_requested.connect(self.toggle_quota_window)
+        self._tray.sync_antigravity_requested.connect(self._pet.toggle_antigravity_sync)
         self._tray.open_update_requested.connect(self.open_update_window)
         self._tray.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
 

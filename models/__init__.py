@@ -30,6 +30,7 @@ from .pet_settings import (
     get_supported_thinking_levels,
     normalize_gemini_model,
     normalize_thinking_level,
+    resolve_effective_thinking_level,
 )
 from .pet_state import PetState
 
@@ -61,4 +62,5 @@ __all__ = [
     "get_user_config_dir",
     "normalize_gemini_model",
     "normalize_thinking_level",
+    "resolve_effective_thinking_level",
 ]

@@ -5,7 +5,10 @@ from __future__ import annotations
 import ctypes
 import math
 import os
+from collections import deque
+from pathlib import Path
 import random
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -66,6 +69,7 @@ from models import (
     get_supported_thinking_levels,
     normalize_gemini_model,
     normalize_thinking_level,
+    resolve_effective_thinking_level,
 )
 from services import (
     AppLogger,
@@ -77,7 +81,10 @@ from services import (
     SystemMetrics,
     SystemMonitorService,
 )
+from services.antigravity_chat_collector import AntigravityChatCollector, SyncEvent
+from services.antigravity_chat_sync_service import AntigravityChatSyncService
 from services.chat_history_service import ChatHistoryService
+from services.chat_sync_state import ChatSyncState
 from services.sprite_manager import SpriteManager, WalkRigAssets
 from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
@@ -91,6 +98,14 @@ _SWP_NOSIZE = 0x0001
 _SWP_NOACTIVATE = 0x0010
 _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x00000080
+
+# 反重力播报：采集间隔、续写刷新的最小间隔（秒）与积压上限。
+# 采集和刷新都压在百毫秒级，靠「只解尾部步骤」把开销hold住，延迟才像实时。
+_SYNC_POLL_MS = 120
+_SYNC_MIN_INTERVAL = 0.25
+_SYNC_REPLACE_INTERVAL = 0.12
+_SYNC_QUEUE_LIMIT = 10
+_SYNC_HEARTBEAT_SEC = 60.0
 
 
 def _apply_win32_topmost(hwnd: int, topmost: bool) -> None:
@@ -427,6 +442,28 @@ class PetWindow(QWidget):
         self._chat_archive = ChatHistoryService(settings_service.settings_path.parent)
         self._history_expanded = False
         self._archive_error = ""
+        self._chat_readonly = False
+        self._ag_sync_service = AntigravityChatSyncService()
+        self._ag_sync_state = ChatSyncState()
+        self._ag_collector = AntigravityChatCollector(self._ag_sync_service, self._ag_sync_state)
+        self._ag_mirror_active = False
+        # 消费端只认状态叶子差量：基线记各叶子的编号，队列按节奏逐条播。
+        self._ag_baseline: dict[str, int] = {}
+        self._ag_playback: deque[SyncEvent] = deque()
+        self._ag_last_shown = 0.0
+        self._ag_last_replace = 0.0
+        # 同步气泡的独占期：这段时间内闲聊不来抢同一个气泡。
+        self._sync_guard_until = 0.0
+        # 同步播报时的固定气泡宽度：不锁宽的话每长一个字就重排一次，看着像在抖。
+        self._sync_bubble_width: Optional[int] = None
+        # 心跳：按时间写日志，确认轮询是否真的在跑。
+        self._ag_dbg_ticks = 0
+        self._ag_dbg_last = time.monotonic()
+        self._act_sync_chat: Optional[QAction] = None
+        self._ag_sync_timer = QTimer(self)
+        self._ag_sync_timer.setInterval(_SYNC_POLL_MS)
+        self._ag_sync_timer.timeout.connect(self._refresh_antigravity_sync)
+        self._ag_sync_timer.start()
         self._sprites = sprites
         self._sound = sound
         self._sys_monitor = sys_monitor
@@ -999,6 +1036,7 @@ class PetWindow(QWidget):
         row3.setContentsMargins(0, 0, 0, 0)
         row3.setSpacing(4)
         row3.addStretch(1)
+        row3.addWidget(make_pill("🔄 同步", "在气泡里实时同步 Antigravity 对话", self.toggle_antigravity_sync))
         row3.addWidget(make_pill("✏️ 角色设定", "可视化自定义角色设定", self.open_character_editor_requested.emit))
         self._quick_log_btn = make_pill("📝 运行日志", "开关运行日志记录（排错用）", self._toggle_runtime_log)
         row3.addWidget(self._quick_log_btn)
@@ -1025,6 +1063,9 @@ class PetWindow(QWidget):
 
         act_quota = menu.addAction("📊 查看反重力额度")
         act_quota.triggered.connect(self.open_quota_requested)
+
+        self._act_sync_chat = menu.addAction("💬 同步反重力对话")
+        self._act_sync_chat.triggered.connect(self.toggle_antigravity_sync)
 
         menu.addSeparator()
 
@@ -1181,6 +1222,9 @@ class PetWindow(QWidget):
             self._frame_timer.start()
             self._ai_timer.start()
             self._monitor_timer.start()
+            if self._settings.chat_sync_enabled:
+                # 上次退出前开着播报：等窗口真正可见再恢复，避免气泡被吞。
+                QTimer.singleShot(0, self._auto_resume_antigravity_sync)
         else:
             self._apply_win32_extended_styles()
 
@@ -1509,6 +1553,12 @@ class PetWindow(QWidget):
                 max(min_w, min(max_w, self._transient_bubble_size.width())),
                 max(min_h, min(max_h, self._transient_bubble_size.height())),
             )
+
+        if self._sync_bubble_width is not None:
+            # 同步播报期间锁宽：文本每长一点都按最长行重算宽度，气泡会左右抽动。
+            target_w = max(min_w, min(max_w, self._sync_bubble_width))
+            target_h = self._auto_fit_bubble_height(target_w, min_h, max_h)
+            return QSize(target_w, target_h)
 
         fm = QFontMetrics(self._bubble_text_lbl.font())
         text = self._bubble_text_lbl.text() or ""
@@ -2605,6 +2655,7 @@ class PetWindow(QWidget):
         self._bubble_timer.stop()
         self._bubble_custom_offset = None
         self._transient_bubble_size = None
+        self._sync_bubble_width = None
         self._speech_bubble.setVisible(False)
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
@@ -2679,8 +2730,11 @@ class PetWindow(QWidget):
         self._new_chat_btn.setEnabled(not busy)
         self._task_folder_btn.setEnabled(not busy)
         self._chat_clear_btn.setEnabled(not busy)
-        self._chat_input_panel.setEnabled(not busy)
+        self._chat_input_panel.setEnabled(not busy and not self._chat_readonly)
         self._chat_input_panel.setVisible(in_chat)
+        self._chat_input.setPlaceholderText(
+            "反重力实时同步中（只读）" if self._chat_readonly else "输入聊天内容或指令…"
+        )
         if not in_chat:
             return
 
@@ -2709,7 +2763,7 @@ class PetWindow(QWidget):
             "font-size: 9.5px; font-weight: bold; padding: 1px 7px; margin-left: 6px; }"
             f"QPushButton#ChatChannelBadge:hover {{ border-color: {color}; }}"
         )
-        thinking = normalize_thinking_level(self._settings.thinking_level)
+        thinking = resolve_effective_thinking_level(current, self._settings.thinking_level)
         self._chat_model_btn.setProperty("target_field", "gemini_model")
         self._chat_model_btn.setProperty("current_model_id", current)
         self._chat_model_btn.setProperty("current_thinking_level", thinking)
@@ -2845,6 +2899,11 @@ class PetWindow(QWidget):
                     lambda _checked=False, m=model_id, lv=lvl: self.select_chat_model(m, lv)
                 )
 
+        menu.addSeparator()
+        act_sync = menu.addAction(
+            "⏹ 停止反重力同步" if self._ag_mirror_active else "💬 同步反重力对话"
+        )
+        act_sync.triggered.connect(self.toggle_antigravity_sync)
         menu.addSeparator()
         act_refresh = menu.addAction("🔄 获取 / 刷新官方模型")
         act_refresh.setEnabled(not self._settings.chat_offline_mode)
@@ -3154,7 +3213,15 @@ class PetWindow(QWidget):
             return
         session_id = item.data(Qt.ItemDataRole.UserRole)
         if session_id == self._chat_archive.session_id:
+            if self._ag_mirror_active:
+                self.stop_antigravity_sync(persist=False)
             return
+        self._ag_mirror_active = False
+        self._ag_collector.reset()
+        self._ag_playback.clear()
+        self._ag_baseline = {}
+        if self._act_sync_chat is not None:
+            self._act_sync_chat.setText("💬 同步反重力对话")
         try:
             record = self._chat_archive.load(session_id)
         except (OSError, ValueError):
@@ -3164,29 +3231,29 @@ class PetWindow(QWidget):
         self._chat_archive.session_id = session_id
         self._chat_archive.task_folder = record.get("task_folder", "")
         self._chat.restore_conversation(record["messages"])
-        self._clear_chat_rows()
         self._chat_input.clear()
         self._last_chat_api_notice = ""
         self._archive_error = ""
+        self._chat_readonly = record.get("source") == "antigravity"
         # 浏览历史时保留全部卡片，不沿用旧版只显示最近 60 行的限制。
-        self._chat_messages_panel.setVisible(bool(record["messages"]))
-        self._bubble_text_lbl.setVisible(not record["messages"])
         if not record["messages"]:
             self._bubble_text_lbl.setText("任务文件夹已就绪，想聊什么呀喵？✦")
-        for message in record["messages"]:
-            sender = "你" if message["role"] == "user" else "Gemini 娘"
-            self._append_chat_turn(
-                role=message["role"], sender=sender, text=message["text"],
-                meta=f"{sender} · {message.get('time', '').replace('T', ' ')}",
-            )
+        self._render_chat_messages(record)
         self._update_chat_save_path()
-        self._relayout_stage_top()
+        self._sync_chat_controls()
         self._chat_input.setFocus()
 
     def _clear_chat_history(self) -> None:
         if self._waiting_chat_workers:
             return
         self._chat_archive.new_session()
+        self._chat_readonly = False
+        self._ag_mirror_active = False
+        self._ag_collector.reset()
+        self._ag_playback.clear()
+        self._ag_baseline = {}
+        if self._act_sync_chat is not None:
+            self._act_sync_chat.setText("💬 同步反重力对话")
         self._archive_error = ""
         self._last_chat_api_notice = ""
         self._clear_chat_rows()
@@ -3200,10 +3267,194 @@ class PetWindow(QWidget):
         self._bubble_text_lbl.setVisible(True)
         self._update_chat_save_path()
         self._refresh_chat_sessions()
+        self._sync_chat_controls()
         self._relayout_stage_top()
         self._chat_input.setFocus()
 
-    def show_bubble(self, message: str, duration_sec: float, force: bool = False) -> None:
+    # ==================== Antigravity 对话气泡播报 ====================
+
+    def toggle_antigravity_sync(self, _checked: bool = False) -> None:
+        AppLogger.info(
+            "ChatSync",
+            f"点击播报：active={self._ag_mirror_active}, "
+            f"bubble={self._speech_bubble.isVisible() if self._speech_bubble else 'n/a'}",
+        )
+        if self._ag_mirror_active:
+            self.stop_antigravity_sync()
+        else:
+            self.start_antigravity_sync()
+
+    def start_antigravity_sync(self, *, silent: bool = False) -> None:
+        """开启反重力对话播报：新消息直接显示在桌宠气泡里。
+
+        silent=True 用于启动时恢复上次的开关，不弹开启提示、不盖掉问候气泡。
+        """
+        try:
+            conversation = self._ag_sync_service.latest_conversation()
+            if conversation is None or not conversation.messages:
+                if not silent:
+                    self.show_bubble("没有找到可播报的反重力对话喵～", 3.5)
+                AppLogger.warn("ChatSync", "没有找到可播报的反重力对话")
+                return
+            self._ag_mirror_active = True
+            self._ag_collector.reset()
+            self._ag_collector.watch(conversation)
+            self._ag_playback.clear()
+            self._ag_last_shown = 0.0
+            self._ag_last_replace = 0.0
+            self._ag_dbg_ticks = 0
+            self._ag_dbg_last = time.monotonic()
+            # 首拉只记基线：已有的历史不重放，只播之后的新内容。
+            self._ag_baseline = self._ag_sync_state.counters()
+            self._settings.chat_sync_enabled = True
+            self._settings_service.save(self._settings)
+            if self._act_sync_chat is not None:
+                self._act_sync_chat.setText("⏹ 停止反重力播报")
+            if not silent:
+                self.show_bubble("反重力对话播报已开启喵～新消息会出现在这里", 4.0)
+            AppLogger.info(
+                "ChatSync",
+                f"开始播报：{conversation.source_id[:8]}, 基线={len(conversation.messages)}",
+            )
+        except Exception as exc:
+            self._ag_mirror_active = False
+            self._ag_collector.reset()
+            self._ag_playback.clear()
+            self._ag_baseline = {}
+            AppLogger.error("ChatSync", "启动反重力播报失败", exc)
+            if not silent:
+                self.show_bubble(f"反重力播报启动失败：{exc}", 5.0, force=True)
+
+    def stop_antigravity_sync(self, *, silent: bool = False, persist: bool = True) -> None:
+        """停止播报。persist=False 用于界面切换这类临时停止，不改用户偏好。"""
+        self._ag_mirror_active = False
+        self._ag_collector.reset()
+        self._ag_playback.clear()
+        self._ag_baseline = {}
+        self._ag_last_replace = 0.0
+        if persist:
+            self._settings.chat_sync_enabled = False
+            self._settings_service.save(self._settings)
+        if self._act_sync_chat is not None:
+            self._act_sync_chat.setText("💬 同步反重力对话")
+        if not silent:
+            self.show_bubble("已停止反重力播报喵～", 3.0)
+
+    def _auto_resume_antigravity_sync(self) -> None:
+        """启动时恢复上次的播报开关：静默开启，不覆盖问候气泡。"""
+        if self._ag_mirror_active or not self._settings.chat_sync_enabled:
+            return
+        self.start_antigravity_sync(silent=True)
+
+    def _refresh_antigravity_sync(self) -> None:
+        """十几拍一次的状态采集：读库 → 取差量 → 播队列。"""
+        if not self._ag_mirror_active:
+            return
+        self._ag_dbg_ticks += 1
+        now = time.monotonic()
+        if now - self._ag_dbg_last >= _SYNC_HEARTBEAT_SEC:
+            # 定时器一旦挂掉这里就断流，看日志能立刻分辨是没变化还是没在跑。
+            self._ag_dbg_last = now
+            AppLogger.info(
+                "ChatSync",
+                f"心跳 ticks={self._ag_dbg_ticks} 队列={len(self._ag_playback)} "
+                f"{self._ag_collector.stats}",
+            )
+        try:
+            self._ag_collector.poll()
+            self._consume_antigravity_changes()
+            self._play_antigravity_queue()
+        except Exception as exc:
+            AppLogger.error("ChatSync", "反重力播报刷新失败", exc)
+
+    def _consume_antigravity_changes(self) -> None:
+        """读状态差量：续写就地刷新，新消息进播放队列。"""
+        for name, data in self._ag_sync_state.take_since(self._ag_baseline):
+            if name == "status":
+                if data.get("switched"):
+                    self.show_bubble(f"✦ 已切换到新的反重力对话：{data.get('title', '')}", 3.0)
+                continue
+            items = (data.get("items") or []) if isinstance(data, dict) else []
+            if not items:
+                continue
+            if data.get("replace"):
+                newest = items[-1]
+                if self._ag_playback:
+                    # 队列末条就是这条消息，换成最新文本，保持播放顺序。
+                    self._ag_playback[-1] = newest
+                elif not self._is_chat_open:
+                    # 续写刷新走气泡；聊天面板开着时每条都追加系统行，会堆重复卡片。
+                    now = time.monotonic()
+                    if not self._ag_last_replace or now - self._ag_last_replace >= _SYNC_REPLACE_INTERVAL:
+                        self._ag_last_replace = now
+                        self._show_sync_event(newest)
+                continue
+            self._ag_playback.extend(items)
+            # 积压时丢最旧的，气泡追最新内容而不是慢慢补历史。
+            while len(self._ag_playback) > _SYNC_QUEUE_LIMIT:
+                self._ag_playback.popleft()
+
+    def _play_antigravity_queue(self) -> None:
+        """逐条播；你自己发的话不等节奏，立刻上气泡，其余按最小间隔排。"""
+        if not self._ag_playback:
+            return
+        now = time.monotonic()
+        head = self._ag_playback[0]
+        if (
+            head.role != "user"
+            and self._ag_last_shown
+            and now - self._ag_last_shown < _SYNC_MIN_INTERVAL
+        ):
+            return
+        self._ag_last_shown = now
+        event = self._ag_playback.popleft()
+        self._show_sync_event(event)
+        AppLogger.info("ChatSync", f"播报：{event.role}/{event.kind} {event.text[:24]}")
+
+    def _show_sync_event(self, event: SyncEvent) -> None:
+        text = " ".join(event.text.split())
+        if not text:
+            return
+        if event.kind == "thinking":
+            message = f"💭 {text}"
+        elif event.kind == "error":
+            message = f"⚠ {text}"
+        elif event.kind == "tool":
+            message = f"⚙ {text}"
+        elif event.role == "user":
+            message = f"你：{text}"
+        else:
+            message = text
+        # 伪实时下面板会连着刷，截太短就只能看到开头，放到 240 字。
+        if len(message) > 240:
+            message = message[:240] + "…"
+        duration = max(3.5, min(9.0, len(message) / 28.0))
+        # 播报期间锁一个固定宽度：文本每长一点都按最长行重算宽度，视觉上会一直抖。
+        self._sync_bubble_width = 320
+        self.show_bubble(message, duration, force=self._is_chat_open, from_sync=True)
+        self._sync_guard_until = time.monotonic() + duration
+
+    def _render_chat_messages(self, record: dict) -> None:
+        self._clear_chat_rows()
+        self._chat_messages_panel.setVisible(bool(record["messages"]))
+        self._bubble_text_lbl.setVisible(not record["messages"])
+        for message in record["messages"]:
+            sender = "你" if message["role"] == "user" else "Gemini 娘"
+            self._append_chat_turn(
+                role=message["role"], sender=sender, text=message["text"],
+                meta=f"{sender} · {message.get('time', '').replace('T', ' ')}",
+            )
+        self._relayout_stage_top()
+
+    def show_bubble(
+        self, message: str, duration_sec: float, force: bool = False, from_sync: bool = False
+    ) -> None:
+        if not from_sync:
+            # 闲聊/宠物自己的回复恢复自适应宽度，别跟着同步播报的锁宽走。
+            self._sync_bubble_width = None
+        if not from_sync and not force and time.monotonic() < self._sync_guard_until:
+            # 正在播反重力对话，闲聊别插话把内容顶掉；强制气泡（宠物自己的回复）照常显示。
+            return
         if not force and not self._settings.show_speech_bubble and not self._is_chat_open:
             return
         if not self.isVisible():
@@ -3327,6 +3578,9 @@ class PetWindow(QWidget):
         self._relayout_stage_top()
 
     def _submit_chat(self) -> None:
+        if self._chat_readonly:
+            self._chat_save_status.setText("反重力实时同步中，输入已禁用喵")
+            return
         text = self._chat_input.text().strip()
         if not text or self._waiting_chat_workers:
             return
@@ -3338,7 +3592,7 @@ class PetWindow(QWidget):
         char_name = (self._bubble_char_name_lbl.text() or "").strip() or "Gemini 娘"
         provider = self._chat.resolve_chat_provider(self._settings)
         _, _, _, active_model = self._resolve_active_chat_channel_and_models()
-        thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
+        thinking_lvl = resolve_effective_thinking_level(active_model, self._settings.thinking_level)
         if provider:
             shown_model = active_model
             disp_model = format_model_display_name(shown_model)
