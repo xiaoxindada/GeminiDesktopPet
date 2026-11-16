@@ -57,7 +57,7 @@ class TrayIconService(QObject):
         self._menu.addAction(greet_act)
 
         self._add_action("📊 查看反重力额度 (Antigravity)", self.open_quota_requested.emit)
-        self._add_action("💬 打开宠物对话框 / 问问题", self.open_chat_requested.emit)
+        self._add_action("💬 聊天模式 / 选模型对话", self.open_chat_requested.emit)
         self._add_action("♥ 摸摸猫耳", self.pat_requested.emit)
 
         self._style_action = self._add_action(

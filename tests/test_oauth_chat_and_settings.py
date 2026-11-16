@@ -73,10 +73,15 @@ class _DummyResp:
 
 
 def _isolated_env(home_dir: str, appdata_dir: str) -> dict[str, str]:
+    clean_path = os.pathsep.join(
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if "agy" not in p.lower()
+    )
     return {
         "USERPROFILE": home_dir,
         "HOME": home_dir,
         "APPDATA": appdata_dir,
+        "LOCALAPPDATA": appdata_dir,
+        "PATH": clean_path,
         "GOOGLE_APPLICATION_CREDENTIALS": "",
         "CLOUDSDK_CONFIG": "",
         "GEMINI_DESKTOP_PET_OAUTH_CLIENT_ID": "",
@@ -572,6 +577,7 @@ class TestOAuthAndChat(unittest.TestCase):
                 ) as mock_gem:
                     mock_ag.return_value = MagicMock(is_running=False)
                     mock_gem.return_value = MagicMock(is_running=False)
+                    GeminiChatService._api_models_cache.clear()
                     win = SettingsWindow(
                         settings=loaded,
                         settings_service=svc,
@@ -581,11 +587,21 @@ class TestOAuthAndChat(unittest.TestCase):
                     )
                     try:
                         self.assertIn("demo@example.com", win._oauth_status_lbl.text())
-                        self.assertEqual(win._oauth_model_combo.currentText(), "gemini-4-argon")
-                        win._oauth_model_combo.setEditText("")
-                        self.assertEqual(win._oauth_model_combo.currentText(), "")
-                        win._oauth_model_combo.setEditText("gemini-3.8-flash")
+                        self.assertEqual(win._model_combo.currentText(), "gemini-4-argon")
+                        # 未写死静态清单，仅展示动态获取的可用模型
+                        combo_items = [win._model_combo.itemText(i) for i in range(win._model_combo.count())]
+                        self.assertEqual(combo_items, ["gemini-3.8-flash", "gemini-4-argon"])
+                        win._model_combo.setEditText("")
+                        self.assertEqual(win._model_combo.currentText(), "")
+                        win._model_combo.setEditText("gemini-3.8-flash")
+                        # 未点击「确认修改」前不提交实时配置
+                        self.assertEqual(loaded.oauth_model, "gemini-4-argon")
+                        self.assertTrue(win.has_unsaved_changes())
+                        win._confirm_btn.click()
+                        app.processEvents()
                         self.assertEqual(loaded.oauth_model, "gemini-3.8-flash")
+                        self.assertIn("保存成功", win._save_feedback_lbl.text())
+                        self.assertEqual(svc.load().oauth_model, "gemini-3.8-flash")
                         win._on_oauth_logout_clicked()
                         app.processEvents()
                         self.assertFalse(oauth_svc.is_logged_in())
@@ -627,6 +643,402 @@ class TestOAuthAndChat(unittest.TestCase):
                 finally:
                     dlg.deleteLater()
                     app.processEvents()
+
+    def test_api_key_fetch_models_settings_manual_confirm_and_save_feedback(self) -> None:
+        app = self._ensure_app()
+        fake_models = [
+            MagicMock(name="models/gemini-2.5-pro", supported_actions=["generateContent"]),
+            MagicMock(name="models/gemini-embedding-001", supported_actions=["embedContent"]),
+            MagicMock(name="models/gemini-2.5-flash", supported_actions=["generateContent", "countTokens"]),
+            MagicMock(name="models/imagen-3.0-generate-002", supported_actions=["predict"]),
+            MagicMock(name="models/gemini-3-flash-preview", supported_actions=["createInteraction"]),
+        ]
+        # MagicMock(name=...) sets the mock repr name, so assign `.name` explicitly as model field
+        for obj, model_name in zip(
+            fake_models,
+            [
+                "models/gemini-2.5-pro",
+                "models/gemini-embedding-001",
+                "models/gemini-2.5-flash",
+                "models/imagen-3.0-generate-002",
+                "models/gemini-3-flash-preview",
+            ],
+        ):
+            obj.name = model_name
+
+        fake_client = MagicMock()
+        fake_client.__enter__.return_value = fake_client
+        fake_client.__exit__.return_value = False
+        fake_client.models.list.return_value = fake_models
+
+        GeminiChatService._api_models_cache.clear()
+        with patch("google.genai.Client", return_value=fake_client):
+            fetched = GeminiChatService.fetch_api_key_models("AIza-test-models")
+        self.assertEqual(fetched, ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"])
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as tmp_home,
+            tempfile.TemporaryDirectory() as tmp_appdata,
+        ):
+            with patch.dict(os.environ, _isolated_env(tmp_home, tmp_appdata)):
+                svc = SettingsService(tmp)
+                settings = PetSettings(chat_auth_mode=ChatAuthMode.API_KEY, gemini_api_key="AIza-test-models")
+                svc.save(settings)
+                follow_svc = AppFollowService(svc)
+                oauth_svc = OAuthAuthService(tmp)
+                applied_calls = 0
+
+                def on_applied() -> None:
+                    nonlocal applied_calls
+                    applied_calls += 1
+
+                with patch("views.settings_window.FollowedAppProbe.sample_antigravity_activity") as mock_ag, patch(
+                    "views.settings_window.FollowedAppProbe.sample_gemini_activity"
+                ) as mock_gem:
+                    mock_ag.return_value = MagicMock(is_running=False)
+                    mock_gem.return_value = MagicMock(is_running=False)
+                    GeminiChatService._api_models_cache.clear()
+                    win = SettingsWindow(
+                        settings=settings,
+                        settings_service=svc,
+                        app_follow_service=follow_svc,
+                        on_settings_applied=on_applied,
+                        oauth_service=oauth_svc,
+                    )
+                    try:
+                        # 获取前不写死大模型清单，仅显示当前配置的默认模型
+                        self.assertEqual(win._model_combo.currentText(), "gemini-2.5-flash")
+                        self.assertEqual(
+                            [win._model_combo.itemText(i) for i in range(win._model_combo.count())],
+                            ["gemini-2.5-flash"],
+                        )
+                        # 验证 对话模型 / Gemini API Key / 思考强度 三行均采用统一水平标签布局
+                        self.assertIsNotNone(win._model_combo.parentWidget())
+                        # 模拟获取官方 API Key 模型结果并填充下拉列表
+                        win._on_models_refreshed("api_key", fetched, "")
+                        combo_items = [win._model_combo.itemText(i) for i in range(win._model_combo.count())]
+                        self.assertIn("gemini-2.5-pro", combo_items)
+                        self.assertIn("gemini-3-flash-preview", combo_items)
+                        self.assertIn("已获取 3 个官方可用模型", win._api_models_hint_lbl.text())
+
+                        # 修改草稿后、未点确认前：既不触发 on_applied 也不写盘，可点击还原修改恢复
+                        win._model_combo.setEditText("gemini-2.5-pro")
+                        app.processEvents()
+                        self.assertEqual(settings.gemini_model, "gemini-2.5-flash")
+                        self.assertEqual(applied_calls, 0)
+                        self.assertTrue(win.has_unsaved_changes())
+                        win._discard_btn.click()
+                        app.processEvents()
+                        self.assertFalse(win.has_unsaved_changes())
+                        self.assertEqual(win._model_combo.currentText(), "gemini-2.5-flash")
+
+                        # 再次修改并点击确认修改 -> 写盘并显示保存成功
+                        win._model_combo.setEditText("gemini-2.5-pro")
+                        win._confirm_btn.click()
+                        app.processEvents()
+                        self.assertEqual(settings.gemini_model, "gemini-2.5-pro")
+                        self.assertEqual(svc.load().gemini_model, "gemini-2.5-pro")
+                        self.assertEqual(applied_calls, 1)
+                        self.assertIn("保存成功", win._save_feedback_lbl.text())
+
+                        # 当磁盘保存失败时，应回滚运行态改动并明确提示保存失败
+                        win._model_combo.setEditText("gemini-3-flash-preview")
+                        with patch.object(svc, "save", side_effect=PermissionError("只读目录")):
+                            win._confirm_btn.click()
+                            app.processEvents()
+                        self.assertEqual(settings.gemini_model, "gemini-2.5-pro")
+                        self.assertTrue(win.has_unsaved_changes())
+                        self.assertIn("保存失败", win._save_feedback_lbl.text())
+                        self.assertIn("只读目录", win._save_feedback_lbl.text())
+                    finally:
+                        win.close()
+                        win.deleteLater()
+                        app.processEvents()
+
+    def test_pet_window_standard_chat_mode_transcript_and_model_switch(self) -> None:
+        import threading
+        from PySide6.QtWidgets import QLabel
+        from services.sound_service import SoundService
+        from services.sprite_manager import SpriteManager
+        from services.system_monitor_service import SystemMonitorService
+        from views.pet_window import PetWindow
+
+        app = self._ensure_app()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as tmp_home,
+            tempfile.TemporaryDirectory() as tmp_appdata,
+        ):
+            with patch.dict(os.environ, _isolated_env(tmp_home, tmp_appdata)):
+                GeminiChatService.clear_agy_models_cache()
+                GeminiChatService._api_models_cache.clear()
+                svc = SettingsService(tmp)
+                oauth_svc = OAuthAuthService(tmp)
+                oauth_svc.save_session(
+                    OAuthSession(
+                        email="chat@example.com",
+                        access_token="acc",
+                        refresh_token="1//rt",
+                        expiry_timestamp=time.time() + 3600,
+                        available_models=[
+                            "gemini-2.5-flash",
+                            "gemini-4-argon",
+                            "gemini-4-hydrogen",
+                            "gemini-3.8-flash",
+                            "gemma-4-31b-it",
+                        ],
+                        client_id="cid",
+                        auth_source="oauth_login",
+                    )
+                )
+                settings = PetSettings(
+                    chat_auth_mode=ChatAuthMode.AUTO,
+                    oauth_model="gemini-2.5-flash",
+                    auto_walk=False,
+                    last_left=400.0,
+                    last_top=360.0,
+                )
+                svc.save(settings)
+                chat = GeminiChatService(oauth_service=oauth_svc)
+                pet = PetWindow(
+                    settings,
+                    svc,
+                    SpriteManager(),
+                    SoundService(),
+                    SystemMonitorService(),
+                    chat,
+                )
+                try:
+                    pet.show()
+                    pet.open_chat_dialog()
+                    app.processEvents()
+
+                    self.assertEqual(pet._chat_channel_badge.text(), "OAuth")
+                    self.assertIn("Gemini 2.5 Flash", pet._chat_model_btn.text())
+                    self.assertIn("自动", pet._chat_model_btn.text())
+
+                    # 验证级联模型菜单仅列动态获取的模型与思考强度，且不显示新/旧标记
+                    menu = pet._build_chat_model_menu()
+                    submenus = {act.menu().property("model_id"): act.menu() for act in menu.actions() if act.menu()}
+                    self.assertIn("gemini-4-argon", submenus)
+                    self.assertIn("gemini-4-hydrogen", submenus)
+                    self.assertIn("gemini-3.8-flash", submenus)
+                    self.assertIn("gemma-4-31b-it", submenus)
+                    for act in menu.actions():
+                        if act.menu():
+                            self.assertNotIn("新", act.text())
+                            self.assertNotIn("旧", act.text())
+
+                    # 点击 Gemini 4 Hydrogen -> Extra 子菜单项切换模型与思考强度
+                    hydrogen_acts = submenus["gemini-4-hydrogen"].actions()
+                    extra_act = next(a for a in hydrogen_acts if a.data() == ("gemini-4-hydrogen", "xhigh"))
+                    self.assertEqual(extra_act.text(), "Extra")
+                    extra_act.trigger()
+                    app.processEvents()
+                    self.assertEqual(settings.oauth_model, "gemini-4-hydrogen")
+                    self.assertEqual(settings.thinking_level, "xhigh")
+                    self.assertEqual(svc.load().oauth_model, "gemini-4-hydrogen")
+                    self.assertEqual(svc.load().thinking_level, "xhigh")
+                    self.assertIn("Gemini 4 Hydrogen", pet._chat_model_btn.text())
+                    self.assertIn("Extra", pet._chat_model_btn.text())
+
+                    # 切换聊天窗口大小预设（小/中/大）
+                    orig_size = pet._speech_bubble.size()
+                    pet._chat_size_btn.click()
+                    app.processEvents()
+                    mid_size = pet._speech_bubble.size()
+                    self.assertGreater(mid_size.width(), orig_size.width())
+                    self.assertEqual(svc.load().chat_width, mid_size.width())
+                    pet._chat_size_btn.click()
+                    app.processEvents()
+                    self.assertGreater(pet._speech_bubble.width(), mid_size.width())
+                    pet._chat_size_btn.click()
+                    app.processEvents()
+                    self.assertEqual(pet._speech_bubble.width(), 360)
+
+                    # 发送包含“状态/时间”等词的真实请求：不得被本地关键字截胡；等待期间立绘保持“思考中”
+                    seen_calls: list[tuple[str, str, str]] = []
+                    gate = threading.Event()
+
+                    def fake_oauth_chat(prompt: str, model: str, thinking_level: str = "auto") -> str:
+                        seen_calls.append((prompt, model, thinking_level))
+                        if len(seen_calls) == 1:
+                            gate.wait(timeout=2.0)
+                            return "第一轮回复：已收到你的状态与时间分析请求喵！"
+                        return "第二轮回复：已切换为 Argon Medium！"
+
+                    with patch.object(chat, "_call_oauth_chat", side_effect=fake_oauth_chat):
+                        pet._chat_input.setText("你好 Gemini 娘，分析一下这个状态机的时间复杂度")
+                        pet._submit_chat()
+                        app.processEvents()
+
+                        # 模型回复期间必须切换并保持在“思考中”形象（即使发生摸头动作也不被打断）
+                        self.assertEqual(pet._override_pose, PetState.THINKING)
+                        pet.trigger_pat()
+                        app.processEvents()
+                        self.assertEqual(pet._override_pose, PetState.THINKING)
+
+                        gate.set()
+                        deadline = time.time() + 3.0
+                        while pet._active_chat_workers and time.time() < deadline:
+                            app.processEvents()
+                            time.sleep(0.02)
+                        app.processEvents()
+
+                        self.assertEqual(pet._override_pose, PetState.HAPPY)
+                        self.assertTrue(pet._speech_bubble.isVisible())
+                        self.assertTrue(pet._chat_messages_panel.isVisible())
+                        all_texts = [lbl.text() for lbl in pet._chat_messages_panel.findChildren(QLabel)]
+                        self.assertTrue(any("分析一下这个状态机的时间复杂度" in t for t in all_texts))
+                        self.assertTrue(any("你 · " in t for t in all_texts))
+                        self.assertTrue(any("第一轮回复：已收到你的状态与时间分析请求喵！" in t for t in all_texts))
+                        self.assertEqual(
+                            seen_calls[0],
+                            ("你好 Gemini 娘，分析一下这个状态机的时间复杂度", "gemini-4-hydrogen", "xhigh"),
+                        )
+
+                        # 切换为 Gemini 4 Argon + Medium 再发送第二轮对话
+                        pet.select_chat_model("gemini-4-argon", "medium")
+                        app.processEvents()
+                        self.assertEqual(settings.oauth_model, "gemini-4-argon")
+                        self.assertEqual(settings.thinking_level, "medium")
+
+                        pet._chat_input.setText("再聊一句吧")
+                        pet._submit_chat()
+                        deadline = time.time() + 3.0
+                        while pet._active_chat_workers and time.time() < deadline:
+                            app.processEvents()
+                            time.sleep(0.02)
+                        app.processEvents()
+
+                        all_texts_after = [lbl.text() for lbl in pet._chat_messages_panel.findChildren(QLabel)]
+                        self.assertTrue(any("分析一下这个状态机的时间复杂度" in t for t in all_texts_after))
+                        self.assertTrue(any("第一轮回复：已收到你的状态与时间分析请求喵！" in t for t in all_texts_after))
+                        self.assertTrue(any("再聊一句吧" in t for t in all_texts_after))
+                        self.assertTrue(any("第二轮回复：已切换为 Argon Medium！" in t for t in all_texts_after))
+                        self.assertEqual(seen_calls[1], ("再聊一句吧", "gemini-4-argon", "medium"))
+
+                    # 点击清空按钮清理聊天窗口并重置上下文
+                    pet._chat_clear_btn.click()
+                    app.processEvents()
+                    self.assertEqual(len(pet._chat_message_rows), 0)
+                    self.assertFalse(pet._chat_messages_panel.isVisible())
+                    self.assertTrue(pet._bubble_text_lbl.isVisible())
+                finally:
+                    gate.set()
+                    for w in list(pet._active_chat_workers):
+                        w.wait(1000)
+                    pet.close()
+                    pet.deleteLater()
+                    app.processEvents()
+
+    def test_agy_cli_chat_discovery_and_thinking_level_fallback(self) -> None:
+        from models import format_model_display_name, get_supported_thinking_levels
+
+        self.assertEqual(format_model_display_name("gemini-4-hydrogen"), "Gemini 4 Hydrogen")
+        self.assertEqual(format_model_display_name("gemini-pro-orchestrator-g1-pro"), "Orchestrator (Argon)")
+        self.assertEqual(format_model_display_name("claude-opus-5-5"), "Claude Opus 5.5")
+        self.assertEqual(get_supported_thinking_levels("gemini-4-argon"), ("auto", "low", "medium", "high"))
+        self.assertIn("xhigh", get_supported_thinking_levels("gemini-4-hydrogen"))
+        self.assertIn("off", get_supported_thinking_levels("gemini-2.5-flash"))
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as tmp_home,
+            tempfile.TemporaryDirectory() as tmp_appdata,
+        ):
+            with patch.dict(os.environ, _isolated_env(tmp_home, tmp_appdata)):
+                GeminiChatService.clear_agy_models_cache()
+                fake_agy = Path(tmp_appdata) / "agy" / "bin" / "agy.exe"
+                fake_agy.parent.mkdir(parents=True, exist_ok=True)
+                fake_agy.write_text("", encoding="utf-8")
+
+                class _ModelsProc:
+                    returncode = 0
+
+                    def communicate(self, timeout: float = 15.0):
+                        return (
+                            "gemini-4-argon-medium\tGemini 4 Argon (Medium)\n"
+                            "gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\n"
+                            "gemini-pro-orchestrator-g1-pro\tOrchestrator (Argon)\n"
+                            "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n",
+                            "",
+                        )
+
+                with patch("services.gemini_chat_service.subprocess.Popen", return_value=_ModelsProc()):
+                    discovered = GeminiChatService.discover_agy_models(force_refresh=True)
+                self.assertEqual(
+                    discovered,
+                    ["gemini-4-argon", "gemini-4-hydrogen", "gemini-pro-orchestrator-g1-pro", "gemini-3.8-flash"],
+                )
+
+                oauth_svc = OAuthAuthService(tmp)
+                chat = GeminiChatService(oauth_service=oauth_svc)
+                settings = PetSettings(
+                    chat_auth_mode=ChatAuthMode.AUTO,
+                    oauth_model="gemini-2.5-flash",
+                    thinking_level="medium",
+                )
+                self.assertEqual(chat.resolve_chat_provider(settings), "agy")
+
+                captured_cmds: list[list[str]] = []
+
+                class _ChatProc:
+                    def __init__(self, out_json: str) -> None:
+                        self.returncode = 0
+                        self._out = out_json
+
+                    def communicate(self, timeout: float = 65.0):
+                        return self._out, ""
+
+                def _fake_chat_popen(cmd, **kwargs):
+                    captured_cmds.append(list(cmd))
+                    if os.name == "nt":
+                        self.assertEqual(kwargs.get("creationflags"), 0x08000000)
+                    return _ChatProc(
+                        json.dumps(
+                            {
+                                "conversation_id": "conv-123",
+                                "status": "SUCCESS",
+                                "response": "实时来自 Antigravity 模型回复✦",
+                            }
+                        )
+                    )
+
+                with patch("services.gemini_chat_service.subprocess.Popen", side_effect=_fake_chat_popen):
+                    reply1 = chat.ask("你好，请分析现在的状态和复杂度", settings)
+                    self.assertEqual(reply1.text, "实时来自 Antigravity 模型回复✦")
+                    self.assertEqual(reply1.suggested_state, PetState.HAPPY)
+                    self.assertIn("gemini-3.8-flash", captured_cmds[0])
+                    self.assertIn("--effort", captured_cmds[0])
+                    self.assertIn("medium", captured_cmds[0])
+
+                    chat.ask("下一句继续对话", settings)
+                    self.assertIn("--conversation", captured_cmds[1])
+                    self.assertIn("conv-123", captured_cmds[1])
+
+        # v1internal payload 注入 thinkingConfig 与 XHIGH -> HIGH 降级重试
+        payload_xhigh = GeminiChatService._build_v1internal_payload(
+            project_id="p1",
+            session_id="s1",
+            model="gemini-4-hydrogen",
+            contents=[{"role": "user", "parts": [{"text": "hi"}]}],
+            system_prompt="sys",
+            thinking_level="xhigh",
+        )
+        gen_cfg = payload_xhigh["request"]["generationConfig"]
+        self.assertEqual(gen_cfg["thinkingConfig"], {"thinkingLevel": "XHIGH"})
+        self.assertTrue(GeminiChatService._downgrade_rest_thinking_config(gen_cfg, "Unsupported thinking level XHIGH"))
+        self.assertEqual(gen_cfg["thinkingConfig"], {"thinkingLevel": "HIGH"})
+        self.assertTrue(GeminiChatService._downgrade_rest_thinking_config(gen_cfg, "thinkingConfig invalid"))
+        self.assertNotIn("thinkingConfig", gen_cfg)
+
+        # Gemini 2.5 off 模式映射为 thinkingBudget: 0
+        self.assertEqual(
+            GeminiChatService._build_rest_thinking_config("gemini-2.5-flash", "off"),
+            {"thinkingBudget": 0},
+        )
 
 
 if __name__ == "__main__":

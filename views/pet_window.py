@@ -51,12 +51,22 @@ from PySide6.QtWidgets import (
 
 from models import (
     COSTUME_OPTIONS,
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_OAUTH_MODEL,
+    DEFAULT_THINKING_LEVEL,
     CharacterLore,
     CharacterProfile,
+    ChatAuthMode,
     DockSide,
     PetSettings,
     PetState,
     PetStyleMode,
+    format_model_display_name,
+    format_thinking_level_label,
+    get_supported_thinking_levels,
+    normalize_gemini_model,
+    normalize_oauth_model,
+    normalize_thinking_level,
 )
 from services import (
     AppLogger,
@@ -68,6 +78,7 @@ from services import (
     SystemMetrics,
     SystemMonitorService,
 )
+from services.antigravity_quota_service import AntigravityQuotaService
 from services.sprite_manager import SpriteManager
 from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
@@ -136,7 +147,7 @@ class _Particle:
 class _ChatWorker(QThread):
     """Background worker calling GeminiChatService without freezing the 60fps pet loop."""
 
-    reply_ready = Signal(object)
+    reply_ready = Signal(object, object, object)
 
     def __init__(
         self,
@@ -144,6 +155,7 @@ class _ChatWorker(QThread):
         user_input: str,
         settings: PetSettings,
         metrics: SystemMetrics,
+        target_info: Optional[tuple] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -151,6 +163,7 @@ class _ChatWorker(QThread):
         self._user_input = user_input
         self._settings = settings
         self._metrics = metrics
+        self._target_info = target_info
 
     def run(self) -> None:
         try:
@@ -160,7 +173,39 @@ class _ChatWorker(QThread):
                 text=f"Gemini 刚才走神了喵：{ex}",
                 suggested_state=PetState.OOPS,
             )
-        self.reply_ready.emit(reply)
+        self.reply_ready.emit(reply, self._target_info, self)
+
+
+class _ChatModelsDiscoveryWorker(QThread):
+    """后台刷新聊天模式可选的官方实时模型列表，避免阻塞桌面宠动画循环。"""
+
+    completed = Signal(str, object, str)
+
+    def __init__(
+        self,
+        channel: str,
+        chat: GeminiChatService,
+        settings: PetSettings,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._channel = channel
+        self._chat = chat
+        self._settings = settings
+
+    def run(self) -> None:
+        try:
+            if self._channel == "oauth" and self._chat.oauth_service is not None:
+                models = self._chat.oauth_service.refresh_models_for_current_session()
+            elif self._channel == "agy":
+                models = GeminiChatService.discover_agy_models(force_refresh=True)
+            elif self._channel == "api_key":
+                models = GeminiChatService.fetch_api_key_models(self._settings.gemini_api_key)
+            else:
+                models = []
+            self.completed.emit(self._channel, models, "")
+        except Exception as exc:
+            self.completed.emit(self._channel, [], str(exc))
 
 
 class _PetStageCanvas(QWidget):
@@ -481,6 +526,10 @@ class PetWindow(QWidget):
         self._first_shown = False
         self._closing_handled = False
         self._active_chat_workers: list[_ChatWorker] = []
+        self._waiting_chat_workers: set[_ChatWorker] = set()
+        self._chat_models_discovery_worker: Optional[_ChatModelsDiscoveryWorker] = None
+        self._chat_message_rows: list[QWidget] = []
+        self._chat_model_menu: Optional[QMenu] = None
 
         # Build UI layers, menu, and timers
         self._ui_ready = False
@@ -537,7 +586,38 @@ class PetWindow(QWidget):
             "color: #F472B6; font-size: 10.5px; background: transparent;"
         )
         header_row.addWidget(self._bond_badge_lbl)
+
+        self._chat_channel_badge = QLabel("离线")
+        self._chat_channel_badge.setStyleSheet(
+            "background-color: rgba(251, 191, 36, 36); color: #FDE68A; "
+            "border: 1px solid rgba(251, 191, 36, 90); border-radius: 7px; "
+            "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
+        )
+        self._chat_channel_badge.setVisible(False)
+        header_row.addWidget(self._chat_channel_badge)
         header_row.addStretch(1)
+
+        self._chat_clear_btn = QPushButton("🗑")
+        self._chat_clear_btn.setFixedSize(18, 18)
+        self._chat_clear_btn.setToolTip("清空聊天记录与对话上下文")
+        self._chat_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chat_clear_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                color: #9B92C7;
+                border: none;
+                font-size: 11px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                color: #FFFFFF;
+            }
+            """
+        )
+        self._chat_clear_btn.clicked.connect(self._clear_chat_history)
+        self._chat_clear_btn.setVisible(False)
+        header_row.addWidget(self._chat_clear_btn)
 
         self._bubble_settings_btn = QPushButton("⚙")
         self._bubble_settings_btn.setFixedSize(18, 18)
@@ -582,6 +662,70 @@ class PetWindow(QWidget):
         header_row.addWidget(close_bubble_btn)
         self._bubble_layout.addWidget(self._bubble_header_widget)
 
+        # Compact Chat Mode Model & Size Bar
+        self._chat_toolbar = QWidget(self._speech_bubble)
+        self._chat_toolbar.setStyleSheet("background: transparent;")
+        self._chat_toolbar.setCursor(Qt.CursorShape.ArrowCursor)
+        toolbar_row = QHBoxLayout(self._chat_toolbar)
+        toolbar_row.setContentsMargins(0, 0, 0, 0)
+        toolbar_row.setSpacing(6)
+
+        self._chat_model_btn = QPushButton("Gemini 2.5 Flash · 自动   ▾", self._chat_toolbar)
+        self._chat_model_btn.setObjectName("ChatModelBtn")
+        self._chat_model_btn.setToolTip("点击切换当前对话模型与思考强度")
+        self._chat_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chat_model_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._chat_model_btn.setStyleSheet(
+            """
+            QPushButton#ChatModelBtn {
+                background-color: #16112C;
+                color: #F4F1FF;
+                border: 1px solid #4E3F8E;
+                border-radius: 7px;
+                padding: 3px 9px;
+                font-size: 11px;
+                text-align: left;
+            }
+            QPushButton#ChatModelBtn:hover {
+                border-color: #7C5CFF;
+                background-color: #1F183D;
+            }
+            QPushButton#ChatModelBtn:pressed {
+                background-color: #2B2154;
+            }
+            """
+        )
+        self._chat_model_btn.clicked.connect(self._open_chat_model_menu)
+        toolbar_row.addWidget(self._chat_model_btn, 1)
+
+        self._chat_size_btn = QPushButton("📐 小", self._chat_toolbar)
+        self._chat_size_btn.setObjectName("ChatSizeBtn")
+        self._chat_size_btn.setToolTip("切换聊天窗口大小：小 / 中 / 大（也可拖拽边缘自由缩放）")
+        self._chat_size_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chat_size_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._chat_size_btn.setStyleSheet(
+            """
+            QPushButton#ChatSizeBtn {
+                background-color: #16112C;
+                color: #D8CCFF;
+                border: 1px solid #4E3F8E;
+                border-radius: 7px;
+                padding: 3px 8px;
+                font-size: 10.5px;
+            }
+            QPushButton#ChatSizeBtn:hover {
+                border-color: #7C5CFF;
+                color: #FFFFFF;
+                background-color: #1F183D;
+            }
+            """
+        )
+        self._chat_size_btn.clicked.connect(self.cycle_chat_window_size)
+        toolbar_row.addWidget(self._chat_size_btn)
+
+        self._chat_toolbar.setVisible(False)
+        self._bubble_layout.addWidget(self._chat_toolbar)
+
         self._bubble_scroll = QScrollArea(self._speech_bubble)
         self._bubble_scroll.setWidgetResizable(True)
         self._bubble_scroll.setMinimumHeight(24)
@@ -617,15 +761,33 @@ class PetWindow(QWidget):
             """
         )
 
+        self._bubble_content = QWidget()
+        self._bubble_content.setStyleSheet("background: transparent;")
+        self._bubble_content_layout = QVBoxLayout(self._bubble_content)
+        self._bubble_content_layout.setContentsMargins(0, 0, 0, 0)
+        self._bubble_content_layout.setSpacing(6)
+
         self._bubble_text_lbl = QLabel("喵～Gemini 上线！")
         self._bubble_text_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._bubble_text_lbl.setWordWrap(True)
         self._bubble_text_lbl.setCursor(Qt.CursorShape.ArrowCursor)
+        self._bubble_text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._bubble_text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._bubble_text_lbl.setStyleSheet(
             "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
         )
-        self._bubble_scroll.setWidget(self._bubble_text_lbl)
+        self._bubble_content_layout.addWidget(self._bubble_text_lbl)
+
+        self._chat_messages_panel = QWidget(self._bubble_content)
+        self._chat_messages_panel.setStyleSheet("background: transparent;")
+        self._chat_messages_layout = QVBoxLayout(self._chat_messages_panel)
+        self._chat_messages_layout.setContentsMargins(0, 2, 4, 2)
+        self._chat_messages_layout.setSpacing(8)
+        self._chat_messages_panel.setVisible(False)
+        self._bubble_content_layout.addWidget(self._chat_messages_panel)
+        self._bubble_content_layout.addStretch(1)
+
+        self._bubble_scroll.setWidget(self._bubble_content)
         self._bubble_layout.addWidget(self._bubble_scroll, 1)
 
         # Inline Chat Input Panel
@@ -638,7 +800,7 @@ class PetWindow(QWidget):
 
         self._chat_input = QLineEdit(self._chat_input_panel)
         self._chat_input.setMinimumWidth(140)
-        self._chat_input.setPlaceholderText("想问什么或打个指令试试…")
+        self._chat_input.setPlaceholderText("输入聊天内容或指令…")
         self._chat_input.setStyleSheet(
             """
             QLineEdit {
@@ -736,7 +898,7 @@ class PetWindow(QWidget):
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(4)
         row2.addStretch(1)
-        row2.addWidget(make_pill("💬 对话", "打开对话输入", self._toggle_chat))
+        row2.addWidget(make_pill("💬 聊天模式", "打开 AI 聊天模式（支持多轮对话与模型选择）", self._toggle_chat))
         self._quick_float_btn = make_pill("✨ 悬浮", "切换反重力悬浮", self._toggle_anti_gravity)
         row2.addWidget(self._quick_float_btn)
         row2.addWidget(make_pill("📖 档案", "查看角色设定与三视图", self.open_profile_requested.emit))
@@ -769,7 +931,7 @@ class PetWindow(QWidget):
         act_pat = menu.addAction("♥ 摸摸猫耳")
         act_pat.triggered.connect(self.trigger_pat)
 
-        act_chat = menu.addAction("💬 打开宠物对话框 / 问问题")
+        act_chat = menu.addAction("💬 聊天模式 / 选模型对话")
         act_chat.triggered.connect(self._toggle_chat)
 
         self._act_show_bubble = menu.addAction("💭 自动弹出对话气泡")
@@ -970,6 +1132,11 @@ class PetWindow(QWidget):
         for worker in list(self._active_chat_workers):
             if worker.isRunning():
                 worker.wait(400)
+        if (
+            self._chat_models_discovery_worker is not None
+            and self._chat_models_discovery_worker.isRunning()
+        ):
+            self._chat_models_discovery_worker.wait(400)
         if getattr(self, "_ui_ready", False):
             self._speech_bubble.close()
             self._speech_bubble.deleteLater()
@@ -979,8 +1146,7 @@ class PetWindow(QWidget):
         if getattr(self, "_ui_ready", False):
             self._is_chat_open = False
             self._is_forced_bubble_active = False
-            self._bubble_settings_btn.setVisible(False)
-            self._chat_input_panel.setVisible(False)
+            self._sync_chat_controls()
             self._hide_speech_bubble()
         super().hideEvent(event)
 
@@ -1173,6 +1339,7 @@ class PetWindow(QWidget):
         self._update_dock_alignment()
         self._apply_win32_extended_styles()
         self._refresh_sprite_visual()
+        self._sync_chat_controls()
         self._relayout_stage_top()
         self._stage_canvas.update()
 
@@ -1211,7 +1378,7 @@ class PetWindow(QWidget):
         self._relayout_stage_top()
 
     def _bubble_min_size(self) -> tuple[int, int]:
-        return (280, 136) if self._is_chat_open else (220, 86)
+        return (300, 160) if self._is_chat_open else (220, 86)
 
     def _bubble_max_size(self, center_x: float, center_y: float) -> tuple[int, int]:
         area = self._get_work_area(center_x, center_y)
@@ -1225,16 +1392,26 @@ class PetWindow(QWidget):
         margins = self._bubble_layout.contentsMargins()
         spacing = max(0, self._bubble_layout.spacing())
         label_w = max(140, target_w - margins.left() - margins.right() - 8)
-        text_h = (
-            self._bubble_text_lbl.heightForWidth(label_w)
-            if self._bubble_text_lbl.hasHeightForWidth()
-            else self._bubble_text_lbl.sizeHint().height()
-        )
-        min_scroll = 44 if self._is_chat_open else 26
-        scroll_h = min(max(min_scroll, text_h + 10), 260)
+        if self._is_chat_open and not self._chat_messages_panel.isHidden():
+            panel_h = (
+                self._chat_messages_panel.heightForWidth(label_w)
+                if self._chat_messages_panel.hasHeightForWidth()
+                else self._chat_messages_panel.sizeHint().height()
+            )
+            scroll_h = min(max(130, panel_h + 14), 320)
+        else:
+            text_h = (
+                self._bubble_text_lbl.heightForWidth(label_w)
+                if self._bubble_text_lbl.hasHeightForWidth()
+                else self._bubble_text_lbl.sizeHint().height()
+            )
+            min_scroll = 56 if self._is_chat_open else 26
+            scroll_h = min(max(min_scroll, text_h + 12), 260)
         header_h = max(18, self._bubble_header_widget.sizeHint().height())
         chrome_h = margins.top() + margins.bottom() + header_h + spacing
-        if self._chat_input_panel.isVisible():
+        if not self._chat_toolbar.isHidden():
+            chrome_h += max(24, self._chat_toolbar.sizeHint().height()) + spacing
+        if not self._chat_input_panel.isHidden():
             chrome_h += max(30, self._chat_input_panel.sizeHint().height()) + spacing
         return max(min_h, min(max_h, chrome_h + scroll_h))
 
@@ -1247,7 +1424,7 @@ class PetWindow(QWidget):
             target_w = (
                 int(self._settings.chat_width)
                 if self._settings.chat_width is not None
-                else 340
+                else 360
             )
             target_w = max(min_w, min(max_w, target_w))
             if self._settings.chat_height is not None:
@@ -1323,6 +1500,7 @@ class PetWindow(QWidget):
         if self._is_chat_open:
             self._settings.chat_width = geom.width()
             self._settings.chat_height = geom.height()
+            self._update_chat_size_btn_label()
         else:
             self._transient_bubble_size = geom.size()
         self.visual_bounds_changed.emit()
@@ -1616,7 +1794,14 @@ class PetWindow(QWidget):
         if self._shake_energy > 0:
             self._shake_energy = max(0.0, self._shake_energy - dt * 1.4)
 
-        if self._override_pose is not None and now >= self._override_until_utc:
+        if self._waiting_chat_workers:
+            # 模型正在回复期间锁定展示“思考中”形象，防止长耗时思考请求被超时定时器打断
+            if self._override_pose != PetState.THINKING:
+                self._is_walking = False
+                self._is_sleeping = False
+                self._override_pose = PetState.THINKING
+                self._refresh_sprite_visual()
+        elif self._override_pose is not None and now >= self._override_until_utc:
             self._override_pose = None
             if self._is_sulk:
                 self._is_sulk = False
@@ -1703,6 +1888,19 @@ class PetWindow(QWidget):
             else:
                 ty = -abs(math.sin(self._anim_time * 11.0)) * 7.0
                 angle = math.sin(self._anim_time * 11.0) * 2.8 * self._walk_dir
+        elif self._override_pose == PetState.THINKING:
+            sy = 1.0 + 0.016 * math.sin(self._anim_time * 3.0)
+            angle = 1.8 * math.sin(self._anim_time * 1.8)
+            if self._settings.particles_enabled and random.random() < 0.04:
+                self._spawn_particle(
+                    "💭",
+                    "#C4B5FD",
+                    self.width() * 0.62,
+                    self.height() - self._sprite_height_px() * 0.84,
+                    8.0,
+                    -20.0,
+                    1.3,
+                )
         elif self._settings.anti_gravity_mode or self._current_state == PetState.FLOAT:
             ty = -16.0 + 8.5 * math.sin(self._anim_time * 2.1)
             angle = 3.2 * math.sin(self._anim_time * 1.4)
@@ -1717,7 +1915,7 @@ class PetWindow(QWidget):
                     -28.0,
                     1.3,
                 )
-        elif self._is_sleeping or self._is_dozing():
+        elif self._is_sleeping or (self._is_dozing() and self._override_pose is None):
             sy = 1.0 + 0.024 * math.sin(self._anim_time * 1.4)
             if self._settings.particles_enabled and random.random() < 0.03:
                 self._spawn_particle(
@@ -2218,7 +2416,10 @@ class PetWindow(QWidget):
         self._settings.favorability = min(9999, self._settings.favorability + 1)
         self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
 
-        if self._is_sulk:
+        if self._waiting_chat_workers:
+            # 正在等待模型回复时保持思考动作不被鼠标划过头顶打断
+            pass
+        elif self._is_sulk:
             self._sulk_pats_needed -= 1
             if self._sulk_pats_needed > 0:
                 self._set_temporary_pose(PetState.COAXED, 4.0, CharacterLore.pick_line("coaxed"))
@@ -2307,17 +2508,426 @@ class PetWindow(QWidget):
         self._speech_bubble.setVisible(False)
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
+    def _resolve_active_chat_channel_and_models(self) -> tuple[str, str, list[str], str]:
+        """解析当前聊天渠道标签、动态可用模型列表与已选模型（不写死静态模型清单）。"""
+        provider = self._chat.resolve_chat_provider(self._settings)
+        oauth_svc = self._chat.oauth_service
+
+        def dedupe(items: list[str]) -> list[str]:
+            seen: list[str] = []
+            for item in items:
+                val = (item or "").strip()
+                if val and val not in seen:
+                    seen.append(val)
+            return seen
+
+        if provider == "oauth":
+            session = oauth_svc.load_session() if oauth_svc is not None else None
+            current = normalize_oauth_model(self._settings.oauth_model) or DEFAULT_OAUTH_MODEL
+            discovered = list(session.available_models) if session and session.available_models else []
+            models = dedupe([*discovered, current])
+            return ("oauth", "OAuth", models, current)
+
+        if provider == "agy":
+            current = normalize_oauth_model(self._settings.oauth_model) or DEFAULT_OAUTH_MODEL
+            discovered = GeminiChatService.get_cached_agy_models()
+            active_cli = AntigravityQuotaService.read_active_cli_model() or ""
+            resolved_eff, _ = GeminiChatService.resolve_agy_model_and_effort(
+                current, self._settings.thinking_level, discovered
+            )
+            models = dedupe([*discovered, active_cli, current, resolved_eff])
+            return ("agy", "Antigravity", models, current)
+
+        if provider == "api_key":
+            current = normalize_gemini_model(self._settings.gemini_model) or DEFAULT_GEMINI_MODEL
+            cached = GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
+            models = dedupe([*cached, current])
+            return ("api_key", "API Key", models, current)
+
+        if self._settings.chat_auth_mode == ChatAuthMode.OAUTH:
+            current = normalize_oauth_model(self._settings.oauth_model) or DEFAULT_OAUTH_MODEL
+            return ("oauth", "离线 · 未登录", dedupe([current]), current)
+
+        current = normalize_gemini_model(self._settings.gemini_model) or DEFAULT_GEMINI_MODEL
+        cached = GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
+        return ("api_key", "离线 · 本地", dedupe([*cached, current]), current)
+
+    _CHAT_WINDOW_SIZE_PRESETS: tuple[tuple[str, int, int], ...] = (
+        ("小", 360, 240),
+        ("中", 450, 340),
+        ("大", 580, 460),
+    )
+
+    def _update_chat_size_btn_label(self) -> None:
+        w = self._settings.chat_width
+        h = self._settings.chat_height
+        label = "自动"
+        if w is not None and h is not None:
+            matched = next(
+                (name for name, pw, ph in self._CHAT_WINDOW_SIZE_PRESETS if abs(w - pw) <= 10 and abs(h - ph) <= 10),
+                None,
+            )
+            label = matched if matched else "自"
+        self._chat_size_btn.setText(f"📐 {label}")
+
+    def cycle_chat_window_size(self) -> None:
+        """在聊天模式中一键循环切换 小 / 中 / 大 窗口尺寸并持久化记忆。"""
+        current_w = self._settings.chat_width or (self._speech_bubble.width() if self._speech_bubble.isVisible() else 360)
+        next_idx = 0
+        for i, (_name, pw, _ph) in enumerate(self._CHAT_WINDOW_SIZE_PRESETS):
+            if abs(current_w - pw) <= 15:
+                next_idx = (i + 1) % len(self._CHAT_WINDOW_SIZE_PRESETS)
+                break
+        else:
+            next_idx = 1 if current_w < 430 else (2 if current_w < 540 else 0)
+
+        preset_name, target_w, target_h = self._CHAT_WINDOW_SIZE_PRESETS[next_idx]
+        min_w, min_h = self._bubble_min_size()
+        max_w, max_h = self._bubble_max_size(
+            self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
+        )
+        self._settings.chat_width = max(min_w, min(max_w, target_w))
+        self._settings.chat_height = max(min_h, min(max_h, target_h))
+        self._settings_service.save(self._settings)
+        self._update_chat_size_btn_label()
+        self._relayout_stage_top()
+        QTimer.singleShot(0, self._scroll_chat_to_bottom)
+
+    def _sync_chat_controls(self) -> None:
+        in_chat = bool(self._is_chat_open)
+        self._chat_channel_badge.setVisible(in_chat)
+        self._chat_clear_btn.setVisible(in_chat)
+        self._bubble_settings_btn.setVisible(in_chat)
+        self._chat_toolbar.setVisible(in_chat)
+        self._chat_input_panel.setVisible(in_chat)
+        if not in_chat:
+            return
+
+        channel, badge_text, _models, current = self._resolve_active_chat_channel_and_models()
+        self._chat_channel_badge.setText(badge_text)
+        if badge_text in ("OAuth", "Antigravity"):
+            self._chat_channel_badge.setStyleSheet(
+                "background-color: rgba(52, 211, 153, 36); color: #6EE7B7; "
+                "border: 1px solid rgba(52, 211, 153, 95); border-radius: 7px; "
+                "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
+            )
+        elif badge_text == "API Key":
+            self._chat_channel_badge.setStyleSheet(
+                "background-color: rgba(96, 165, 250, 36); color: #93C5FD; "
+                "border: 1px solid rgba(96, 165, 250, 95); border-radius: 7px; "
+                "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
+            )
+        else:
+            self._chat_channel_badge.setStyleSheet(
+                "background-color: rgba(251, 191, 36, 36); color: #FDE68A; "
+                "border: 1px solid rgba(251, 191, 36, 95); border-radius: 7px; "
+                "font-size: 9.5px; font-weight: bold; padding: 1px 6px; margin-left: 6px;"
+            )
+
+        thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
+        thinking_label = format_thinking_level_label(thinking_lvl)
+        shown_model = current
+        if channel == "agy" and current.lower() in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest", "gemini-pro-latest"):
+            shown_model, _ = GeminiChatService.resolve_agy_model_and_effort(
+                current, thinking_lvl, GeminiChatService.get_cached_agy_models()
+            )
+        disp_name = format_model_display_name(shown_model)
+        self._chat_model_btn.setProperty(
+            "target_field", "oauth_model" if channel in ("oauth", "agy") else "gemini_model"
+        )
+        self._chat_model_btn.setProperty("current_model_id", current)
+        self._chat_model_btn.setProperty("current_thinking_level", thinking_lvl)
+        self._chat_model_btn.setText(f"{disp_name}  ·  {thinking_label}   ▾")
+        self._update_chat_size_btn_label()
+
+    def _build_chat_model_menu(self) -> QMenu:
+        """构建级联式模型与思考强度菜单（参考现代桌面助手菜单风格，无新/旧标记）。"""
+        channel, _badge_text, models, current = self._resolve_active_chat_channel_and_models()
+        current_thinking = normalize_thinking_level(self._settings.thinking_level)
+
+        menu = QMenu(self._speech_bubble)
+        menu.setStyleSheet(
+            STARLIGHT_MENU_QSS
+            + """
+            QMenu {
+                min-width: 240px;
+                padding: 6px 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 14px;
+            }
+            """
+        )
+        hdr = menu.addAction("模型")
+        hdr.setEnabled(False)
+        menu.addSeparator()
+
+        for model_id in models:
+            disp = format_model_display_name(model_id)
+            is_cur_model = model_id == current
+            levels = get_supported_thinking_levels(model_id)
+            effective_cur_thinking = current_thinking if current_thinking in levels else levels[0]
+            if is_cur_model:
+                title = f"✓ {disp}   {format_thinking_level_label(effective_cur_thinking)}"
+            else:
+                title = disp
+
+            sub = menu.addMenu(title)
+            sub.setStyleSheet(STARLIGHT_MENU_QSS)
+            sub.setProperty("model_id", model_id)
+            for lvl in levels:
+                lvl_text = "自动 (默认)" if lvl == "auto" else format_thinking_level_label(lvl)
+                act = sub.addAction(lvl_text)
+                act.setCheckable(True)
+                act.setChecked(is_cur_model and lvl == effective_cur_thinking)
+                act.setData((model_id, lvl))
+                act.triggered.connect(
+                    lambda _checked=False, m=model_id, lv=lvl: self.select_chat_model(m, lv)
+                )
+
+        menu.addSeparator()
+        act_refresh = menu.addAction("🔄 获取 / 刷新官方模型")
+        act_refresh.triggered.connect(self._refresh_chat_models_async)
+        act_quota = menu.addAction("📊 查看用量 / 额度")
+        act_quota.triggered.connect(self.open_quota_requested)
+        act_settings = menu.addAction("⚙️ 模型与连接设置...")
+        act_settings.triggered.connect(self.open_settings_requested)
+        self._chat_model_menu = menu
+        return menu
+
+    def _open_chat_model_menu(self) -> None:
+        channel, _badge_text, models, _current = self._resolve_active_chat_channel_and_models()
+        if (channel == "agy" and not GeminiChatService.get_cached_agy_models()) or (
+            channel == "api_key"
+            and not GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
+        ):
+            self._refresh_chat_models_async()
+        menu = self._build_chat_model_menu()
+        anchor_pos = self._chat_model_btn.mapToGlobal(QPoint(0, self._chat_model_btn.height() + 4))
+        menu.popup(anchor_pos)
+
+    def _refresh_chat_models_async(self) -> None:
+        provider = self._chat.resolve_chat_provider(self._settings)
+        if not provider:
+            return
+        if (
+            self._chat_models_discovery_worker is not None
+            and self._chat_models_discovery_worker.isRunning()
+        ):
+            return
+        worker = _ChatModelsDiscoveryWorker(provider, self._chat, self._settings, parent=self)
+        worker.completed.connect(self._on_chat_models_discovered)
+        self._chat_models_discovery_worker = worker
+        worker.start()
+
+    def _on_chat_models_discovered(self, channel: str, models: list[str], err_msg: str) -> None:
+        if self._chat_models_discovery_worker is not None:
+            self._chat_models_discovery_worker.deleteLater()
+            self._chat_models_discovery_worker = None
+        if err_msg or not models:
+            return
+        self._sync_chat_controls()
+        if self._is_chat_open and self._chat_message_rows:
+            self._append_chat_turn(
+                role="system",
+                sender="",
+                text=f"✦ 已同步 {len(models)} 个可用模型，点击上方模型按钮可切换",
+            )
+
+    def select_chat_model(
+        self, model_id: str, thinking_level: Optional[str] = None
+    ) -> None:
+        """切换当前渠道模型及思考强度，立即保存配置并更新聊天工具栏。"""
+        cleaned = (model_id or "").strip()
+        if not cleaned:
+            return
+
+        channel, _badge_text, _models, _cur = self._resolve_active_chat_channel_and_models()
+        model_changed = False
+        if channel in ("oauth", "agy"):
+            normalized_model = normalize_oauth_model(cleaned)
+            if self._settings.oauth_model != normalized_model:
+                self._settings.oauth_model = normalized_model
+                model_changed = True
+        else:
+            normalized_model = normalize_gemini_model(cleaned)
+            if self._settings.gemini_model != normalized_model:
+                self._settings.gemini_model = normalized_model
+                model_changed = True
+
+        thinking_changed = False
+        if thinking_level is not None:
+            normalized_lvl = normalize_thinking_level(thinking_level)
+            if self._settings.thinking_level != normalized_lvl:
+                self._settings.thinking_level = normalized_lvl
+                thinking_changed = True
+        else:
+            normalized_lvl = normalize_thinking_level(self._settings.thinking_level)
+
+        if not model_changed and not thinking_changed:
+            return
+
+        self._settings_service.save(self._settings)
+        if model_changed:
+            self._chat.reset_conversation()
+        self._sync_chat_controls()
+        if self._chat_message_rows:
+            self._append_chat_turn(
+                role="system",
+                sender="",
+                text=(
+                    f"✦ 已切换为 {format_model_display_name(normalized_model)}"
+                    f" · {format_thinking_level_label(normalized_lvl)}"
+                ),
+            )
+        self.settings_synced.emit()
+
+    def _scroll_chat_to_bottom(self) -> None:
+        bar = self._bubble_scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _append_chat_turn(
+        self,
+        *,
+        role: str,
+        sender: str,
+        text: str,
+        meta: str = "",
+    ) -> tuple[QWidget, Optional[QLabel], QLabel]:
+        """向标准聊天消息列表追加一条消息卡片（用户靠右、助手靠左、提示居中）。"""
+        self._bubble_text_lbl.setVisible(False)
+        self._chat_messages_panel.setVisible(True)
+
+        row = QWidget(self._chat_messages_panel)
+        row.setStyleSheet("background: transparent;")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        if role == "system":
+            notice_lbl = QLabel(text, row)
+            notice_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            notice_lbl.setWordWrap(True)
+            notice_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            notice_lbl.setStyleSheet(
+                "color: #A89FD6; font-size: 10.5px; padding: 2px 6px; "
+                "background-color: rgba(45, 36, 84, 140); border-radius: 8px;"
+            )
+            row_layout.addStretch(1)
+            row_layout.addWidget(notice_lbl)
+            row_layout.addStretch(1)
+            self._chat_messages_layout.addWidget(row)
+            self._chat_message_rows.append(row)
+            self._trim_chat_rows_if_needed()
+            QTimer.singleShot(0, self._scroll_chat_to_bottom)
+            return row, None, notice_lbl
+
+        is_user = role == "user"
+        card = QFrame(row)
+        card.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        if is_user:
+            card.setStyleSheet(
+                """
+                QFrame {
+                    background-color: #2A4B8D;
+                    border: 1px solid #4E78CC;
+                    border-radius: 10px;
+                }
+                """
+            )
+        else:
+            card.setStyleSheet(
+                """
+                QFrame {
+                    background-color: rgba(38, 31, 70, 235);
+                    border: 1px solid #524296;
+                    border-radius: 10px;
+                }
+                """
+            )
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(9, 6, 9, 6)
+        card_layout.setSpacing(3)
+
+        meta_lbl = QLabel(meta or sender, card)
+        meta_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        meta_lbl.setStyleSheet(
+            f"color: {'#CFE2FF' if is_user else '#C4B5FD'}; "
+            "font-size: 10px; font-weight: bold; background: transparent; border: none;"
+        )
+        card_layout.addWidget(meta_lbl)
+
+        body_lbl = QLabel(text, card)
+        body_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        body_lbl.setWordWrap(True)
+        body_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body_lbl.setStyleSheet(
+            f"color: {'#FFFFFF' if is_user else '#F6F3FF'}; "
+            "font-size: 12.5px; background: transparent; border: none;"
+        )
+        card_layout.addWidget(body_lbl)
+
+        if is_user:
+            row_layout.addStretch(1)
+            row_layout.addSpacing(26)
+            row_layout.addWidget(card)
+        else:
+            row_layout.addWidget(card)
+            row_layout.addSpacing(26)
+            row_layout.addStretch(1)
+
+        self._chat_messages_layout.addWidget(row)
+        self._chat_message_rows.append(row)
+        self._trim_chat_rows_if_needed()
+        QTimer.singleShot(0, self._scroll_chat_to_bottom)
+        return row, meta_lbl, body_lbl
+
+    def _trim_chat_rows_if_needed(self) -> None:
+        while len(self._chat_message_rows) > 60:
+            oldest = self._chat_message_rows.pop(0)
+            self._chat_messages_layout.removeWidget(oldest)
+            oldest.deleteLater()
+
+    def _clear_chat_history(self) -> None:
+        for row in self._chat_message_rows:
+            self._chat_messages_layout.removeWidget(row)
+            row.deleteLater()
+        self._chat_message_rows.clear()
+        self._chat.reset_conversation()
+        self._chat_messages_panel.setVisible(False)
+        self._bubble_text_lbl.setText("已清空聊天记录，想聊什么呀喵✦")
+        self._bubble_text_lbl.setVisible(True)
+        self._relayout_stage_top()
+
     def show_bubble(self, message: str, duration_sec: float, force: bool = False) -> None:
         if not force and not self._settings.show_speech_bubble and not self._is_chat_open:
             return
         if not self.isVisible():
             return
+        if self._is_chat_open:
+            if not force:
+                return
+            self._is_forced_bubble_active = True
+            if self._chat_message_rows:
+                self._append_chat_turn(role="system", sender="", text=message)
+            else:
+                self._chat_messages_panel.setVisible(False)
+                self._bubble_text_lbl.setVisible(True)
+                self._bubble_text_lbl.setText(message)
+            self._sync_chat_controls()
+            self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+            self._speech_bubble.setVisible(True)
+            self._sync_bubble_window_styles()
+            self._relayout_stage_top()
+            self._bubble_timer.stop()
+            return
 
         self._is_forced_bubble_active = force
+        self._chat_messages_panel.setVisible(False)
+        self._bubble_text_lbl.setVisible(True)
         self._bubble_text_lbl.setText(message)
-        self._speech_bubble.setAttribute(
-            Qt.WidgetAttribute.WA_ShowWithoutActivating, not self._is_chat_open
-        )
+        self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self._speech_bubble.setVisible(True)
         self._sync_bubble_window_styles()
         self._relayout_stage_top()
@@ -2336,10 +2946,16 @@ class PetWindow(QWidget):
 
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
-        if not self._speech_bubble.isVisible():
-            self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
-        self._bubble_settings_btn.setVisible(True)
-        self._chat_input_panel.setVisible(True)
+        self._sync_chat_controls()
+        if self._chat_message_rows:
+            self._bubble_text_lbl.setVisible(False)
+            self._chat_messages_panel.setVisible(True)
+            QTimer.singleShot(0, self._scroll_chat_to_bottom)
+        else:
+            self._chat_messages_panel.setVisible(False)
+            self._bubble_text_lbl.setVisible(True)
+            if not self._speech_bubble.isVisible():
+                self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         self._speech_bubble.setVisible(True)
         self._sync_bubble_window_styles()
@@ -2356,8 +2972,7 @@ class PetWindow(QWidget):
         if enabled:
             self.show_bubble("已开启宠物对话气泡，会自动陪你聊天喵✦", 4.0, force=True)
         elif not self._is_chat_open:
-            self._bubble_settings_btn.setVisible(False)
-            self._chat_input_panel.setVisible(False)
+            self._sync_chat_controls()
             self._hide_speech_bubble()
             self._relayout_stage_top()
 
@@ -2366,10 +2981,9 @@ class PetWindow(QWidget):
             self.open_chat_dialog()
             return
         self._is_chat_open = False
-        self._bubble_settings_btn.setVisible(False)
-        self._chat_input_panel.setVisible(False)
+        self._sync_chat_controls()
         self._sync_bubble_window_styles()
-        if self._settings.show_speech_bubble:
+        if self._settings.show_speech_bubble and not self._chat_message_rows:
             self._bubble_timer.stop()
             self._bubble_timer.start(3000)
         else:
@@ -2379,8 +2993,7 @@ class PetWindow(QWidget):
     def _close_bubble_click(self) -> None:
         self._is_chat_open = False
         self._is_forced_bubble_active = False
-        self._bubble_settings_btn.setVisible(False)
-        self._chat_input_panel.setVisible(False)
+        self._sync_chat_controls()
         self._hide_speech_bubble()
         self._relayout_stage_top()
 
@@ -2389,21 +3002,78 @@ class PetWindow(QWidget):
         if not text:
             return
         self._chat_input.clear()
-        self._set_temporary_pose(PetState.THINKING, 15.0, "让我想想喵…✦")
+        self._is_chat_open = True
+        self._sync_chat_controls()
+
+        now_str = datetime.now().strftime("%H:%M")
+        char_name = (self._bubble_char_name_lbl.text() or "").strip() or "Gemini 娘"
+        provider = self._chat.resolve_chat_provider(self._settings)
+        _, _, _, active_model = self._resolve_active_chat_channel_and_models()
+        thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
+        if provider:
+            shown_model = active_model
+            if provider == "agy":
+                shown_model, _ = GeminiChatService.resolve_agy_model_and_effort(
+                    active_model, thinking_lvl, GeminiChatService.get_cached_agy_models()
+                )
+            disp_model = format_model_display_name(shown_model)
+            model_tag = (
+                f"{disp_model} · {format_thinking_level_label(thinking_lvl)}"
+                if thinking_lvl != "auto"
+                else disp_model
+            )
+        else:
+            model_tag = "离线陪伴"
+
+        self._append_chat_turn(role="user", sender="你", text=text, meta=f"你 · {now_str}")
+        pending_target = self._append_chat_turn(
+            role="assistant",
+            sender=char_name,
+            text="正在思考中…✦",
+            meta=f"✦ {char_name} · {model_tag} · {now_str}",
+        )
+
+        self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self._speech_bubble.setVisible(True)
+        self._sync_bubble_window_styles()
+        self._bubble_timer.stop()
+        self._relayout_stage_top()
+        QTimer.singleShot(0, self._scroll_chat_to_bottom)
 
         metrics = self._sys_monitor.sample()
-        worker = _ChatWorker(self._chat, text, self._settings, metrics, parent=self)
+        target_info = (pending_target, char_name, model_tag)
+        worker = _ChatWorker(
+            self._chat,
+            text,
+            self._settings,
+            metrics,
+            target_info=target_info,
+            parent=self,
+        )
         self._active_chat_workers.append(worker)
+        self._waiting_chat_workers.add(worker)
+        self._set_temporary_pose(PetState.THINKING, 90.0)
         worker.reply_ready.connect(self._on_chat_reply_ready)
         worker.finished.connect(lambda w=worker: self._cleanup_chat_worker(w))
         worker.start()
 
     def _cleanup_chat_worker(self, worker: _ChatWorker) -> None:
+        self._waiting_chat_workers.discard(worker)
         if worker in self._active_chat_workers:
             self._active_chat_workers.remove(worker)
         worker.deleteLater()
 
-    def _on_chat_reply_ready(self, reply: ChatReply) -> None:
+    def _on_chat_reply_ready(
+        self,
+        reply: ChatReply,
+        target_info: Optional[tuple] = None,
+        worker: Optional[_ChatWorker] = None,
+    ) -> None:
+        if worker is not None:
+            self._waiting_chat_workers.discard(worker)
+        else:
+            self._waiting_chat_workers.clear()
+
         target_pose = reply.suggested_state or PetState.HAPPY
         if target_pose == PetState.FLOAT and not self._settings.anti_gravity_mode:
             self._settings.anti_gravity_mode = True
@@ -2412,7 +3082,57 @@ class PetWindow(QWidget):
         elif target_pose == PetState.PAT:
             self.trigger_pat()
 
-        self._set_temporary_pose(target_pose, 7.0, reply.text)
+        self._set_temporary_pose(target_pose, 7.0)
+        if self._is_chat_open:
+            self._sync_chat_controls()
+        now_str = datetime.now().strftime("%H:%M")
+
+        if target_info is not None:
+            pending_target, char_name, model_tag = target_info
+            row, meta_lbl, body_lbl = pending_target
+            if row in self._chat_message_rows:
+                body_lbl.setText(reply.text)
+                if meta_lbl is not None:
+                    meta_lbl.setText(f"✦ {char_name} · {model_tag} · {now_str}")
+                if self._is_chat_open:
+                    self._bubble_timer.stop()
+                    self._relayout_stage_top()
+                    QTimer.singleShot(0, self._scroll_chat_to_bottom)
+                else:
+                    self.show_bubble(reply.text, 7.0, force=True)
+                self._sound.play(PetSoundEffect.SPARKLE)
+                return
+
+        if self._is_chat_open:
+            char_name = (self._bubble_char_name_lbl.text() or "").strip() or "Gemini 娘"
+            provider = self._chat.resolve_chat_provider(self._settings)
+            _, _, _, active_model = self._resolve_active_chat_channel_and_models()
+            thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
+            if provider:
+                shown_model = active_model
+                if provider == "agy":
+                    shown_model, _ = GeminiChatService.resolve_agy_model_and_effort(
+                        active_model, thinking_lvl, GeminiChatService.get_cached_agy_models()
+                    )
+                disp_model = format_model_display_name(shown_model)
+                model_tag = (
+                    f"{disp_model} · {format_thinking_level_label(thinking_lvl)}"
+                    if thinking_lvl != "auto"
+                    else disp_model
+                )
+            else:
+                model_tag = "离线陪伴"
+            self._append_chat_turn(
+                role="assistant",
+                sender=char_name,
+                text=reply.text,
+                meta=f"✦ {char_name} · {model_tag} · {now_str}",
+            )
+            self._bubble_timer.stop()
+            self._relayout_stage_top()
+            QTimer.singleShot(0, self._scroll_chat_to_bottom)
+        else:
+            self.show_bubble(reply.text, 7.0, force=True)
         self._sound.play(PetSoundEffect.SPARKLE)
 
     # ==================== Particles ====================
