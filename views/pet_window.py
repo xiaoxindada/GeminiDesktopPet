@@ -29,15 +29,18 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
+    QBitmap,
     QColor,
     QCursor,
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QImage,
     QMouseEvent,
     QPainter,
     QPen,
     QPixmap,
+    QRegion,
 )
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -106,6 +109,15 @@ _SYNC_MIN_INTERVAL = 0.25
 _SYNC_REPLACE_INTERVAL = 0.12
 _SYNC_QUEUE_LIMIT = 10
 _SYNC_HEARTBEAT_SEC = 60.0
+
+# 打盹 Zzz 的落点比例（相对贴图内容矩形：横向从中心右偏、纵向从顶部下移）。
+# Q 版头部约占贴图高度 1/3、宽度 2/3，0.18H 正好停在头顶右侧发际（参考图效果）；
+# 标准立绘头高只有约 1/9（实测 1603px 图高约 175px），沿用 0.18H 会掉到肩颈，
+# 所以按头部占比把纵向缩到 0.08H，横向一并收到发际内侧 0.12W。
+_DOZE_ZZZ_ANCHOR: dict[PetStyleMode, tuple[float, float]] = {
+    PetStyleMode.CHIBI: (0.18, 0.18),
+    PetStyleMode.STANDARD: (0.12, 0.08),
+}
 
 
 def _apply_win32_topmost(hwnd: int, topmost: bool) -> None:
@@ -433,6 +445,8 @@ class PetWindow(QWidget):
         # 设置窗口拖动缩放/透明度滑杆时的临时预览值，不写回配置
         self._preview_scale: Optional[float] = None
         self._preview_opacity: Optional[float] = None
+        # 贴图实际内容边界（去掉透明留白），按 pixmap 缓存
+        self._sprite_content_cache: dict[int, QRect] = {}
         # 未保存尺寸时使用最大预设，已手动调整的尺寸继续保留。
         _, default_chat_width, default_chat_height = self._CHAT_WINDOW_SIZE_PRESETS[-1]
         if settings.chat_width is None:
@@ -1599,6 +1613,25 @@ class PetWindow(QWidget):
         cy = max(area.top(), min(max_y, self.y()))
         self.move(int(round(cx)), int(round(cy)))
 
+    def _pixmap_content_rect(self, pixmap: QPixmap) -> QRect:
+        """返回贴图去掉透明留白后的实际内容边界，标准版与 Q 版各自适配。"""
+        key = int(pixmap.cacheKey())
+        cached = self._sprite_content_cache.get(key)
+        if cached is not None:
+            return cached
+        bounds = QRect(0, 0, pixmap.width(), pixmap.height())
+        try:
+            image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+            region = QRegion(QBitmap.fromImage(image.createAlphaMask()))
+            tight = region.boundingRect()
+            if not tight.isEmpty():
+                # 留 2px 余量，避免把半透明的发丝/光晕边缘裁掉
+                bounds = tight.adjusted(-2, -2, 2, 2).intersected(bounds)
+        except Exception:
+            pass
+        self._sprite_content_cache[key] = bounds
+        return bounds
+
     def _get_local_sprite_rect(self) -> QRectF:
         """Returns active sprite or walk rig rectangle in local PetWindow coordinates."""
         w = float(self.width())
@@ -1610,10 +1643,11 @@ class PetWindow(QWidget):
         elif self._use_chibi_walk_rig:
             rw, rh = self._chibi_rig_size()
         elif self._active_static_pixmap is not None and not self._active_static_pixmap.isNull():
-            pw = float(self._active_static_pixmap.width())
-            ph = float(self._active_static_pixmap.height())
+            content = self._pixmap_content_rect(self._active_static_pixmap)
+            cw = float(content.width())
+            ch = float(content.height())
             rh = sprite_h
-            rw = rh * (pw / ph) if ph > 0 else rh * 0.85
+            rw = rh * (cw / ch) if ch > 0 else rh * 0.85
         else:
             rh = sprite_h
             rw = min(w, rh * 0.85)
@@ -1880,16 +1914,6 @@ class PetWindow(QWidget):
                 )
         elif self._is_sleeping or (self._is_dozing() and self._override_pose is None):
             sy = 1.0 + 0.024 * math.sin(self._anim_time * 1.4)
-            if self._settings.particles_enabled and random.random() < 0.03:
-                self._spawn_particle(
-                    "Zzz",
-                    "#93C5FD",
-                    self.width() * 0.58,
-                    self.height() - self._sprite_height_px() * 0.78,
-                    12.0,
-                    -22.0,
-                    1.8,
-                )
         else:
             sy = 1.0 + 0.014 * math.sin(self._anim_time * 2.4)
             sx = 1.0 - 0.006 * math.sin(self._anim_time * 2.4)
@@ -1900,6 +1924,20 @@ class PetWindow(QWidget):
             sy = 1.0 + 0.018 * math.sin(self._anim_time * 1.4)
             if self._settings.docked_side != DockSide.NONE:
                 angle = (1 if self._settings.docked_side == DockSide.LEFT else -1) * 1.2 * math.sin(self._anim_time * 1.4)
+
+        # Zzz 属于打盹反馈，贴边时也要出现，所以放在贴边/睡姿分支之外
+        dozing = self._is_sleeping or (self._is_dozing() and self._override_pose is None)
+        if dozing and random.random() < 0.04:
+            zzz_x, zzz_y = self._doze_zzz_anchor()
+            self._spawn_particle(
+                "Zzz",
+                "#93C5FD",
+                zzz_x,
+                zzz_y,
+                12.0,
+                -22.0,
+                1.8,
+            )
 
         if self._landing_squash > 0.001:
             ls = math.sin(self._landing_squash * math.pi)
@@ -1965,7 +2003,10 @@ class PetWindow(QWidget):
         elif self._use_chibi_walk_rig:
             self._paint_chibi_walk_rig(painter, sprite_rect)
         else:
-            _draw_pixmap_uniform(painter, self._active_static_pixmap, sprite_rect)
+            pixmap = self._active_static_pixmap
+            if pixmap is not None and not pixmap.isNull():
+                content = self._pixmap_content_rect(pixmap)
+                painter.drawPixmap(sprite_rect, pixmap, QRectF(content))
 
         painter.restore()
 
@@ -3672,6 +3713,20 @@ class PetWindow(QWidget):
             bool(self._settings.doze_mode)
             and self._override_pose is None
         )
+
+    def _doze_zzz_anchor(self) -> tuple[float, float]:
+        """打盹 Zzz 的落点：横向按画风贴到头顶右侧（贴边时从边缘向内收），纵向按头部占比。"""
+        rect = self._get_local_sprite_rect()
+        x_ratio, y_ratio = _DOZE_ZZZ_ANCHOR.get(
+            self._settings.style_mode, _DOZE_ZZZ_ANCHOR[PetStyleMode.CHIBI]
+        )
+        if self._settings.docked_side == DockSide.LEFT:
+            x = rect.right() - rect.width() * 0.28
+        elif self._settings.docked_side == DockSide.RIGHT:
+            x = rect.left() + rect.width() * 0.28
+        else:
+            x = rect.center().x() + rect.width() * x_ratio
+        return x, rect.top() + rect.height() * y_ratio
 
     def _apply_doze_transition(self) -> None:
         """打盹模式开关变化时播放入睡/睡醒过渡；菜单、托盘与设置窗口的改动都会经过这里。"""
