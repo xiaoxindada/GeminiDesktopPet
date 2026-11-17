@@ -13,7 +13,7 @@ if os.name != "nt" and not os.environ.get("DISPLAY"):
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication
 
 from models.pet_settings import DockSide, PetSettings, PetStyleMode
 from models.pet_state import PetState
@@ -157,7 +157,7 @@ class TestWindowLayoutFixes(unittest.TestCase):
                     pet.deleteLater()
                     self._app.processEvents()
 
-    def test_pet_window_quick_bar_never_clips_and_standby_close_preserves_coords(self) -> None:
+    def test_pet_window_layout_and_standby_close_preserves_coords(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings_svc = SettingsService(tmp)
             sound = SoundService()
@@ -182,24 +182,22 @@ class TestWindowLayoutFixes(unittest.TestCase):
                 pet = PetWindow(settings, settings_svc, sprites, sound, sys_monitor, chat)
                 pet.show()
                 pet._is_hovering = True
-                pet._quick_bar.setVisible(True)
                 pet._is_chat_open = True
                 pet._chat_input_panel.setVisible(True)
                 pet._bubble_text_lbl.setText(
-                    "你好呀主人！这是一段稍微长一点的气泡测试文本，用来验证聊天输入框开启时高度不会挤压立绘或裁剪快捷按钮。"
+                    "你好呀主人！这是一段稍微长一点的气泡测试文本，用来验证聊天输入框开启时高度不会挤压立绘或裁剪按钮。"
                 )
                 pet._speech_bubble.setVisible(True)
                 pet.apply_settings_to_window()
                 self._app.processEvents()
 
-                self.assertLessEqual(pet._quick_bar.width(), pet._stage_top_panel.width())
-                self.assertLessEqual(pet._stage_top_panel.width(), pet.width())
-                for btn in pet._quick_bar.findChildren(QPushButton):
-                    self.assertGreaterEqual(btn.geometry().left(), 0)
-                    self.assertLessEqual(btn.geometry().right(), pet._quick_bar.width() - 1)
-
-                # 验证透明区域坐标（2, 2）不会让快捷栏误判仍处于悬停状态
-                self.assertFalse(pet._get_local_sprite_rect().contains(2, 2))
+                # 悬浮快捷栏已移除，窗口只保留角色精灵与气泡
+                self.assertFalse(hasattr(pet, "_quick_bar"))
+                self.assertFalse(hasattr(pet, "_stage_top_panel"))
+                self.assertGreaterEqual(pet._speech_bubble.width(), 320)
+                self.assertFalse(
+                    pet._speech_bubble.geometry().intersects(pet.get_visual_sprite_bounds())
+                )
                 pet.close()
                 pet.deleteLater()
                 self._app.processEvents()
@@ -229,7 +227,6 @@ class TestWindowLayoutFixes(unittest.TestCase):
             try:
                 pet.show()
                 pet._is_hovering = True
-                pet._quick_bar.setVisible(True)
                 pet.open_chat_dialog()
                 self._app.processEvents()
 
@@ -243,15 +240,13 @@ class TestWindowLayoutFixes(unittest.TestCase):
                 )
                 self.assertGreater(pet._chat_input.width(), ph_width)
 
-                qb_global = QRect(pet._quick_bar.mapToGlobal(QPoint(0, 0)), pet._quick_bar.size())
-                self.assertFalse(bubble.geometry().intersects(qb_global))
                 self.assertFalse(bubble.geometry().intersects(pet.get_visual_sprite_bounds()))
 
                 # 默认"大"挡已到最大尺寸，切到"小"挡后再验证八向拖拽与尺寸持久化
                 pet.cycle_chat_window_size()
                 self._app.processEvents()
                 self.assertEqual((bubble.width(), bubble.height()), (560, 360))
-                self.assertFalse(bubble.geometry().intersects(qb_global))
+                self.assertFalse(bubble.geometry().intersects(pet.get_visual_sprite_bounds()))
 
                 # 验证八向边缘鼠标悬停均能切换为正确的缩放光标
                 cursor_cases = [

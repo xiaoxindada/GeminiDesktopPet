@@ -41,6 +41,15 @@ class TestSettingsAndProjectConfig(unittest.TestCase):
         self.assertEqual(resolve_effective_thinking_level("gemini-3.1-flash-lite", "xhigh"), "auto")
         self.assertEqual(resolve_effective_thinking_level("gemini-4-hydrogen", "xhigh"), "xhigh")
 
+    def test_click_through_only_lasts_current_session(self) -> None:
+        """鼠标穿透不能跨启动保留，否则桌宠下次启动无法拖动或右键。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SettingsService(tmp)
+            svc.save(PetSettings(click_through=True))
+            raw_json = json.loads(svc.settings_path.read_text(encoding="utf-8"))
+            self.assertTrue(raw_json["behavior"]["click_through"])
+            self.assertFalse(svc.load().click_through)
+
     def test_settings_json_roundtrip_and_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             svc = SettingsService(tmp)

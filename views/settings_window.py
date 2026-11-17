@@ -1,15 +1,42 @@
-"""偏好设置窗口：外观、物理行为、应用联动守护、Gemini API、更新源与运行日志管理。"""
+"""设置窗口：左侧功能分类导航 + 右侧卡片内容，并提供全部设置汇总与搜索。"""
 
 from __future__ import annotations
 
 import os
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    Property,
+    QEasingCurve,
+    QEvent,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QDesktopServices,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QAbstractButton,
+    QApplication,
+    QButtonGroup,
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +44,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -27,6 +55,8 @@ from models.pet_settings import (
     THINKING_LEVEL_OPTIONS,
     PetSettings,
     PetStyleMode,
+    format_model_display_name,
+    format_thinking_level_label,
     normalize_gemini_model,
     normalize_thinking_level,
 )
@@ -37,7 +67,7 @@ from services.gemini_chat_service import GeminiChatService
 from services.settings_service import SettingsService
 from services.tray_icon_service import TrayIconService
 from services.update_service import UpdateService
-from themes.starlight_theme import STARLIGHT_WINDOW_QSS
+from themes.settings_theme import SETTINGS_WINDOW_QSS
 
 
 class _ModelsRefreshWorker(QThread):
@@ -57,8 +87,314 @@ class _ModelsRefreshWorker(QThread):
             self.completed.emit([], str(exc))
 
 
+def _make_icon(kind: str, size: int = 18, color: str = "#A79FD4") -> QIcon:
+    """用路径绘制单色线性图标，避免不同系统的 emoji 字体风格不一致。"""
+    scale = 2.0
+    pix = QPixmap(int(size * scale), int(size * scale))
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.scale(scale, scale)
+        pen = QPen(QColor(color))
+        pen.setWidthF(1.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if kind == "all":
+            for x, y in ((3.4, 3.4), (10.6, 3.4), (3.4, 10.6), (10.6, 10.6)):
+                painter.drawRoundedRect(QRectF(x, y, 4.2, 4.2), 1.2, 1.2)
+        elif kind == "general":
+            # 三条滑杆，直观表达“可调参数”
+            for y, knob_x in ((5.2, 12.2), (9.0, 6.6), (12.8, 10.0)):
+                painter.drawLine(QPointF(3.0, y), QPointF(15.0, y))
+                painter.setBrush(QColor("#241D47"))
+                painter.drawEllipse(QPointF(knob_x, y), 1.7, 1.7)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+        elif kind == "appearance":
+            painter.drawRoundedRect(QRectF(2.6, 3.4, 12.8, 11.2), 2.0, 2.0)
+            painter.drawEllipse(QPointF(6.4, 7.0), 1.3, 1.3)
+            painter.drawPolyline(
+                [
+                    QPointF(4.4, 13.2),
+                    QPointF(8.0, 9.6),
+                    QPointF(10.6, 12.0),
+                    QPointF(12.2, 10.4),
+                    QPointF(14.0, 12.2),
+                ]
+            )
+        elif kind == "character":
+            painter.drawEllipse(QPointF(9.0, 6.4), 3.0, 3.0)
+            shoulders = QPainterPath()
+            shoulders.moveTo(3.4, 15.2)
+            shoulders.cubicTo(4.2, 11.4, 6.4, 10.2, 9.0, 10.2)
+            shoulders.cubicTo(11.6, 10.2, 13.8, 11.4, 14.6, 15.2)
+            painter.drawPath(shoulders)
+        elif kind == "behavior":
+            heart = QPainterPath()
+            heart.moveTo(9.0, 15.4)
+            heart.cubicTo(3.0, 11.4, 2.0, 7.4, 4.5, 5.4)
+            heart.cubicTo(6.3, 3.9, 8.0, 4.9, 9.0, 6.5)
+            heart.cubicTo(10.0, 4.9, 11.7, 3.9, 13.5, 5.4)
+            heart.cubicTo(16.0, 7.4, 15.0, 11.4, 9.0, 15.4)
+            painter.drawPath(heart)
+        elif kind == "chat":
+            painter.drawRoundedRect(QRectF(2.6, 3.4, 12.8, 9.4), 2.6, 2.6)
+            painter.drawPolyline([QPointF(6.0, 12.8), QPointF(5.2, 15.8), QPointF(9.2, 12.8)])
+        elif kind == "startup":
+            bolt = QPainterPath()
+            bolt.moveTo(10.6, 2.6)
+            bolt.lineTo(4.8, 10.2)
+            bolt.lineTo(8.6, 10.2)
+            bolt.lineTo(7.4, 15.4)
+            bolt.lineTo(13.2, 7.8)
+            bolt.lineTo(9.4, 7.8)
+            bolt.closeSubpath()
+            painter.drawPath(bolt)
+        elif kind == "logs":
+            painter.drawRoundedRect(QRectF(4.0, 2.6, 10.0, 12.8), 1.8, 1.8)
+            for y in (6.4, 9.0, 11.6):
+                painter.drawLine(QPointF(6.4, y), QPointF(11.6, y))
+        elif kind == "about":
+            painter.drawEllipse(QPointF(9.0, 9.0), 6.6, 6.6)
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(QPointF(9.0, 6.2), 0.8, 0.8)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(QPointF(9.0, 8.7), QPointF(9.0, 12.4))
+        elif kind == "search":
+            painter.setPen(QPen(QColor(color), 1.6))
+            painter.drawEllipse(QPointF(7.2, 7.2), 4.0, 4.0)
+            painter.drawLine(QPointF(10.2, 10.2), QPointF(13.2, 13.2))
+    finally:
+        painter.end()
+    return QIcon(pix)
+
+
+class ToggleSwitch(QAbstractButton):
+    """深色胶囊开关：紫色轨道表示开启，灰紫色表示关闭。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(40, 22)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._offset = 0.0
+        self._animating = False
+        self._anim = QPropertyAnimation(self, b"offset", self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get_offset(self) -> float:
+        return self._offset
+
+    def _set_offset(self, value: float) -> None:
+        self._offset = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    offset = Property(float, _get_offset, _set_offset)
+
+    def setChecked(self, checked: bool) -> None:  # noqa: N802 - Qt 命名
+        super().setChecked(checked)
+        if not self._animating:
+            self._anim.stop()
+            self._offset = 1.0 if checked else 0.0
+            self.update()
+
+    def nextCheckState(self) -> None:  # noqa: N802 - Qt 命名
+        target = not self.isChecked()
+        self._animating = True
+        try:
+            super().setChecked(target)
+        finally:
+            self._animating = False
+        self._anim.stop()
+        self._anim.setStartValue(self._offset)
+        self._anim.setEndValue(1.0 if target else 0.0)
+        self._anim.start()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        track = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        radius = track.height() / 2.0
+        off_color = QColor("#332A5B")
+        on_color = QColor("#7C5CFF")
+        ratio = self._offset
+        track_color = QColor(
+            int(off_color.red() + (on_color.red() - off_color.red()) * ratio),
+            int(off_color.green() + (on_color.green() - off_color.green()) * ratio),
+            int(off_color.blue() + (on_color.blue() - off_color.blue()) * ratio),
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(track, radius, radius)
+
+        diameter = self.height() - 6.0
+        knob_x = 3.0 + (self.width() - 6.0 - diameter) * self._offset
+        painter.setBrush(QColor("#F6F3FF"))
+        painter.setPen(QPen(QColor(0, 0, 0, 60), 1.0))
+        painter.drawEllipse(QRectF(knob_x, 3.0, diameter, diameter))
+
+        if self.hasFocus():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(167, 139, 250, 160), 1.2))
+            painter.drawRoundedRect(QRectF(0.6, 0.6, self.width() - 1.2, self.height() - 1.2), radius, radius)
+        painter.end()
+
+
+class _Card:
+    """统一设置卡片的行布局：标题/说明在左，控件在右，行间自动加分隔线。"""
+
+    def __init__(self, parent_layout: QVBoxLayout, heading: Optional[str] = None) -> None:
+        self.frame = QFrame()
+        self.frame.setObjectName("CardPanel")
+        self.layout = QVBoxLayout(self.frame)
+        self.layout.setContentsMargins(16, 12, 16, 12)
+        self.layout.setSpacing(0)
+        if heading:
+            label = QLabel(heading)
+            label.setObjectName("CardHeading")
+            self.layout.addWidget(label)
+            self.layout.addSpacing(2)
+        self._rows = 0
+        parent_layout.addWidget(self.frame)
+
+    def add_row(self, control: QWidget, title: str, desc: str = "") -> QWidget:
+        if self._rows:
+            divider = QFrame()
+            divider.setObjectName("RowDivider")
+            divider.setFixedHeight(1)
+            self.layout.addWidget(divider)
+
+        row = QWidget()
+        row.setObjectName("CardHost")
+        hbox = QHBoxLayout(row)
+        hbox.setContentsMargins(0, 9, 0, 9)
+        hbox.setSpacing(18)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("RowTitle")
+        text_col.addWidget(title_lbl)
+        if desc:
+            desc_lbl = QLabel(desc)
+            desc_lbl.setObjectName("RowDesc")
+            desc_lbl.setWordWrap(True)
+            text_col.addWidget(desc_lbl)
+        hbox.addLayout(text_col, 1)
+        hbox.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.layout.addWidget(row)
+        self._rows += 1
+        return row
+
+    def add_widget(self, widget: QWidget, top: int = 8) -> None:
+        self.layout.addSpacing(top)
+        self.layout.addWidget(widget)
+
+    def add_buttons(self, widgets: list[QWidget], top: int = 10) -> None:
+        host = QWidget()
+        host.setObjectName("CardHost")
+        hbox = QHBoxLayout(host)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(8)
+        for widget in widgets:
+            hbox.addWidget(widget)
+        hbox.addStretch(1)
+        self.add_widget(host, top)
+
+
+class _SummaryRow(QFrame):
+    """全部设置汇总行，点击可跳到对应分类页。"""
+
+    activated = Signal(int)
+
+    def __init__(
+        self,
+        title: str,
+        desc: str,
+        category: str,
+        target_index: int,
+        on_activate: Optional[Callable[[], None]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("SummaryRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._target = target_index
+        self._on_activate = on_activate
+
+        hbox = QHBoxLayout(self)
+        hbox.setContentsMargins(10, 8, 10, 8)
+        hbox.setSpacing(10)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("RowTitle")
+        desc_lbl = QLabel(desc)
+        desc_lbl.setObjectName("RowDesc")
+        text_col.addWidget(title_lbl)
+        text_col.addWidget(desc_lbl)
+        hbox.addLayout(text_col, 1)
+
+        category_lbl = QLabel(category)
+        category_lbl.setObjectName("CategoryTag")
+        hbox.addWidget(category_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.value_label = QLabel("")
+        self.value_label.setObjectName("ValueLabel")
+        self.value_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.value_label.setMinimumWidth(96)
+        hbox.addWidget(self.value_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        arrow_lbl = QLabel("›")
+        arrow_lbl.setStyleSheet("color: #6B5FA0; font-size: 15px; background: transparent;")
+        hbox.addWidget(arrow_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        for label in (title_lbl, desc_lbl, category_lbl, self.value_label, arrow_lbl):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            label.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._on_activate is not None:
+                self._on_activate()
+            else:
+                self.activated.emit(self._target)
+        super().mouseReleaseEvent(event)
+
+
 class SettingsWindow(QWidget):
-    """手动确认保存全部 user_config.json 与跟随联动的偏好设置面板。"""
+    """集中管理全部偏好的设置面板。"""
+
+    _PAGE_ALL = 0
+    _PAGE_GENERAL = 1
+    _PAGE_APPEARANCE = 2
+    _PAGE_CHARACTER = 3
+    _PAGE_BEHAVIOR = 4
+    _PAGE_CHAT = 5
+    _PAGE_STARTUP = 6
+    _PAGE_LOGS = 7
+    _PAGE_ABOUT = 8
+
+    _NAV_ITEMS = (
+        ("all", "全部设置"),
+        ("general", "通用设置"),
+        ("appearance", "外观形象"),
+        ("character", "角色设定"),
+        ("behavior", "行为互动"),
+        ("chat", "对话与模型"),
+        ("startup", "启动与联动"),
+        ("logs", "日志与排查"),
+        ("about", "关于与更新"),
+    )
 
     def __init__(
         self,
@@ -66,9 +402,11 @@ class SettingsWindow(QWidget):
         settings_service: SettingsService,
         app_follow_service: AppFollowService,
         on_settings_applied: Callable[[], None],
-        on_open_profile_editor: Optional[Callable[[], None]] = None,
         on_open_update_center: Optional[Callable[[], None]] = None,
+        on_open_character_editor: Optional[Callable[[], None]] = None,
+        on_open_profile: Optional[Callable[[], None]] = None,
         on_antigravity_sync_changed: Optional[Callable[[bool], None]] = None,
+        on_auto_start_changed: Optional[Callable[[bool], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -76,20 +414,31 @@ class SettingsWindow(QWidget):
         self._settings_service = settings_service
         self._follow_service = app_follow_service
         self._on_applied = on_settings_applied
-        self._on_open_editor = on_open_profile_editor
         self._on_open_update = on_open_update_center
+        self._on_open_editor = on_open_character_editor
+        self._on_open_profile = on_open_profile
         self._on_antigravity_sync_changed = on_antigravity_sync_changed
+        self._on_auto_start_changed = on_auto_start_changed
         self._models_refresh_worker: Optional[_ModelsRefreshWorker] = None
         self._draft_gemini_model: str = DEFAULT_GEMINI_MODEL
         self._loading = True
         self._self_updating = False
         self._dirty = False
+        self._drag_offset = None
+        self._positioned = False
+        self._summary_rows: list[tuple[_SummaryRow, str, Callable[[], str]]] = []
 
-        self.setWindowTitle("⚙️ Gemini 娘 · 偏好设置")
+        self.setWindowTitle("Gemini 娘 · 设置")
         self.setWindowIcon(TrayIconService.load_app_icon())
-        self.resize(510, 760)
-        self.setMinimumSize(460, 580)
-        self.setStyleSheet(STARLIGHT_WINDOW_QSS)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(SETTINGS_WINDOW_QSS)
+
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        width = min(980, max(840, available.width() - 60))
+        height = min(700, max(560, available.height() - 60))
+        self.setFixedSize(width, height)
 
         self._build_ui()
         self.sync_from_settings(force=True)
@@ -101,157 +450,480 @@ class SettingsWindow(QWidget):
         self._status_timer.start()
         self._refresh_follow_badges()
 
+    # ==================== UI Construction ====================
+
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(10, 10, 10, 10)
+
+        shell = QFrame()
+        shell.setObjectName("SettingsShell")
+        outer.addWidget(shell)
+        shadow = QGraphicsDropShadowEffect(shell)
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shell.setGraphicsEffect(shadow)
+
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        # ---- 顶栏：标题 + 打开配置文件 + 关闭 ----
+        self._header = QWidget()
+        self._header.setObjectName("SettingsHeader")
+        self._header.setFixedHeight(58)
+        header_layout = QHBoxLayout(self._header)
+        header_layout.setContentsMargins(22, 10, 14, 4)
+        header_layout.setSpacing(8)
+
+        self._title_lbl = QLabel("设置")
+        self._title_lbl.setObjectName("WindowTitle")
+        header_layout.addWidget(self._title_lbl)
+        header_layout.addStretch(1)
+
+        open_config_btn = QPushButton("打开配置文件")
+        open_config_btn.setObjectName("GhostBtn")
+        open_config_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_config_btn.setFixedHeight(30)
+        open_config_btn.clicked.connect(self._open_settings_file)
+        header_layout.addWidget(open_config_btn)
+
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("CloseBtn")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setFixedSize(30, 30)
+        close_btn.setToolTip("关闭设置")
+        close_btn.clicked.connect(self.close)
+        header_layout.addWidget(close_btn)
+
+        self._header.installEventFilter(self)
+        self._title_lbl.installEventFilter(self)
+        shell_layout.addWidget(self._header)
+
+        # ---- 主体：左侧分类 + 右侧内容 ----
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("SettingsSidebar")
+        sidebar.setFixedWidth(196)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(10, 4, 10, 14)
+        sidebar_layout.setSpacing(2)
+
+        content = QWidget()
+        content.setObjectName("SettingsContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(6, 2, 20, 14)
+        content_layout.setSpacing(0)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_all_page())
+        self._stack.addWidget(self._build_general_page())
+        self._stack.addWidget(self._build_appearance_page())
+        self._stack.addWidget(self._build_character_page())
+        self._stack.addWidget(self._build_behavior_page())
+        self._stack.addWidget(self._build_chat_page())
+        self._stack.addWidget(self._build_startup_page())
+        self._stack.addWidget(self._build_logs_page())
+        self._stack.addWidget(self._build_about_page())
+
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        self._nav_buttons: list[QPushButton] = []
+        for index, (icon_kind, text) in enumerate(self._NAV_ITEMS):
+            btn = QPushButton(text)
+            btn.setObjectName("NavBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setIcon(_make_icon(icon_kind))
+            btn.setIconSize(QSize(18, 18))
+            btn.setMinimumHeight(38)
+            btn.clicked.connect(lambda _checked=False, i=index: self._select_page(i))
+            self._nav_group.addButton(btn, index)
+            self._nav_buttons.append(btn)
+            sidebar_layout.addWidget(btn)
+        sidebar_layout.addStretch(1)
+        self._nav_buttons[self._PAGE_ALL].setChecked(True)
+
+        content_layout.addWidget(self._stack, 1)
+
+        # ---- 底部：状态 + 还原/确认 ----
+        footer = QFrame()
+        footer.setObjectName("SettingsFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(2, 10, 0, 0)
+        footer_layout.setSpacing(8)
+
+        self._save_feedback_lbl = QLabel("✓ 当前配置已生效")
+        self._save_feedback_lbl.setWordWrap(True)
+        self._save_feedback_lbl.setStyleSheet(
+            "color: #A59EC9; font-size: 12px; background: transparent;"
+        )
+        footer_layout.addWidget(self._save_feedback_lbl, 1)
+
+        self._discard_btn = QPushButton("还原修改")
+        self._discard_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._discard_btn.setEnabled(False)
+        self._discard_btn.clicked.connect(self._on_discard_clicked)
+        footer_layout.addWidget(self._discard_btn)
+
+        self._confirm_btn = QPushButton("确认修改")
+        self._confirm_btn.setObjectName("PrimaryBtn")
+        self._confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._confirm_btn.clicked.connect(self.confirm_and_save)
+        footer_layout.addWidget(self._confirm_btn)
+
+        content_layout.addWidget(footer)
+
+        body_layout.addWidget(sidebar)
+        body_layout.addWidget(content, 1)
+        shell_layout.addWidget(body, 1)
+
+    def _new_page(self, title: str, desc: str) -> tuple[QScrollArea, QVBoxLayout]:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        inner = QWidget()
+        inner.setObjectName("PageInner")
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(0, 4, 8, 12)
+        layout.setSpacing(12)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("PageTitle")
+        layout.addWidget(title_lbl)
+
+        desc_lbl = QLabel(desc)
+        desc_lbl.setObjectName("PageDesc")
+        desc_lbl.setWordWrap(True)
+        layout.addWidget(desc_lbl)
+        layout.addSpacing(2)
+
+        scroll.setWidget(inner)
+        return scroll, layout
+
+    # ---- 全部设置：搜索 + 汇总 ----
+
+    def _build_all_page(self) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 4, 0, 0)
+        page_layout.setSpacing(10)
+
+        title_lbl = QLabel("全部设置")
+        title_lbl.setObjectName("PageTitle")
+        page_layout.addWidget(title_lbl)
+        desc_lbl = QLabel("所有开关与选项都在这里，搜索后点击即可跳到对应分类。")
+        desc_lbl.setObjectName("PageDesc")
+        desc_lbl.setWordWrap(True)
+        page_layout.addWidget(desc_lbl)
+
+        search_box = QFrame()
+        search_box.setObjectName("SearchBox")
+        search_box.setFixedHeight(38)
+        search_layout = QHBoxLayout(search_box)
+        search_layout.setContentsMargins(12, 0, 12, 0)
+        search_layout.setSpacing(8)
+        search_icon = QLabel()
+        search_icon.setFixedSize(16, 16)
+        search_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        icon_pixmap = _make_icon("search", size=16, color="#A59EC9").pixmap(QSize(16, 16), 1.0)
+        search_icon.setPixmap(icon_pixmap)
+        search_layout.addWidget(search_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setObjectName("SearchEdit")
+        self._search_edit.setPlaceholderText("搜索设置项，例如：气泡、缩放、API Key")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.textChanged.connect(self._filter_summary)
+        search_layout.addWidget(self._search_edit, 1)
+        page_layout.addWidget(search_box)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        container = QWidget()
-        root = QVBoxLayout(container)
-        root.setContentsMargins(20, 18, 20, 20)
-        root.setSpacing(12)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        inner.setObjectName("PageInner")
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(0, 2, 8, 12)
+        layout.setSpacing(12)
+        scroll.setWidget(inner)
+        page_layout.addWidget(scroll, 1)
 
-        title = QLabel("✦ 桌面宠偏好设置")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #F4F2FF; background: transparent;")
-        root.addWidget(title)
+        card = _Card(layout)
+        specs = [
+            (self._PAGE_GENERAL, "窗口始终置顶", "覆盖在其他窗口之上", "通用设置",
+             lambda: self._on_off(self._settings.always_on_top)),
+            (self._PAGE_GENERAL, "鼠标穿透", "让点击落到桌宠下方的窗口", "通用设置",
+             lambda: self._on_off(self._settings.click_through)),
+            (self._PAGE_BEHAVIOR, "自动弹出对话气泡", "按需主动说话", "行为互动",
+             lambda: self._on_off(self._settings.show_speech_bubble)),
+            (self._PAGE_GENERAL, "互动音效", "摸摸头与提示音", "通用设置",
+             lambda: self._on_off(self._settings.sound_enabled)),
+            (self._PAGE_GENERAL, "电脑状态感知", "低电量打盹与高负载提醒", "通用设置",
+             lambda: self._on_off(self._settings.system_monitor_enabled)),
+            (self._PAGE_APPEARANCE, "形象版本", "Q 版或标准立绘", "外观形象",
+             lambda: "Q 版猫娘" if self._settings.style_mode == PetStyleMode.CHIBI else "标准立绘"),
+            (self._PAGE_APPEARANCE, "人物缩放", "桌宠显示大小", "外观形象",
+             lambda: f"{self._settings.scale:.2f}x"),
+            (self._PAGE_APPEARANCE, "透明度", "整体不透明度", "外观形象",
+             lambda: f"{int(round(self._settings.opacity * 100))}%"),
+            (self._PAGE_BEHAVIOR, "固定在桌面（自由漫步）", "固定待机或自由漫步", "行为互动",
+             lambda: "自由漫步" if self._settings.auto_walk else "已固定"),
+            (self._PAGE_BEHAVIOR, "打盹模式", "原地睡觉待机", "行为互动",
+             lambda: self._on_off(self._settings.doze_mode)),
+            (self._PAGE_BEHAVIOR, "反重力悬浮模式", "常驻漂浮", "行为互动",
+             lambda: self._on_off(self._settings.anti_gravity_mode)),
+            (self._PAGE_BEHAVIOR, "重力下落与 Q 弹着陆", "松手后自然落地", "行为互动",
+             lambda: self._on_off(self._settings.gravity_enabled)),
+            (self._PAGE_BEHAVIOR, "四芒星与爱心粒子", "互动粒子特效", "行为互动",
+             lambda: self._on_off(self._settings.particles_enabled)),
+            (self._PAGE_CHAT, "Gemini API Key", "官方在线对话凭据", "对话与模型",
+             lambda: "已配置" if (self._settings.gemini_api_key or "").strip() else "未配置"),
+            (self._PAGE_CHAT, "对话模型", "当前使用的 Gemini 模型", "对话与模型",
+             lambda: format_model_display_name(self._settings.gemini_model)),
+            (self._PAGE_CHAT, "思考强度", "模型推理深度", "对话与模型",
+             lambda: format_thinking_level_label(self._settings.thinking_level)),
+            (self._PAGE_CHAT, "实时同步反重力对话", "新消息实时播报到气泡", "对话与模型",
+             lambda: self._on_off(self._settings.chat_sync_enabled)),
+            (self._PAGE_STARTUP, "Windows 开机自动启动", "登录后静默启动", "启动与联动",
+             lambda: self._on_off(self._startup_enabled())),
+            (self._PAGE_STARTUP, "跟随 Antigravity 启动", "检测到启动时自动唤醒", "启动与联动",
+             lambda: self._on_off(self._settings.follow_antigravity)),
+            (self._PAGE_STARTUP, "跟随 Gemini 桌面 App 启动", "检测到启动时自动唤醒", "启动与联动",
+             lambda: self._on_off(self._settings.follow_gemini_app)),
+            (self._PAGE_LOGS, "运行日志", "按日期写入排错日志", "日志与排查",
+             lambda: self._on_off(self._settings.enable_runtime_log)),
+            (self._PAGE_ABOUT, "启动时自动检查更新", "静默检查上游 Release", "关于与更新",
+             lambda: self._on_off(self._settings.auto_check_updates)),
+        ]
 
-        # Appearance card
-        c_app = self._make_card(root, "形象与外观")
+        for target, title, desc, category, getter in specs:
+            row = _SummaryRow(title, desc, category, target)
+            row.activated.connect(self._select_page)
+            card.layout.addWidget(row)
+            haystack = f"{title} {desc} {category}".lower()
+            self._summary_rows.append((row, haystack, getter))
+
+        # 右键菜单里的快捷操作也汇入「全部设置」，按所属分类标注
+        action_specs = [
+            ("自定义角色设定", "修改人设、台词与形象素材", "角色设定", self._handle_open_editor),
+            ("角色档案与三视图", "查看角色设定与三视图", "角色设定", self._handle_open_profile),
+            ("检查更新", "查看更新日志并升级", "关于与更新", self._handle_open_update),
+        ]
+        for title, desc, category, callback in action_specs:
+            row = _SummaryRow(title, desc, category, -1, on_activate=callback)
+            row.activated.connect(self._select_page)
+            card.layout.addWidget(row)
+            self._summary_rows.append((row, f"{title} {desc} {category}".lower(), lambda: "打开"))
+
+        self._summary_empty = QLabel("没有找到匹配的设置项，换个关键词试试。")
+        self._summary_empty.setObjectName("EmptyHint")
+        self._summary_empty.setContentsMargins(10, 10, 10, 10)
+        self._summary_empty.setVisible(False)
+        card.layout.addWidget(self._summary_empty)
+
+        layout.addStretch(1)
+        return page
+
+    @staticmethod
+    def _on_off(flag: bool) -> str:
+        return "已开启" if flag else "已关闭"
+
+    def _startup_enabled(self) -> bool:
+        try:
+            return SettingsService.is_startup_enabled()
+        except Exception:
+            return False
+
+    def _filter_summary(self, text: str) -> None:
+        keyword = (text or "").strip().lower()
+        visible = 0
+        for row, haystack, _getter in self._summary_rows:
+            matched = not keyword or keyword in haystack
+            row.setVisible(matched)
+            visible += 1 if matched else 0
+        self._summary_empty.setVisible(visible == 0)
+
+    def _refresh_summary_values(self) -> None:
+        for row, _haystack, getter in self._summary_rows:
+            try:
+                value = getter()
+            except Exception:
+                value = "--"
+            row.value_label.setText(value)
+
+    def _select_page(self, index: int) -> None:
+        if 0 <= index < self._stack.count():
+            self._stack.setCurrentIndex(index)
+            self._nav_buttons[index].setChecked(True)
+
+    # ---- 通用设置 ----
+
+    def _build_general_page(self) -> QWidget:
+        scroll, layout = self._new_page("通用设置", "窗口层级与鼠标行为的全局开关。")
+
+        card = _Card(layout, "窗口")
+        self._chk_topmost = self._make_switch()
+        card.add_row(self._chk_topmost, "窗口始终置顶", "覆盖在其他应用窗口之上，方便随时看到 Gemini 娘")
+        self._chk_click_through = self._make_switch()
+        card.add_row(
+            self._chk_click_through,
+            "鼠标穿透",
+            "开启后桌宠不再响应鼠标，可在托盘的「设置」里关闭；仅当前会话有效",
+        )
+
+        card = _Card(layout, "互动反馈")
+        self._chk_sound = self._make_switch()
+        card.add_row(self._chk_sound, "互动音效", "摸摸头、弹跳与提示音的开关")
+        self._chk_sysmon = self._make_switch()
+        card.add_row(self._chk_sysmon, "电脑状态感知", "低电量时打盹、CPU 占用过高时提醒")
+
+        layout.addStretch(1)
+        return scroll
+
+    # ---- 外观形象 ----
+
+    def _build_appearance_page(self) -> QWidget:
+        scroll, layout = self._new_page("外观形象", "角色版本、显示尺寸与整体透明度。")
+
+        card = _Card(layout, "角色形象")
         self._style_combo = QComboBox()
+        self._style_combo.setFixedWidth(250)
         self._style_combo.addItem("Q 版猫娘形象 (Chibi · 可爱)", PetStyleMode.CHIBI)
         self._style_combo.addItem("标准立绘形象 (Standard · 比例还原)", PetStyleMode.STANDARD)
         self._style_combo.currentIndexChanged.connect(self._on_any_changed)
-        self._add_labeled_row(c_app, "形象版本", self._style_combo)
+        card.add_row(self._style_combo, "形象版本", "Q 版更软萌，标准立绘更接近原画比例")
 
         self._scale_slider = QSlider(Qt.Orientation.Horizontal)
         self._scale_slider.setRange(60, 180)
         self._scale_slider.setSingleStep(5)
+        self._scale_slider.setFixedWidth(250)
         self._scale_val_lbl = QLabel("1.00x")
-        self._scale_val_lbl.setFixedWidth(48)
-        self._scale_val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._scale_val_lbl.setStyleSheet("color: #A78BFA; background: transparent;")
+        self._scale_val_lbl.setObjectName("ValueLabel")
+        self._scale_val_lbl.setFixedWidth(46)
+        self._scale_val_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._scale_slider.valueChanged.connect(self._on_any_changed)
-        self._add_slider_row(c_app, "人物缩放", self._scale_slider, self._scale_val_lbl)
+        card.add_row(self._wrap_slider(self._scale_slider, self._scale_val_lbl), "人物缩放", "调整桌宠在桌面上的显示大小")
 
         self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self._opacity_slider.setRange(40, 100)
         self._opacity_slider.setSingleStep(5)
+        self._opacity_slider.setFixedWidth(250)
         self._opacity_val_lbl = QLabel("100%")
-        self._opacity_val_lbl.setFixedWidth(48)
-        self._opacity_val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._opacity_val_lbl.setStyleSheet("color: #A78BFA; background: transparent;")
+        self._opacity_val_lbl.setObjectName("ValueLabel")
+        self._opacity_val_lbl.setFixedWidth(46)
+        self._opacity_val_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._opacity_slider.valueChanged.connect(self._on_any_changed)
-        self._add_slider_row(c_app, "透明度", self._opacity_slider, self._opacity_val_lbl)
+        card.add_row(self._wrap_slider(self._opacity_slider, self._opacity_val_lbl), "透明度", "数值越低越透明")
 
-        ed_btn = QPushButton("✏️ 自定义角色设定 / 台词 / 人设...")
-        ed_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        ed_btn.clicked.connect(self._handle_open_editor)
-        c_app.addWidget(ed_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+        return scroll
 
-        # Behavior card
-        c_beh = self._make_card(root, "行为与物理互动")
-        self._chk_topmost = self._add_check(c_beh, "窗口始终置顶（覆盖其他应用之上）")
-        self._chk_pin = self._add_check(c_beh, "固定在桌面（不乱跑）")
-        self._chk_pin.setToolTip("开启后停止自由漫步，仍可鼠标拖动位置")
-        self._chk_doze = self._add_check(c_beh, "打盹模式（原地睡觉待机，关闭时不会自行入睡）")
-        self._chk_doze.setToolTip("开启后停止漫步、随机动作与闲聊气泡；摸头或拖动后会继续打盹")
-        self._chk_antigrav = self._add_check(c_beh, "反重力悬浮模式（Antigravity 常驻漂浮）")
-        self._chk_gravity = self._add_check(c_beh, "松手重力下落与 Q 弹着陆")
-        self._chk_edgedock = self._add_check(c_beh, "拖动到屏幕左右边缘时贴边偷看")
-        self._chk_particles = self._add_check(c_beh, "四芒星✦与爱心♥粒子特效")
-        self._chk_sound = self._add_check(c_beh, "互动音效（呼噜、星铃、弹跳）")
-        self._chk_sysmon = self._add_check(c_beh, "电脑状态感知（低电量打盹 / 高 CPU 提示）")
-        self._chk_bubble = self._add_check(c_beh, "自动弹出宠物对话气泡（默认关闭，需要时在菜单中打开）")
-        self._chk_ag_sync = self._add_check(c_beh, "实时同步反重力对话（新消息实时显示在气泡里）")
-        self._chk_ag_sync.setToolTip(
-            "开启后跟随 Antigravity 当前对话，把新消息实时播报到气泡；与上面的气泡开关相互独立"
+    # ---- 角色设定 ----
+
+    def _build_character_page(self) -> QWidget:
+        """角色设定与角色档案的入口，与桌面右键菜单保持同一套内容。"""
+        scroll, layout = self._new_page("角色设定", "自定义人设、台词与形象素材，或查看当前角色档案。")
+
+        card = _Card(layout, "角色内容")
+        card.add_row(
+            self._make_open_button(self._handle_open_editor),
+            "自定义角色设定",
+            "修改人设、台词与形象素材",
+        )
+        card.add_row(
+            self._make_open_button(self._handle_open_profile),
+            "角色档案与三视图",
+            "查看角色设定与三视图",
         )
 
-        # Follow launch card
-        c_fol = self._make_card(root, "应用启动联动（后台唤醒守护）")
-        badge_row = QHBoxLayout()
-        badge_row.setSpacing(6)
-        self._ag_badge = self._make_status_badge("检测中...")
-        self._gem_badge = self._make_status_badge("检测中...")
-        self._watch_badge = self._make_status_badge("联动状态检测中...")
-        badge_row.addWidget(self._ag_badge)
-        badge_row.addWidget(self._gem_badge)
-        badge_row.addWidget(self._watch_badge)
-        badge_row.addStretch(1)
-        c_fol.addLayout(badge_row)
+        layout.addStretch(1)
+        return scroll
 
-        desc = QLabel(
-            "勾选后由主程序与轻量后台监听原生检测 Antigravity.exe / Gemini.exe（含退出桌宠后冷启动唤醒），并在当前用户启动目录建立 .lnk 快捷方式，不写入注册表或外部 VBS 脚本。"
+    # ---- 行为互动 ----
+
+    def _build_behavior_page(self) -> QWidget:
+        scroll, layout = self._new_page("行为互动", "漫步、悬浮、打盹、气泡与物理特效。")
+
+        card = _Card(layout, "桌面行为")
+        self._chk_pin = self._make_switch()
+        card.add_row(
+            self._chk_pin,
+            "固定在桌面（自由漫步）",
+            "开启后原地待机不乱跑；关闭时自由漫步",
         )
-        desc.setWordWrap(True)
-        desc.setStyleSheet("color: #9D95C8; font-size: 11.5px; background: transparent;")
-        c_fol.addWidget(desc)
+        self._chk_doze = self._make_switch()
+        card.add_row(self._chk_doze, "打盹模式", "停止漫步与闲聊，原地睡觉待机")
+        self._chk_antigrav = self._make_switch()
+        card.add_row(self._chk_antigrav, "反重力悬浮模式", "脱离地面常驻漂浮")
+        self._chk_bubble = self._make_switch()
+        card.add_row(self._chk_bubble, "自动弹出对话气泡", "关闭时仅在聊天或重要提示时显示气泡")
 
-        self._chk_follow_ag = QCheckBox("跟随 Antigravity 启动而启动")
-        self._chk_follow_ag.toggled.connect(self._on_follow_changed)
-        c_fol.addWidget(self._chk_follow_ag)
+        card = _Card(layout, "物理与特效")
+        self._chk_gravity = self._make_switch()
+        card.add_row(self._chk_gravity, "重力下落与 Q 弹着陆", "拖动松手后自然下落并回弹")
+        self._chk_particles = self._make_switch()
+        card.add_row(self._chk_particles, "四芒星与爱心粒子", "互动时出现的星芒与爱心特效")
 
-        self._chk_follow_gem = QCheckBox("跟随 Gemini 桌面 App 启动而启动")
-        self._chk_follow_gem.toggled.connect(self._on_follow_changed)
-        c_fol.addWidget(self._chk_follow_gem)
+        layout.addStretch(1)
+        return scroll
 
-        fol_btns = QHBoxLayout()
-        fol_btns.setSpacing(8)
-        sync_btn = QPushButton("🔄 启用并同步开机联动")
-        sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        sync_btn.clicked.connect(self._on_sync_follow_btn)
-        fol_btns.addWidget(sync_btn)
+    # ---- 对话与模型 ----
 
-        stop_btn = QPushButton("⏹ 停用应用联动")
-        stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        stop_btn.clicked.connect(self._on_stop_follow_btn)
-        fol_btns.addWidget(stop_btn)
+    def _build_chat_page(self) -> QWidget:
+        scroll, layout = self._new_page("对话与模型", "Gemini 官方 API Key、对话模型与实时播报。")
 
-        cfg_dir_btn = QPushButton("📂 打开配置目录")
-        cfg_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cfg_dir_btn.clicked.connect(self._open_settings_folder)
-        fol_btns.addWidget(cfg_dir_btn)
-        c_fol.addLayout(fol_btns)
-
-        # 官方 API Key 对话设置。
-        c_api = self._make_card(root, "可选：Gemini 官方 API 对话")
-        api_hint = QLabel("填写 Gemini API Key 可开启联网对话；不填写时仍可使用离线互动、摸头与角色档案。")
-        api_hint.setWordWrap(True)
-        api_hint.setStyleSheet("color: #9D95C8; font-size: 11.5px; background: transparent;")
-        c_api.addWidget(api_hint)
-
-        model_row_host = QWidget()
-        model_row_host.setStyleSheet("background: transparent;")
-        api_model_row = QHBoxLayout(model_row_host)
-        api_model_row.setContentsMargins(0, 0, 0, 0)
-        api_model_row.setSpacing(6)
-        self._model_combo = QComboBox()
-        self._model_combo.setEditable(True)
-        self._model_combo.lineEdit().setPlaceholderText(DEFAULT_GEMINI_MODEL)
-        self._model_combo.currentTextChanged.connect(self._on_model_text_changed)
-        api_model_row.addWidget(self._model_combo, 1)
-
-        self._api_refresh_models_btn = QPushButton("🔄 获取官方模型")
-        self._api_refresh_models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._api_refresh_models_btn.setToolTip("使用填写的 Gemini API Key 从 Google 官方接口获取模型列表")
-        self._api_refresh_models_btn.clicked.connect(self._on_refresh_models_clicked)
-        api_model_row.addWidget(self._api_refresh_models_btn)
-        self._add_labeled_row(c_api, "对话模型", model_row_host)
-
-        self._api_models_hint_lbl = QLabel("")
-        self._api_models_hint_lbl.setWordWrap(True)
-        self._api_models_hint_lbl.setStyleSheet("color: #9D95C8; font-size: 11px; background: transparent;")
-        self._api_models_hint_lbl.setVisible(False)
-        c_api.addWidget(self._api_models_hint_lbl)
+        card = _Card(layout, "Gemini 官方 API")
+        hint = QLabel("不填写 Key 时仍可离线互动；Key 只保存在本地 user_config.json 中。")
+        hint.setObjectName("RowDesc")
+        hint.setWordWrap(True)
+        card.add_widget(hint, top=2)
 
         self._api_key_edit = QLineEdit()
+        self._api_key_edit.setFixedWidth(320)
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key_edit.setPlaceholderText("AIza...（API Key 模式使用）")
         self._api_key_edit.textChanged.connect(self._on_api_changed)
-        self._add_labeled_row(c_api, "Gemini API Key", self._api_key_edit)
+        card.add_row(self._api_key_edit, "Gemini API Key", "官方在线对话凭据")
+
+        model_host = QWidget()
+        model_host.setObjectName("ControlHost")
+        model_row = QHBoxLayout(model_host)
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(6)
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        self._model_combo.setFixedWidth(220)
+        self._model_combo.lineEdit().setPlaceholderText(DEFAULT_GEMINI_MODEL)
+        self._model_combo.currentTextChanged.connect(self._on_model_text_changed)
+        model_row.addWidget(self._model_combo)
+        self._api_refresh_models_btn = QPushButton("获取官方模型")
+        self._api_refresh_models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._api_refresh_models_btn.setToolTip("使用填写的 Gemini API Key 从 Google 官方接口获取模型列表")
+        self._api_refresh_models_btn.clicked.connect(self._on_refresh_models_clicked)
+        model_row.addWidget(self._api_refresh_models_btn)
+        card.add_row(model_host, "对话模型", "获取后可选择官方可用模型")
+
+        self._api_models_hint_lbl = QLabel("")
+        self._api_models_hint_lbl.setWordWrap(True)
+        self._api_models_hint_lbl.setStyleSheet("color: #A59EC9; font-size: 11px; background: transparent;")
+        self._api_models_hint_lbl.setVisible(False)
+        card.add_widget(self._api_models_hint_lbl, top=6)
 
         self._thinking_combo = QComboBox()
+        self._thinking_combo.setFixedWidth(250)
         for val, short_label in THINKING_LEVEL_OPTIONS:
             desc_map = {
                 "auto": "自动（模型默认动态思考）",
@@ -264,175 +936,180 @@ class SettingsWindow(QWidget):
             }
             self._thinking_combo.addItem(desc_map.get(val, short_label), val)
         self._thinking_combo.currentIndexChanged.connect(self._on_api_changed)
-        self._add_labeled_row(c_api, "思考强度", self._thinking_combo)
+        card.add_row(self._thinking_combo, "思考强度", "越高越适合复杂推理，响应也更慢")
 
-        # Updates card
-        c_upd = self._make_card(root, "版本与软件更新")
-        upd_hdr = QHBoxLayout()
-        upd_hdr.addStretch(1)
+        card = _Card(layout, "对话播报")
+        self._chk_ag_sync = self._make_switch()
+        card.add_row(
+            self._chk_ag_sync,
+            "实时同步反重力对话",
+            "跟随 Antigravity 当前对话，把新消息实时播报到气泡",
+        )
+
+        layout.addStretch(1)
+        return scroll
+
+    # ---- 启动与联动 ----
+
+    def _build_startup_page(self) -> QWidget:
+        scroll, layout = self._new_page("启动与联动", "开机自启，以及跟随 Antigravity / Gemini 桌面端唤醒。")
+
+        card = _Card(layout, "联动状态")
+        badge_host = QWidget()
+        badge_host.setObjectName("CardHost")
+        badge_row = QHBoxLayout(badge_host)
+        badge_row.setContentsMargins(0, 0, 0, 0)
+        badge_row.setSpacing(6)
+        self._ag_badge = self._make_status_badge("检测中...")
+        self._gem_badge = self._make_status_badge("检测中...")
+        self._watch_badge = self._make_status_badge("联动状态检测中...")
+        badge_row.addWidget(self._ag_badge)
+        badge_row.addWidget(self._gem_badge)
+        badge_row.addWidget(self._watch_badge)
+        badge_row.addStretch(1)
+        card.add_widget(badge_host, top=2)
+
+        desc = QLabel(
+            "联动由主程序与轻量后台原生检测 Antigravity.exe / Gemini.exe，并在当前用户启动目录建立 .lnk 快捷方式，不写入注册表或外部脚本。"
+        )
+        desc.setObjectName("RowDesc")
+        desc.setWordWrap(True)
+        card.add_widget(desc, top=6)
+
+        card = _Card(layout, "启动行为")
+        self._chk_autostart = self._make_switch()
+        card.add_row(self._chk_autostart, "Windows 开机自动启动", "登录系统后静默启动桌宠")
+        self._chk_follow_ag = self._make_switch()
+        card.add_row(self._chk_follow_ag, "跟随 Antigravity 启动", "检测到 Antigravity 启动时自动唤醒")
+        self._chk_follow_gem = self._make_switch()
+        card.add_row(self._chk_follow_gem, "跟随 Gemini 桌面 App 启动", "检测到 Gemini 启动时自动唤醒")
+
+        sync_btn = QPushButton("启用并同步联动")
+        sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        sync_btn.clicked.connect(self._on_sync_follow_btn)
+        stop_btn = QPushButton("停用应用联动")
+        stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        stop_btn.clicked.connect(self._on_stop_follow_btn)
+        cfg_dir_btn = QPushButton("打开配置目录")
+        cfg_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cfg_dir_btn.clicked.connect(self._open_settings_folder)
+        card.add_buttons([sync_btn, stop_btn, cfg_dir_btn])
+
+        layout.addStretch(1)
+        return scroll
+
+    # ---- 日志与排查 ----
+
+    def _build_logs_page(self) -> QWidget:
+        scroll, layout = self._new_page("日志与排查", "运行日志开关、日志位置与配置文件入口。")
+
+        card = _Card(layout, "运行日志")
+        self._chk_log = self._make_switch()
+        card.add_row(
+            self._chk_log,
+            "开启运行日志",
+            "按当天日期写入 YYYY-MM-DD.log，遇到异常时可开启后复现问题",
+        )
+        self._log_path_lbl = QLabel(f"当天日志：{os.path.join(AppLogger.log_directory(), 'YYYY-MM-DD.log')}")
+        self._log_path_lbl.setObjectName("RowDesc")
+        self._log_path_lbl.setWordWrap(True)
+        card.add_widget(self._log_path_lbl, top=2)
+
+        open_log_btn = QPushButton("打开日志目录")
+        open_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_log_btn.clicked.connect(self._open_log_folder)
+        card.add_buttons([open_log_btn])
+
+        layout.addStretch(1)
+        return scroll
+
+    # ---- 关于与更新 ----
+
+    def _build_about_page(self) -> QWidget:
+        scroll, layout = self._new_page("关于与更新", "版本信息、上游追踪源与更新检查。")
+
+        card = _Card(layout, "版本")
+        version_host = QWidget()
+        version_host.setObjectName("CardHost")
+        version_row = QHBoxLayout(version_host)
+        version_row.setContentsMargins(0, 0, 0, 0)
+        version_row.setSpacing(10)
         ver_badge = QLabel(AppVersion.current_display())
         ver_badge.setStyleSheet(
-            "background-color: #2D2357; color: #D8CCFF; border-radius: 8px; padding: 3px 8px; font-size: 11.5px;"
+            "background-color: #2D2357; color: #D8CCFF; border-radius: 6px; padding: 3px 8px; font-size: 11.5px;"
         )
-        upd_hdr.addWidget(ver_badge)
-        c_upd.addLayout(upd_hdr)
-
+        version_row.addWidget(ver_badge)
         self._upstream_btn = QPushButton()
         self._upstream_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._upstream_btn.setStyleSheet(
-            "text-align: left; background: transparent; border: none; color: #9D95C8; font-size: 11.5px; text-decoration: underline; padding: 0;"
+            "text-align: left; background: transparent; border: none; color: #9D95C8; "
+            "font-size: 11.5px; text-decoration: underline; padding: 0;"
         )
         self._upstream_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl(UpdateService.get_latest_tracking_url(self._settings.update_releases_url))
             )
         )
-        c_upd.addWidget(self._upstream_btn)
+        version_row.addWidget(self._upstream_btn, 1)
+        card.add_widget(version_host, top=2)
 
-        self._chk_autocheck = self._add_check(c_upd, "启动时自动检查上游最新 Release 更新")
+        self._chk_autocheck = self._make_switch()
+        card.add_row(self._chk_autocheck, "启动时自动检查更新", "静默检查上游最新 Release")
 
-        upd_row = QHBoxLayout()
-        chk_upd_btn = QPushButton("🆕 检查更新与 Changelog...")
+        chk_upd_btn = QPushButton("检查更新与更新日志")
         chk_upd_btn.setObjectName("PrimaryBtn")
         chk_upd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         chk_upd_btn.clicked.connect(lambda: self._on_open_update() if self._on_open_update else None)
-        upd_row.addWidget(chk_upd_btn)
         self._upd_status_lbl = QLabel("始终追踪上游最新版")
-        self._upd_status_lbl.setStyleSheet("color: #A59EC9; font-size: 11.5px; background: transparent;")
+        self._upd_status_lbl.setObjectName("RowDesc")
+
+        upd_host = QWidget()
+        upd_host.setObjectName("CardHost")
+        upd_row = QHBoxLayout(upd_host)
+        upd_row.setContentsMargins(0, 0, 0, 0)
+        upd_row.setSpacing(10)
+        upd_row.addWidget(chk_upd_btn)
         upd_row.addWidget(self._upd_status_lbl, 1)
-        c_upd.addLayout(upd_row)
+        card.add_widget(upd_host, top=10)
 
-        # Logging card
-        c_log = self._make_card(root, "运行日志与问题排查")
-        log_desc = QLabel(
-            "默认关闭。遇到异常或准备提交反馈时可开启，运行过程与报错将按当天日期写入 .log 文件。"
-        )
-        log_desc.setWordWrap(True)
-        log_desc.setStyleSheet("color: #9D95C8; font-size: 11.5px; background: transparent;")
-        c_log.addWidget(log_desc)
+        layout.addStretch(1)
+        return scroll
 
-        self._chk_log = self._add_check(c_log, "开启运行日志（按当天日期写入 YYYY-MM-DD.log）")
-        self._log_path_lbl = QLabel(f"当天日志：{os.path.join(AppLogger.log_directory(), 'YYYY-MM-DD.log')}")
-        self._log_path_lbl.setWordWrap(True)
-        self._log_path_lbl.setStyleSheet("color: #A59EC9; font-size: 11px; background: transparent;")
-        c_log.addWidget(self._log_path_lbl)
+    # ---- 小组件 ----
 
-        log_btns = QHBoxLayout()
-        open_log_btn = QPushButton("📂 打开日志目录")
-        open_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_log_btn.clicked.connect(self._open_log_folder)
-        log_btns.addWidget(open_log_btn)
-        open_settings_btn = QPushButton("📄 打开 user_config.json 配置")
-        open_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_settings_btn.clicked.connect(self._open_settings_file)
-        log_btns.addWidget(open_settings_btn)
-        log_btns.addStretch(1)
-        c_log.addLayout(log_btns)
-
-        # Tip card
-        tip = QFrame()
-        tip.setObjectName("TipCard")
-        tl = QVBoxLayout(tip)
-        tl.setContentsMargins(12, 12, 12, 12)
-        tip_lbl = QLabel(
-            "互动小贴士：在猫耳与头顶区域来回滑动鼠标可触发「摸摸头」；按住快速左右甩动会让 Gemini 娘晕头或炸毛生气；右键点击角色可切换 Q 版 / 标准版形象及全部功能。"
-        )
-        tip_lbl.setWordWrap(True)
-        tip_lbl.setStyleSheet("color: #ACA4D6; font-size: 11.5px; background: transparent;")
-        tl.addWidget(tip_lbl)
-        root.addWidget(tip)
-
-        scroll.setWidget(container)
-        outer.addWidget(scroll, 1)
-
-        footer = QFrame()
-        footer.setObjectName("SettingsFooter")
-        footer.setStyleSheet(
-            """
-            QFrame#SettingsFooter {
-                background-color: #16112B;
-                border-top: 1px solid #352A63;
-            }
-            """
-        )
-        fl = QHBoxLayout(footer)
-        fl.setContentsMargins(16, 10, 16, 10)
-        fl.setSpacing(8)
-
-        self._save_feedback_lbl = QLabel("✓ 当前配置已生效")
-        self._save_feedback_lbl.setWordWrap(True)
-        self._save_feedback_lbl.setStyleSheet(
-            "color: #A59EC9; font-size: 12px; background: transparent;"
-        )
-        fl.addWidget(self._save_feedback_lbl, 1)
-
-        self._discard_btn = QPushButton("↩ 还原修改")
-        self._discard_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._discard_btn.setEnabled(False)
-        self._discard_btn.clicked.connect(self._on_discard_clicked)
-        fl.addWidget(self._discard_btn)
-
-        self._confirm_btn = QPushButton("💾 确认修改")
-        self._confirm_btn.setObjectName("PrimaryBtn")
-        self._confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._confirm_btn.clicked.connect(self.confirm_and_save)
-        fl.addWidget(self._confirm_btn)
-
-        outer.addWidget(footer)
+    def _make_switch(self) -> ToggleSwitch:
+        switch = ToggleSwitch()
+        switch.toggled.connect(self._on_any_changed)
+        return switch
 
     @staticmethod
-    def _make_card(parent_layout: QVBoxLayout, heading: str) -> QVBoxLayout:
-        card = QFrame()
-        card.setObjectName("CardPanel")
-        vl = QVBoxLayout(card)
-        vl.setContentsMargins(14, 14, 14, 14)
-        vl.setSpacing(8)
-        lbl = QLabel(heading)
-        lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #C4B5FD; background: transparent;")
-        vl.addWidget(lbl)
-        parent_layout.addWidget(card)
-        return vl
+    def _make_open_button(callback: Callable[[], None]) -> QPushButton:
+        button = QPushButton("打开")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedWidth(64)
+        button.clicked.connect(callback)
+        return button
 
     @staticmethod
-    def _add_labeled_row(parent: QVBoxLayout, label: str, widget: QWidget) -> None:
-        row = QHBoxLayout()
-        lbl = QLabel(label)
-        lbl.setFixedWidth(105)
-        lbl.setStyleSheet("color: #DAD3FA; background: transparent;")
-        row.addWidget(lbl)
-        row.addWidget(widget, 1)
-        parent.addLayout(row)
-
-    @staticmethod
-    def _add_slider_row(parent: QVBoxLayout, label: str, slider: QSlider, val_lbl: QLabel) -> None:
-        row = QHBoxLayout()
-        lbl = QLabel(label)
-        lbl.setFixedWidth(105)
-        lbl.setStyleSheet("color: #DAD3FA; background: transparent;")
-        row.addWidget(lbl)
-        row.addWidget(slider, 1)
-        row.addWidget(val_lbl)
-        parent.addLayout(row)
-
-    def _add_check(self, parent: QVBoxLayout, text: str) -> QCheckBox:
-        chk = QCheckBox(text)
-        chk.toggled.connect(self._on_any_changed)
-        parent.addWidget(chk)
-        return chk
-
-    @staticmethod
-    def _field_lbl(text: str) -> QLabel:
-        l = QLabel(text)
-        l.setStyleSheet("color: #D4CEF5; font-size: 12px; background: transparent;")
-        return l
+    def _wrap_slider(slider: QSlider, value_label: QLabel) -> QWidget:
+        host = QWidget()
+        host.setObjectName("ControlHost")
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(slider)
+        row.addWidget(value_label)
+        return host
 
     @staticmethod
     def _make_status_badge(text: str) -> QLabel:
-        l = QLabel(text)
-        l.setStyleSheet(
-            "background-color: #252048; color: #C4B5FD; border-radius: 8px; padding: 3px 8px; font-size: 11px;"
+        label = QLabel(text)
+        label.setStyleSheet(
+            "background-color: #252048; color: #C4B5FD; border-radius: 6px; padding: 3px 8px; font-size: 11px;"
         )
-        return l
+        return label
+
+    # ==================== 状态同步 ====================
 
     def has_unsaved_changes(self) -> bool:
         return bool(self._dirty)
@@ -445,7 +1122,7 @@ class SettingsWindow(QWidget):
             "error": "#F87171",
         }
         color = color_map.get(kind, "#A59EC9")
-        weight = "bold" if kind != "neutral" else "normal"
+        weight = "600" if kind != "neutral" else "normal"
         self._save_feedback_lbl.setStyleSheet(
             f"color: {color}; font-size: 12px; font-weight: {weight}; background: transparent;"
         )
@@ -487,19 +1164,16 @@ class SettingsWindow(QWidget):
             self._opacity_val_lbl.setText(f"{int(round(s.opacity * 100))}%")
 
             self._chk_topmost.setChecked(s.always_on_top)
+            self._chk_click_through.setChecked(s.click_through)
+            self._chk_bubble.setChecked(s.show_speech_bubble)
+            self._chk_sound.setChecked(s.sound_enabled)
+            self._chk_sysmon.setChecked(s.system_monitor_enabled)
+
             self._chk_pin.setChecked(not s.auto_walk)
             self._chk_doze.setChecked(s.doze_mode)
             self._chk_antigrav.setChecked(s.anti_gravity_mode)
             self._chk_gravity.setChecked(s.gravity_enabled)
-            self._chk_edgedock.setChecked(s.edge_dock_enabled)
             self._chk_particles.setChecked(s.particles_enabled)
-            self._chk_sound.setChecked(s.sound_enabled)
-            self._chk_sysmon.setChecked(s.system_monitor_enabled)
-            self._chk_bubble.setChecked(s.show_speech_bubble)
-            self._chk_ag_sync.setChecked(s.chat_sync_enabled)
-
-            self._chk_follow_ag.setChecked(s.follow_antigravity)
-            self._chk_follow_gem.setChecked(s.follow_gemini_app)
 
             self._api_key_edit.setText(s.gemini_api_key or "")
             self._draft_gemini_model = normalize_gemini_model(s.gemini_model or DEFAULT_GEMINI_MODEL)
@@ -514,11 +1188,20 @@ class SettingsWindow(QWidget):
                 0,
             )
             self._thinking_combo.setCurrentIndex(t_idx)
+            self._chk_ag_sync.setChecked(s.chat_sync_enabled)
+
+            self._chk_autostart.setChecked(self._startup_enabled())
+            self._chk_follow_ag.setChecked(s.follow_antigravity)
+            self._chk_follow_gem.setChecked(s.follow_gemini_app)
+
+            self._chk_log.setChecked(s.enable_runtime_log)
             self._chk_autocheck.setChecked(s.auto_check_updates)
             self._upstream_btn.setText(
                 f"上游追踪源：{UpdateService.normalize_releases_url(s.update_releases_url)}"
             )
-            self._chk_log.setChecked(s.enable_runtime_log)
+
+            self._refresh_summary_values()
+            self._filter_summary(self._search_edit.text())
             self._dirty = False
             self._discard_btn.setEnabled(False)
             if clear_feedback:
@@ -555,23 +1238,26 @@ class SettingsWindow(QWidget):
         s.opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
 
         s.always_on_top = self._chk_topmost.isChecked()
+        s.click_through = self._chk_click_through.isChecked()
+        s.show_speech_bubble = self._chk_bubble.isChecked()
+        s.sound_enabled = self._chk_sound.isChecked()
+        s.system_monitor_enabled = self._chk_sysmon.isChecked()
+
         s.auto_walk = not self._chk_pin.isChecked()
         s.doze_mode = self._chk_doze.isChecked()
         s.anti_gravity_mode = self._chk_antigrav.isChecked()
         s.gravity_enabled = self._chk_gravity.isChecked()
-        s.edge_dock_enabled = self._chk_edgedock.isChecked()
         s.particles_enabled = self._chk_particles.isChecked()
-        s.sound_enabled = self._chk_sound.isChecked()
-        s.system_monitor_enabled = self._chk_sysmon.isChecked()
-        s.show_speech_bubble = self._chk_bubble.isChecked()
-        s.chat_sync_enabled = self._chk_ag_sync.isChecked()
-        s.follow_antigravity = self._chk_follow_ag.isChecked()
-        s.follow_gemini_app = self._chk_follow_gem.isChecked()
 
         self._draft_gemini_model = self._model_combo.currentText()
         s.gemini_api_key = self._api_key_edit.text().strip()
         s.gemini_model = normalize_gemini_model(self._draft_gemini_model)
         s.thinking_level = normalize_thinking_level(self._thinking_combo.currentData())
+        s.chat_sync_enabled = self._chk_ag_sync.isChecked()
+
+        s.follow_antigravity = self._chk_follow_ag.isChecked()
+        s.follow_gemini_app = self._chk_follow_gem.isChecked()
+
         s.auto_check_updates = self._chk_autocheck.isChecked()
         s.enable_runtime_log = self._chk_log.isChecked()
 
@@ -583,6 +1269,9 @@ class SettingsWindow(QWidget):
             or self._settings.follow_gemini_app != self._chk_follow_gem.isChecked()
         )
         sync_before = bool(self._settings.chat_sync_enabled)
+        want_autostart = self._chk_autostart.isChecked()
+        autostart_before = self._startup_enabled()
+
         self._commit_ui_to_settings()
         try:
             self._settings_service.save(self._settings)
@@ -606,7 +1295,13 @@ class SettingsWindow(QWidget):
             self._on_antigravity_sync_changed(bool(self._settings.chat_sync_enabled))
 
         self.sync_from_settings(force=True, clear_feedback=False)
-        self._set_feedback("✅ 偏好设置保存成功，已生效", kind="success")
+
+        # 开机自启属于系统级设置，不写入 user_config.json，按需交给主程序处理后再回读实际状态。
+        if want_autostart != autostart_before and self._on_auto_start_changed is not None:
+            self._on_auto_start_changed(want_autostart)
+            self.sync_from_settings(force=True, clear_feedback=False)
+
+        self._set_feedback("✅ 设置保存成功，已生效", kind="success")
         self._emit_applied()
         self._refresh_follow_badges()
         return True
@@ -622,6 +1317,8 @@ class SettingsWindow(QWidget):
         finally:
             self._self_updating = False
 
+    # ==================== 模型获取 ====================
+
     def _on_refresh_models_clicked(self) -> None:
         if self._models_refresh_worker is not None and self._models_refresh_worker.isRunning():
             return
@@ -633,7 +1330,7 @@ class SettingsWindow(QWidget):
             return
 
         self._api_refresh_models_btn.setEnabled(False)
-        self._api_refresh_models_btn.setText("⏳ 获取中...")
+        self._api_refresh_models_btn.setText("获取中...")
         self._api_models_hint_lbl.setStyleSheet("color: #A59EC9; font-size: 11px; background: transparent;")
         self._api_models_hint_lbl.setText("正在从 Google 官方接口获取可用对话模型...")
         self._api_models_hint_lbl.setVisible(True)
@@ -650,7 +1347,7 @@ class SettingsWindow(QWidget):
                 worker.deleteLater()
             self._models_refresh_worker = None
         self._api_refresh_models_btn.setEnabled(True)
-        self._api_refresh_models_btn.setText("🔄 获取官方模型")
+        self._api_refresh_models_btn.setText("获取官方模型")
         # 请求期间若更换了 Key，不把旧 Key 的结果显示在新配置中。
         if worker is not None and worker._api_key != self._api_key_edit.text().strip():
             self._api_models_hint_lbl.setText("API Key 已修改，请重新获取模型")
@@ -664,13 +1361,10 @@ class SettingsWindow(QWidget):
         else:
             self._sync_model_combo(self._model_combo.currentText())
             self._api_models_hint_lbl.setStyleSheet("color: #34D399; font-size: 11px; background: transparent;")
-            self._api_models_hint_lbl.setText(f"✅ 已获取 {len(models)} 个官方可用模型，选择后请点击下方「确认修改」生效")
+            self._api_models_hint_lbl.setText(f"✅ 已获取 {len(models)} 个官方可用模型，选择后请点击「确认修改」生效")
         self._api_models_hint_lbl.setVisible(True)
 
-    def _on_follow_changed(self) -> None:
-        if self._loading:
-            return
-        self._mark_dirty()
+    # ==================== 应用联动 ====================
 
     def _on_sync_follow_btn(self) -> None:
         self._settings.follow_antigravity = self._chk_follow_ag.isChecked()
@@ -730,6 +1424,20 @@ class SettingsWindow(QWidget):
             f"原生守护: {'运行中' if watch_on else ('开机待机已就绪' if run_on else '未启用')}"
         )
 
+    # ==================== 目录与窗口行为 ====================
+
+    def _handle_open_editor(self) -> None:
+        if self._on_open_editor:
+            self._on_open_editor()
+
+    def _handle_open_profile(self) -> None:
+        if self._on_open_profile:
+            self._on_open_profile()
+
+    def _handle_open_update(self) -> None:
+        if self._on_open_update:
+            self._on_open_update()
+
     def _open_settings_folder(self) -> None:
         os.makedirs(self._settings_service.settings_folder, exist_ok=True)
         os.startfile(self._settings_service.settings_folder)
@@ -743,17 +1451,44 @@ class SettingsWindow(QWidget):
             self._settings_service.save(self._settings)
         os.startfile(self._settings_service.settings_path)
 
-    def _handle_open_editor(self) -> None:
-        if self._on_open_editor:
-            self._on_open_editor()
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt 命名
+        # 无边框窗口：拖动顶栏空白处移动窗口
+        if watched in (self._header, self._title_lbl):
+            etype = event.type()
+            if etype == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                return True
+            if (
+                etype == QEvent.Type.MouseMove
+                and self._drag_offset is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+            ):
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+                return True
+            if etype == QEvent.Type.MouseButtonRelease:
+                self._drag_offset = None
+                return True
+        return super().eventFilter(watched, event)
 
-    def showEvent(self, event) -> None:
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         super().showEvent(event)
+        if not self._positioned:
+            self._positioned = True
+            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                self.move(area.center() - self.rect().center())
         if not self._status_timer.isActive():
             self._status_timer.start()
         self._refresh_follow_badges()
 
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         self._status_timer.stop()
         if self._models_refresh_worker is not None and self._models_refresh_worker.isRunning():
             self._models_refresh_worker.requestInterruption()

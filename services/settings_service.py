@@ -257,6 +257,9 @@ class SettingsService:
                 pass
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
         settings.thinking_level = normalize_thinking_level(settings.thinking_level)
+        # 鼠标穿透只在当前会话内有效：若跨启动保留，桌宠会连自己的鼠标事件一起吞掉，
+        # 下次启动就无法拖动或右键，只能从托盘绕回来。
+        settings.click_through = False
         return settings
 
     def save(self, settings: PetSettings) -> None:

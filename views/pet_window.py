@@ -85,6 +85,7 @@ from services.antigravity_chat_collector import AntigravityChatCollector, SyncEv
 from services.antigravity_chat_sync_service import AntigravityChatSyncService
 from services.chat_history_service import ChatHistoryService
 from services.chat_sync_state import ChatSyncState
+from services.shared_menu import MENU_SEPARATOR, populate_shared_menu
 from services.sprite_manager import SpriteManager, WalkRigAssets
 from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
@@ -414,9 +415,6 @@ class PetWindow(QWidget):
     open_settings_requested = Signal()
     open_quota_requested = Signal()
     open_update_requested = Signal()
-    auto_start_changed = Signal(bool)
-    follow_antigravity_changed = Signal(bool)
-    follow_gemini_app_changed = Signal(bool)
     settings_synced = Signal()
     visual_bounds_changed = Signal()
     exit_requested = Signal()
@@ -459,7 +457,6 @@ class PetWindow(QWidget):
         # 心跳：按时间写日志，确认轮询是否真的在跑。
         self._ag_dbg_ticks = 0
         self._ag_dbg_last = time.monotonic()
-        self._act_sync_chat: Optional[QAction] = None
         self._ag_sync_timer = QTimer(self)
         self._ag_sync_timer.setInterval(_SYNC_POLL_MS)
         self._ag_sync_timer.timeout.connect(self._refresh_antigravity_sync)
@@ -549,6 +546,7 @@ class PetWindow(QWidget):
         # Hover & bubble/chat state
         self._is_hovering = False
         self._is_bubble_hovered = False
+        self._click_through_noticed = bool(settings.click_through)
         self._suppress_loaded_default_greeting = False
         self._is_forced_bubble_active = False
         self._is_chat_open = False
@@ -569,7 +567,6 @@ class PetWindow(QWidget):
         self._build_context_menu()
         self._build_timers()
         self._ui_ready = True
-        self._stage_top_panel.installEventFilter(self)
         self._speech_bubble.installEventFilter(self)
         self._chat_input.installEventFilter(self)
 
@@ -577,15 +574,6 @@ class PetWindow(QWidget):
 
     def _build_ui(self) -> None:
         self._stage_canvas = _PetStageCanvas(self)
-
-        # Top stage container (QuickBar) overlaid above character sprite
-        self._stage_top_panel = QWidget(self)
-        self._stage_top_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._stage_top_panel.setMouseTracking(True)
-
-        top_layout = QVBoxLayout(self._stage_top_panel)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(6)
 
         # --- Floating Resizable Speech Bubble / Chat Window ---
         self._speech_bubble = _SpeechBubbleWindow(self)
@@ -968,220 +956,127 @@ class PetWindow(QWidget):
 
         self._speech_bubble.setVisible(False)
 
-        # --- Quick Hover Action Bar ---
-        self._quick_bar = QFrame(self._stage_top_panel)
-        self._quick_bar.setObjectName("QuickBar")
-        self._quick_bar.setStyleSheet(
-            """
-            QFrame#QuickBar {
-                background-color: rgba(26, 21, 52, 230);
-                border: 1px solid #4D3D8A;
-                border-radius: 12px;
-            }
-            QFrame#QuickBar QPushButton {
-                background-color: #2D2454;
-                color: #EFEAFF;
-                border: 1px solid #544399;
-                border-radius: 10px;
-                padding: 4px 6px;
-                font-size: 11px;
-            }
-            QFrame#QuickBar QPushButton:hover {
-                background-color: #4B3A8F;
-            }
-            QFrame#QuickBar QPushButton:pressed {
-                background-color: #6D4AFF;
-            }
-            """
-        )
-        qb_layout = QVBoxLayout(self._quick_bar)
-        qb_layout.setContentsMargins(6, 5, 6, 5)
-        qb_layout.setSpacing(4)
-
-        def make_pill(text: str, tip: str, slot) -> QPushButton:
-            btn = QPushButton(text, self._quick_bar)
-            btn.setToolTip(tip)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(slot)
-            return btn
-
-        row1 = QHBoxLayout()
-        row1.setContentsMargins(0, 0, 0, 0)
-        row1.setSpacing(4)
-        row1.addStretch(1)
-        self._quick_doze_btn = make_pill("💤 打盹模式", "开关打盹模式（原地睡觉待机）", self._toggle_doze_mode)
-        row1.addWidget(self._quick_doze_btn)
-        self._quick_bubble_btn = make_pill(
-            "💭 自动弹出对话气泡", "开关自动弹出对话气泡", self._toggle_speech_bubble
-        )
-        row1.addWidget(self._quick_bubble_btn)
-        self._quick_pin_btn = make_pill("📌 固定在桌面", "固定在桌面（不乱跑）", self._toggle_pin_on_desktop)
-        row1.addWidget(self._quick_pin_btn)
-        row1.addStretch(1)
-        qb_layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(4)
-        row2.addStretch(1)
-        row2.addWidget(make_pill("💬 聊天模式", "打开 AI 聊天模式（支持多轮对话与模型选择）", self._toggle_chat))
-        self._quick_float_btn = make_pill("✨ 反重力悬浮模式", "切换反重力悬浮模式", self._toggle_anti_gravity)
-        row2.addWidget(self._quick_float_btn)
-        row2.addWidget(make_pill("📖 角色档案与三视图", "查看角色档案与三视图", self.open_profile_requested.emit))
-        row2.addStretch(1)
-        qb_layout.addLayout(row2)
-
-        row3 = QHBoxLayout()
-        row3.setContentsMargins(0, 0, 0, 0)
-        row3.setSpacing(4)
-        row3.addStretch(1)
-        self._quick_style_btn = make_pill("🎀 形象切换", "切换 Q 版 / 标准版形象", self.toggle_style_mode)
-        row3.addWidget(self._quick_style_btn)
-        row3.addWidget(make_pill("🔄 实时同步反重力对话", "实时同步反重力对话", self.toggle_antigravity_sync))
-        row3.addWidget(
-            make_pill("✏️ 自定义角色设定", "可视化自定义角色设定", self.open_character_editor_requested.emit)
-        )
-        row3.addStretch(1)
-        qb_layout.addLayout(row3)
-
-        row4 = QHBoxLayout()
-        row4.setContentsMargins(0, 0, 0, 0)
-        row4.setSpacing(4)
-        row4.addStretch(1)
-        self._quick_log_btn = make_pill("📝 记录运行日志", "开关记录运行日志（排错用）", self._toggle_runtime_log)
-        row4.addWidget(self._quick_log_btn)
-        row4.addWidget(make_pill("🆕 检查更新", "检查 GitHub Releases 更新与更新日志", self.open_update_requested.emit))
-        row4.addStretch(1)
-        qb_layout.addLayout(row4)
-
-        self._quick_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        self._quick_bar.setVisible(False)
-        top_layout.addWidget(self._quick_bar, 0, Qt.AlignmentFlag.AlignHCenter)
-        self._top_layout = top_layout
-
     def _build_context_menu(self) -> None:
-        menu = QMenu(self)
-        menu.setStyleSheet(STARLIGHT_MENU_QSS)
-        self._context_menu = menu
-
-        act_chat = menu.addAction("💬 聊天模式 / 选模型对话")
-        act_chat.triggered.connect(self._toggle_chat)
-
-        self._act_show_bubble = menu.addAction("💭 自动弹出对话气泡")
-        self._act_show_bubble.setCheckable(True)
-        self._act_show_bubble.triggered.connect(self._on_menu_show_speech_bubble)
-
-        act_quota = menu.addAction("📊 查看反重力额度")
-        act_quota.triggered.connect(self.open_quota_requested)
-
-        self._act_sync_chat = menu.addAction("💬 实时同步反重力对话")
-        self._act_sync_chat.setCheckable(True)
-        self._act_sync_chat.triggered.connect(self._on_menu_sync_chat)
-
-        menu.addSeparator()
-
-        style_menu = menu.addMenu("🎀 形象切换")
-        style_group = QActionGroup(style_menu)
-        style_group.setExclusive(True)
-        self._act_style_chibi = style_menu.addAction("Q 版猫娘形象 (Chibi · 默认)")
-        self._act_style_chibi.setCheckable(True)
-        self._act_style_chibi.setActionGroup(style_group)
-        self._act_style_chibi.triggered.connect(lambda: self._set_style_mode(PetStyleMode.CHIBI))
-
-        self._act_style_standard = style_menu.addAction("标准立绘形象 (Standard)")
-        self._act_style_standard.setCheckable(True)
-        self._act_style_standard.setActionGroup(style_group)
-        self._act_style_standard.triggered.connect(lambda: self._set_style_mode(PetStyleMode.STANDARD))
-
-        self._act_anti_gravity = menu.addAction("✨ 反重力悬浮模式")
-        self._act_anti_gravity.setCheckable(True)
-        self._act_anti_gravity.triggered.connect(self._toggle_anti_gravity)
-
-        self._act_pin_on_desktop = menu.addAction("📌 固定在桌面（不乱跑）")
-        self._act_pin_on_desktop.setCheckable(True)
-        self._act_pin_on_desktop.triggered.connect(self._on_menu_pin_on_desktop)
-
-        self._act_doze = menu.addAction("💤 打盹模式（原地睡觉待机）")
-        self._act_doze.setCheckable(True)
-        self._act_doze.triggered.connect(self._on_menu_doze_mode)
-
-        menu.aboutToShow.connect(self._sync_auto_start_action)
-
-        self._act_auto_start = menu.addAction("⚡ Windows 开机自动启动")
-        self._act_auto_start.setCheckable(True)
-        self._act_auto_start.triggered.connect(self._on_menu_auto_start)
-
-        self._act_follow_ag = menu.addAction("🚀 跟随 Antigravity 启动而启动")
-        self._act_follow_ag.setCheckable(True)
-        self._act_follow_ag.triggered.connect(self._on_menu_follow_antigravity)
-
-        self._act_follow_gemini = menu.addAction("🌟 跟随 Gemini 桌面 App 启动而启动")
-        self._act_follow_gemini.setCheckable(True)
-        self._act_follow_gemini.triggered.connect(self._on_menu_follow_gemini_app)
-
-        pose_menu = menu.addMenu("🎭 动作表现")
-        poses = [
-            ("思考中 (thinking)", "thinking"),
-            ("Nano Banana 画笔 (drawing)", "drawing"),
-            ("哼小曲 (hum)", "hum"),
-            ("伸懒腰 (stretch)", "stretch"),
-            ("打哈欠 (yawn)", "yawn"),
-            ("打盹睡觉 (sleeping)", "sleeping"),
-            ("反重力飘浮 (float)", "float"),
-            ("得意叉腰 (proud)", "proud"),
-            ("超开心 (happy)", "happy"),
-            ("压缩上下文 (compact)", "compact"),
-        ]
-        for label, key in poses:
-            act = pose_menu.addAction(label)
-            act.triggered.connect(lambda _checked=False, k=key: self.trigger_external_sprite_preview(k))
-
-        menu.addSeparator()
-
-        act_profile = menu.addAction("📖 角色档案与三视图")
-        act_profile.triggered.connect(self.open_profile_requested)
-
-        act_editor = menu.addAction("✏️ 自定义角色设定...")
-        act_editor.triggered.connect(self.open_character_editor_requested)
-
-        menu.addSeparator()
-
-        scale_menu = menu.addMenu("📏 缩放尺寸")
+        # 桌面菜单与托盘菜单共用同一批 QAction，状态天然同步，不再维护两套实现。
+        self._scale_actions: dict[float, QAction] = {}
         for lbl, val in [
             ("小巧 (0.75x)", 0.75),
             ("标准 (1.00x)", 1.0),
             ("放大 (1.30x)", 1.3),
             ("超大 (1.60x)", 1.6),
         ]:
-            act = scale_menu.addAction(lbl)
-            act.triggered.connect(lambda _checked=False, sc=val: self._on_menu_scale(sc))
+            action = QAction(lbl, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, sc=val: self._on_menu_scale(sc))
+            self._scale_actions[val] = action
 
-        dock_menu = menu.addMenu("📍 贴靠屏幕边缘")
-        act_dock_l = dock_menu.addAction("贴靠左边偷看")
-        act_dock_l.triggered.connect(lambda: self._on_menu_dock("left"))
-        act_dock_r = dock_menu.addAction("贴靠右边偷看")
-        act_dock_r.triggered.connect(lambda: self._on_menu_dock("right"))
-        act_dock_reset = dock_menu.addAction("回到地面右下角")
-        act_dock_reset.triggered.connect(lambda: self._on_menu_dock("reset"))
+        self._style_actions: dict[PetStyleMode, QAction] = {}
+        style_group = QActionGroup(self)
+        style_group.setExclusive(True)
+        for mode, label in (
+            (PetStyleMode.CHIBI, "Q 版猫娘形象"),
+            (PetStyleMode.STANDARD, "标准立绘形象"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setActionGroup(style_group)
+            action.triggered.connect(lambda _checked=False, m=mode: self._set_style_mode(m))
+            self._style_actions[mode] = action
 
-        act_ct = menu.addAction("👻 开启鼠标穿透（托盘可取消）")
-        act_ct.triggered.connect(self._on_menu_click_through)
+        self._act_pin_on_desktop = self._new_menu_action(
+            "📌 固定（自由漫步）",
+            checkable=True,
+            slot=self._on_menu_pin_on_desktop,
+            tip="勾选后固定在桌面不乱跑；取消勾选恢复自由漫步",
+        )
+        self._act_doze = self._new_menu_action(
+            "💤 打盹模式",
+            checkable=True,
+            slot=self._on_menu_doze_mode,
+            tip="原地睡觉待机，停止漫步与闲聊",
+        )
+        self._act_show_bubble = self._new_menu_action(
+            "💭 自动弹出对话气泡",
+            checkable=True,
+            slot=self._on_menu_show_speech_bubble,
+            tip="关闭后仅在聊天或重要提示时显示气泡",
+        )
+        self._act_sync_chat = self._new_menu_action(
+            "💬 实时同步反重力对话",
+            checkable=True,
+            slot=self._on_menu_sync_chat,
+            tip="把 Antigravity 的新消息实时播报到气泡",
+        )
+        self._act_runtime_log = self._new_menu_action(
+            "📝 记录运行日志",
+            checkable=True,
+            slot=self._on_menu_runtime_log,
+            tip="按当天日期写入 YYYY-MM-DD.log，排错时开启",
+        )
+        self._act_quota = self._new_menu_action(
+            "📊 查看反重力额度", slot=self.open_quota_requested
+        )
+        self._act_editor = self._new_menu_action(
+            "✏️ 自定义角色设定...", slot=self.open_character_editor_requested
+        )
+        self._act_profile = self._new_menu_action(
+            "📖 角色档案与三视图", slot=self.open_profile_requested
+        )
+        self._act_update = self._new_menu_action("🆕 检查更新...", slot=self.open_update_requested)
+        self._act_update.setData("update")
+        self._act_settings = self._new_menu_action("⚙️ 设置...", slot=self.open_settings_requested)
+        self._act_exit = self._new_menu_action("🌙 让 Gemini 娘休息（退出）", slot=self.exit_requested)
 
-        act_settings = menu.addAction("⚙️ 偏好设置...")
-        act_settings.triggered.connect(self.open_settings_requested)
+        menu = QMenu(self)
+        menu.setStyleSheet(STARLIGHT_MENU_QSS)
+        populate_shared_menu(menu, self.shared_menu_spec())
+        menu.aboutToShow.connect(self._sync_context_menu_checks)
+        self._context_menu = menu
 
-        self._act_runtime_log = menu.addAction("📝 记录运行日志（排错用）")
-        self._act_runtime_log.setCheckable(True)
-        self._act_runtime_log.triggered.connect(self._on_menu_runtime_log)
+    def _new_menu_action(
+        self,
+        text: str,
+        *,
+        checkable: bool = False,
+        slot: Optional[object] = None,
+        tip: str = "",
+    ) -> QAction:
+        action = QAction(text, self)
+        action.setCheckable(checkable)
+        if tip:
+            action.setToolTip(tip)
+        if slot is not None:
+            action.triggered.connect(slot)
+        return action
 
-        act_update = menu.addAction("🆕 检查更新...")
-        act_update.triggered.connect(self.open_update_requested)
+    def shared_menu_spec(self) -> list[object]:
+        """桌面菜单与托盘菜单共用的动作清单（QAction 实例由两边共享）。"""
+        return [
+            self._act_pin_on_desktop,
+            self._act_doze,
+            self._act_show_bubble,
+            self._act_sync_chat,
+            MENU_SEPARATOR,
+            ("🎀 形象切换", list(self._style_actions.values())),
+            ("📏 缩放大小", list(self._scale_actions.values())),
+            self._act_runtime_log,
+            self._act_quota,
+            MENU_SEPARATOR,
+            self._act_editor,
+            self._act_profile,
+            self._act_update,
+            self._act_settings,
+            MENU_SEPARATOR,
+            self._act_exit,
+        ]
 
-        menu.addSeparator()
+    @property
+    def shared_update_action(self) -> QAction:
+        return self._act_update
 
-        act_exit = menu.addAction("🌙 让 Gemini 娘休息（退出）")
-        act_exit.triggered.connect(self.exit_requested)
+    def sync_shared_menu(self) -> None:
+        """托盘菜单弹出前也调用这里，保证与桌面菜单勾选一致。"""
+        self._sync_context_menu_checks()
 
     def _build_timers(self) -> None:
         self._frame_timer = QTimer(self)
@@ -1297,11 +1192,6 @@ class PetWindow(QWidget):
                     self._bubble_timer.stop()
                     self._bubble_timer.start(2500)
                 self._schedule_hover_leave_check()
-        elif watched is self._stage_top_panel:
-            if etype == QEvent.Type.Enter:
-                self._on_hover_entered()
-            elif etype == QEvent.Type.Leave:
-                self._schedule_hover_leave_check()
         elif watched is self._chat_input and etype == QEvent.Type.KeyPress:
             if getattr(event, "key", lambda: None)() == Qt.Key.Key_Escape:
                 self._close_bubble_click()
@@ -1319,29 +1209,22 @@ class PetWindow(QWidget):
     def _on_hover_entered(self) -> None:
         self._hover_grace_timer.stop()
         self._is_hovering = True
-        self._quick_bar.setVisible(True)
-        self._relayout_stage_top()
         if self._settings.docked_side != DockSide.NONE and self._override_pose is None:
             self._refresh_sprite_visual()
 
     def _schedule_hover_leave_check(self) -> None:
-        # 延迟收起 QuickBar 并检查光标是否真正离开窗口与浮层区域
+        # 延迟检查光标是否真正离开窗口与浮层区域
         self._hover_grace_timer.stop()
         self._hover_grace_timer.start()
 
     def _on_hover_grace_timeout(self) -> None:
         global_pos = QCursor.pos()
         local_pos = self.mapFromGlobal(global_pos)
-        # 仅将角色精灵区、可见快捷栏、气泡和右键菜单视为悬浮命中区，避免透明留白让快捷栏卡死不收起
+        # 仅将角色精灵区、气泡和右键菜单视为悬浮命中区，避免透明留白让状态卡住
         sprite_hit = self._get_local_sprite_rect().adjusted(-8.0, -8.0, 8.0, 8.0).contains(
             QPointF(local_pos)
         )
         still_inside = sprite_hit or self._context_menu.isVisible()
-        if not still_inside and self._quick_bar.isVisible():
-            qb_rect = QRect(self._quick_bar.mapTo(self, QPoint(0, 0)), self._quick_bar.size()).adjusted(
-                -6, -6, 6, 6
-            )
-            still_inside = qb_rect.contains(local_pos)
         if not still_inside and self._speech_bubble.isVisible():
             if self._speech_bubble.is_resizing():
                 still_inside = True
@@ -1353,9 +1236,6 @@ class PetWindow(QWidget):
                 still_inside = sb_rect.contains(global_pos)
         if not still_inside:
             self._is_hovering = False
-            if not self._is_chat_open and not self._is_bubble_hovered:
-                self._quick_bar.setVisible(False)
-                self._relayout_stage_top()
             if self._settings.docked_side != DockSide.NONE and self._override_pose is None:
                 self._refresh_sprite_visual()
 
@@ -1390,59 +1270,10 @@ class PetWindow(QWidget):
         if pinned and self._is_walking:
             self._is_walking = False
 
-        # 先同步快捷栏文案再测算最小窗口宽度，确保任何缩放倍率/字体下快捷栏均不裁剪
-        self._act_style_chibi.setChecked(self._settings.style_mode == PetStyleMode.CHIBI)
-        self._act_style_standard.setChecked(self._settings.style_mode == PetStyleMode.STANDARD)
-        self._act_anti_gravity.setChecked(self._settings.anti_gravity_mode)
-        self._act_pin_on_desktop.setChecked(pinned)
-        self._act_doze.setChecked(self._settings.doze_mode)
+        # 同步右键菜单勾选状态与气泡展示
         self._apply_doze_transition()
-        self._act_show_bubble.setChecked(self._settings.show_speech_bubble)
-        self._act_sync_chat.setChecked(self._ag_mirror_active)
-        self._sync_auto_start_action()
-        self._act_follow_ag.setChecked(self._settings.follow_antigravity)
-        self._act_follow_gemini.setChecked(self._settings.follow_gemini_app)
-        self._act_runtime_log.setChecked(self._settings.enable_runtime_log)
-
-        self._quick_bubble_btn.setText(
-            "💭 对话气泡已开" if self._settings.show_speech_bubble else "💭 自动弹出对话气泡"
-        )
-        self._quick_bubble_btn.setToolTip(
-            "当前已开启自动弹出对话气泡（点击关闭）"
-            if self._settings.show_speech_bubble
-            else "当前已关闭自动弹出对话气泡（点击开启）"
-        )
-        self._quick_style_btn.setText("🎀 形象切换")
-        self._quick_style_btn.setToolTip(
-            "当前：标准立绘版（点击切换至 Q 版）"
-            if self._settings.style_mode == PetStyleMode.STANDARD
-            else "当前：Q 版猫娘（点击切换至标准版）"
-        )
-        self._quick_float_btn.setText("🌟 已悬浮" if self._settings.anti_gravity_mode else "✨ 反重力悬浮模式")
-        self._quick_pin_btn.setText("📌 已固定" if pinned else "📌 固定在桌面")
-        self._quick_pin_btn.setToolTip(
-            "已固定在桌面（点击恢复漫步）" if pinned else "固定在桌面（不乱跑）"
-        )
-        self._quick_doze_btn.setText("💤 打盹中" if self._settings.doze_mode else "💤 打盹模式")
-        self._quick_doze_btn.setToolTip(
-            "当前正在打盹待机（点击唤醒）"
-            if self._settings.doze_mode
-            else "开启打盹模式，原地睡觉待机"
-        )
-        self._quick_log_btn.setText("📝 日志已开" if self._settings.enable_runtime_log else "📝 记录运行日志")
-        daily_name = datetime.now().strftime("%Y-%m-%d.log")
-        log_file = os.path.join(AppLogger.log_directory(), daily_name)
-        self._quick_log_btn.setToolTip(
-            f"当前已开启运行日志，写入 {log_file}（点击关闭）"
-            if self._settings.enable_runtime_log
-            else "当前已关闭运行日志记录（点击开启排错日志）"
-        )
-
-        self._quick_bar.ensurePolished()
-        if self._quick_bar.layout() is not None:
-            self._quick_bar.layout().activate()
-        quick_min_w = self._quick_bar.sizeHint().width() + 24
-        new_w = max(360, int(round(380.0 * s)), quick_min_w)
+        self._sync_context_menu_checks()
+        new_w = max(360, int(round(380.0 * s)))
         new_h = max(380, int(round(sprite_h + 200.0)))
 
         self.setFixedSize(new_w, new_h)
@@ -1466,6 +1297,7 @@ class PetWindow(QWidget):
 
         self._update_dock_alignment()
         self._apply_win32_extended_styles()
+        self._notify_click_through_state()
         self._refresh_sprite_visual()
         self._sync_chat_controls()
         self._relayout_stage_top()
@@ -1481,6 +1313,19 @@ class PetWindow(QWidget):
         self._sync_bubble_window_styles()
         self.visual_bounds_changed.emit()
 
+    def _notify_click_through_state(self) -> None:
+        # 开启穿透后桌宠不再接收鼠标事件，先给一次明确提示，避免以为程序卡死
+        enabled = bool(self._settings.click_through)
+        if enabled == self._click_through_noticed:
+            return
+        self._click_through_noticed = enabled
+        if enabled:
+            self.show_bubble(
+                "已开启鼠标穿透，桌宠暂时点不到啦；可在托盘菜单 → 设置里关闭喵～",
+                6.0,
+                force=True,
+            )
+
     def _sync_bubble_window_styles(self) -> None:
         if not self._speech_bubble.isVisible():
             return
@@ -1495,14 +1340,7 @@ class PetWindow(QWidget):
         )
 
     def _update_dock_alignment(self) -> None:
-        if self._settings.docked_side == DockSide.LEFT:
-            align = Qt.AlignmentFlag.AlignLeft
-        elif self._settings.docked_side == DockSide.RIGHT:
-            align = Qt.AlignmentFlag.AlignRight
-        else:
-            align = Qt.AlignmentFlag.AlignHCenter
-
-        self._top_layout.setAlignment(self._quick_bar, align)
+        # 贴边状态变化后气泡需要重新贴近精灵摆放
         self._relayout_stage_top()
 
     def _bubble_min_size(self) -> tuple[int, int]:
@@ -1587,16 +1425,12 @@ class PetWindow(QWidget):
         return QSize(target_w, target_h)
 
     def _fit_bubble_size_to_placement(self, size: QSize) -> QSize:
-        """默认摆放时按快捷栏上方或精灵下方可用空间收缩高度，避免气泡压住快捷栏与立绘。"""
+        """默认摆放时按精灵上方或下方可用空间收缩高度，避免气泡压住立绘。"""
         if not self._is_chat_open:
             return size
         gap = 8
         sprite_rect = self.get_visual_sprite_bounds()
-        anchor_top = (
-            self._quick_bar.mapToGlobal(QPoint(0, 0)).y()
-            if self._quick_bar.isVisible() and self._quick_bar.height() > 0
-            else sprite_rect.top()
-        )
+        anchor_top = sprite_rect.top()
         area = self._get_work_area(
             self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
         )
@@ -1613,13 +1447,7 @@ class PetWindow(QWidget):
         bw = bubble_size.width()
         bh = bubble_size.height()
         sprite_rect = self.get_visual_sprite_bounds()
-        if self._quick_bar.isVisible() and self._quick_bar.height() > 0:
-            anchor_rect = QRect(
-                self._quick_bar.mapToGlobal(QPoint(0, 0)),
-                self._quick_bar.size(),
-            )
-        else:
-            anchor_rect = sprite_rect
+        anchor_rect = sprite_rect
 
         if self._settings.docked_side == DockSide.LEFT:
             target_x = anchor_rect.left()
@@ -1630,7 +1458,7 @@ class PetWindow(QWidget):
 
         target_y = anchor_rect.top() - gap - bh
         area = self._get_work_area(float(anchor_rect.center().x()), float(anchor_rect.center().y()))
-        # 若角色贴近屏幕顶端导致上方空间不足，优先放到精灵下方避免遮挡头顶与快捷栏
+        # 若角色贴近屏幕顶端导致上方空间不足，优先放到精灵下方避免遮挡头顶
         if target_y < area.top() + 6 and sprite_rect.bottom() + 1 + gap + bh <= area.bottom() - 6:
             target_y = sprite_rect.bottom() + 1 + gap
 
@@ -1675,26 +1503,6 @@ class PetWindow(QWidget):
             self._bubble_timer.start(2500)
 
     def _relayout_stage_top(self) -> None:
-        w = self.width()
-        h = self.height()
-        sprite_h = self._sprite_height_px()
-        max_top_w = max(240, w - 12)
-
-        self._quick_bar.adjustSize()
-        self._stage_top_panel.setFixedWidth(max_top_w)
-        self._top_layout.activate()
-        self._stage_top_panel.adjustSize()
-        top_h = self._stage_top_panel.height() if self._quick_bar.isVisible() else 0
-        if self._settings.docked_side == DockSide.LEFT:
-            top_x = 6
-        elif self._settings.docked_side == DockSide.RIGHT:
-            top_x = max(6, w - self._stage_top_panel.width() - 6)
-        else:
-            top_x = (w - self._stage_top_panel.width()) // 2
-        top_y = max(2, int(round(h - sprite_h - 2 - top_h)))
-        self._stage_top_panel.move(top_x, top_y)
-        self._stage_top_panel.raise_()
-
         if self._speech_bubble.isVisible() and not self._speech_bubble.is_resizing():
             min_w, min_h = self._bubble_min_size()
             max_w, max_h = self._bubble_max_size(
@@ -1712,18 +1520,6 @@ class PetWindow(QWidget):
                 target_pos = self._clamp_bubble_pos_to_screen(
                     self.pos() + self._bubble_custom_offset, target_size
                 )
-                # 快捷栏新出现且会遮挡用户调节过的对话框时，仅将其上推避免重叠
-                if self._quick_bar.isVisible() and self._quick_bar.height() > 0:
-                    qb_global = QRect(
-                        self._quick_bar.mapToGlobal(QPoint(0, 0)),
-                        self._quick_bar.size(),
-                    )
-                    cand_rect = QRect(target_pos, target_size)
-                    if cand_rect.intersects(qb_global):
-                        pushed_y = qb_global.top() - 8 - target_size.height()
-                        target_pos = self._clamp_bubble_pos_to_screen(
-                            QPoint(target_pos.x(), pushed_y), target_size
-                        )
             else:
                 target_pos = self._compute_bubble_default_pos(target_size)
             if self._speech_bubble.pos() != target_pos:
@@ -1820,15 +1616,19 @@ class PetWindow(QWidget):
         )
 
     def get_visual_obstacle_rects(self) -> list[QRect]:
-        """返回角色精灵与当前可见快捷栏、气泡的独立全局矩形，避免合框误占空位。"""
+        """返回角色精灵与当前可见气泡的独立全局矩形，避免合框误占空位。"""
         rects = [self.get_visual_sprite_bounds()]
-        for overlay in (self._quick_bar, self._speech_bubble):
-            if overlay.isVisible() and overlay.width() > 0 and overlay.height() > 0:
-                rects.append(QRect(overlay.mapToGlobal(QPoint(0, 0)), overlay.size()))
+        if self._speech_bubble.isVisible() and self._speech_bubble.width() > 0:
+            rects.append(
+                QRect(
+                    self._speech_bubble.mapToGlobal(QPoint(0, 0)),
+                    self._speech_bubble.size(),
+                )
+            )
         return rects
 
     def get_visual_ui_bounds(self) -> QRect:
-        """返回包含角色精灵及当前可见快捷栏、气泡的全局可视区域包围盒。"""
+        """返回包含角色精灵及当前可见气泡的全局可视区域包围盒。"""
         rects = self.get_visual_obstacle_rects()
         bounds = rects[0]
         for rect in rects[1:]:
@@ -1892,7 +1692,6 @@ class PetWindow(QWidget):
         walking: bool,
         anim_time_sec: float,
         dock_side: DockSide,
-        show_quick_bar: bool = False,
     ) -> None:
         self._override_pose = None
         self._is_dragging = False
@@ -1922,7 +1721,6 @@ class PetWindow(QWidget):
         if dock_side != DockSide.NONE:
             self._reanchor_docked_position()
 
-        self._quick_bar.setVisible(show_quick_bar)
         self._relayout_stage_top()
         self._update_sprite_transforms()
         self._stage_canvas.update()
@@ -2832,7 +2630,7 @@ class PetWindow(QWidget):
             # 无 Key 时在线挡实际仍走离线，重复点击时提示补全配置。
             if not offline and not (self._settings.gemini_api_key or "").strip():
                 self._show_chat_status_notice(
-                    "✦ 在线模式需要 Gemini API Key，请先在偏好设置中填写", force=True
+                    "✦ 在线模式需要 Gemini API Key，请先在设置中填写", force=True
                 )
             return
         self._settings.chat_offline_mode = offline
@@ -2850,7 +2648,7 @@ class PetWindow(QWidget):
         elif self._settings.gemini_api_key.strip():
             notice = "✦ 已切换为官方 API Key 在线模式"
         else:
-            notice = "请先在偏好设置中填写 Gemini API Key，当前继续使用离线陪伴"
+            notice = "请先在设置中填写 Gemini API Key，当前继续使用离线陪伴"
         self._show_chat_status_notice(notice, force=True)
 
     def _open_chat_connection_menu(self) -> None:
@@ -2969,7 +2767,7 @@ class PetWindow(QWidget):
             return
         if not self._settings.gemini_api_key.strip():
             if explicit:
-                self._show_chat_status_notice("请先在偏好设置中填写 Gemini API Key", force=True)
+                self._show_chat_status_notice("请先在设置中填写 Gemini API Key", force=True)
             return
         worker = _ChatModelsDiscoveryWorker(self._chat, self._settings, explicit=explicit, parent=self)
         worker.completed.connect(self._on_chat_models_discovered)
@@ -3238,8 +3036,6 @@ class PetWindow(QWidget):
         self._ag_collector.reset()
         self._ag_playback.clear()
         self._ag_baseline = {}
-        if self._act_sync_chat is not None:
-            self._act_sync_chat.setChecked(False)
         try:
             record = self._chat_archive.load(session_id)
         except (OSError, ValueError):
@@ -3270,8 +3066,6 @@ class PetWindow(QWidget):
         self._ag_collector.reset()
         self._ag_playback.clear()
         self._ag_baseline = {}
-        if self._act_sync_chat is not None:
-            self._act_sync_chat.setChecked(False)
         self._archive_error = ""
         self._last_chat_api_notice = ""
         self._clear_chat_rows()
@@ -3300,7 +3094,7 @@ class PetWindow(QWidget):
         self.set_antigravity_sync_enabled(not self._ag_mirror_active)
 
     def set_antigravity_sync_enabled(self, enabled: bool, *, silent: bool = False) -> None:
-        """按目标状态开启/停止实时同步；菜单复选框、托盘与偏好设置共用一个入口。"""
+        """按目标状态开启/停止实时同步；菜单复选框、托盘与设置窗口共用一个入口。"""
         want = bool(enabled)
         if want and not self._ag_mirror_active:
             self.start_antigravity_sync(silent=silent)
@@ -3309,8 +3103,7 @@ class PetWindow(QWidget):
         # 启动失败（没找到会话等）时回落到实际运行态，保证三处勾选状态一致。
         self._settings.chat_sync_enabled = self._ag_mirror_active
         self._settings_service.save(self._settings)
-        if self._act_sync_chat is not None:
-            self._act_sync_chat.setChecked(self._ag_mirror_active)
+        self._sync_context_menu_checks()
         self.settings_synced.emit()
 
     def _on_menu_sync_chat(self, checked: bool) -> None:
@@ -3340,8 +3133,6 @@ class PetWindow(QWidget):
             self._ag_baseline = self._ag_sync_state.counters()
             self._settings.chat_sync_enabled = True
             self._settings_service.save(self._settings)
-            if self._act_sync_chat is not None:
-                self._act_sync_chat.setChecked(True)
             if not silent:
                 self.show_bubble("反重力对话播报已开启喵～新消息会出现在这里", 4.0)
             AppLogger.info(
@@ -3353,8 +3144,6 @@ class PetWindow(QWidget):
             self._ag_collector.reset()
             self._ag_playback.clear()
             self._ag_baseline = {}
-            if self._act_sync_chat is not None:
-                self._act_sync_chat.setChecked(False)
             AppLogger.error("ChatSync", "启动反重力播报失败", exc)
             if not silent:
                 self.show_bubble(f"反重力播报启动失败：{exc}", 5.0, force=True)
@@ -3369,8 +3158,6 @@ class PetWindow(QWidget):
         if persist:
             self._settings.chat_sync_enabled = False
             self._settings_service.save(self._settings)
-        if self._act_sync_chat is not None:
-            self._act_sync_chat.setChecked(False)
         if not silent:
             self.show_bubble("已停止反重力播报喵～", 3.0)
 
@@ -3378,7 +3165,7 @@ class PetWindow(QWidget):
         """启动时恢复上次的播报开关：静默开启，不覆盖问候气泡。"""
         if self._ag_mirror_active or not self._settings.chat_sync_enabled:
             return
-        # 找不到会话时静默回落，避免托盘/菜单/偏好设置出现"勾着却没运行"的状态。
+        # 找不到会话时静默回落，避免托盘/菜单/设置窗口出现"勾着却没运行"的状态。
         self.set_antigravity_sync_enabled(True, silent=True)
 
     def _refresh_antigravity_sync(self) -> None:
@@ -3565,7 +3352,7 @@ class PetWindow(QWidget):
             if invalid_reason:
                 notice = (
                     f"⚠️ API Key 不可用（{invalid_reason}）\n"
-                    "请在偏好设置中检查 Gemini API Key，再点击顶部状态重新获取模型。"
+                    "请在设置中检查 Gemini API Key，再点击顶部状态重新获取模型。"
                 )
                 self._last_chat_api_notice = notice
                 self._bubble_text_lbl.setStyleSheet(
@@ -3596,6 +3383,11 @@ class PetWindow(QWidget):
             self._sync_chat_controls()
             self._hide_speech_bubble()
             self._relayout_stage_top()
+
+    def _on_menu_show_speech_bubble(self, checked: bool) -> None:
+        self.set_speech_bubble_enabled(bool(checked))
+        self._settings_service.save(self._settings)
+        self.settings_synced.emit()
 
     def _toggle_chat(self) -> None:
         if not self._is_chat_open:
@@ -3817,16 +3609,6 @@ class PetWindow(QWidget):
 
     # ==================== Menu & Quick Action Slots ====================
 
-    def _toggle_speech_bubble(self) -> None:
-        self.set_speech_bubble_enabled(not self._settings.show_speech_bubble)
-        self._settings_service.save(self._settings)
-        self.settings_synced.emit()
-
-    def _on_menu_show_speech_bubble(self, checked: bool) -> None:
-        self.set_speech_bubble_enabled(checked)
-        self._settings_service.save(self._settings)
-        self.settings_synced.emit()
-
     def _toggle_anti_gravity(self) -> None:
         self._settings.anti_gravity_mode = not self._settings.anti_gravity_mode
         if self._settings.anti_gravity_mode:
@@ -3853,16 +3635,6 @@ class PetWindow(QWidget):
         self.apply_settings_to_window()
         self.settings_synced.emit()
 
-    def _toggle_pin_on_desktop(self) -> None:
-        next_pinned = self._settings.auto_walk
-        self._set_pin_on_desktop_enabled(next_pinned)
-        self.show_bubble(
-            "已开启「固定在桌面」～乖乖待在原地陪你喵📌"
-            if next_pinned
-            else "已关闭「固定在桌面」，恢复桌面自由漫步喵～✦",
-            3.0,
-        )
-
     def _on_menu_pin_on_desktop(self, checked: bool) -> None:
         self._set_pin_on_desktop_enabled(checked)
 
@@ -3874,7 +3646,7 @@ class PetWindow(QWidget):
         )
 
     def _apply_doze_transition(self) -> None:
-        """打盹模式开关变化时播放入睡/睡醒过渡；菜单、托盘与偏好设置的改动都会经过这里。"""
+        """打盹模式开关变化时播放入睡/睡醒过渡；菜单、托盘与设置窗口的改动都会经过这里。"""
         doze = bool(self._settings.doze_mode)
         if doze == self._doze_applied:
             return
@@ -3903,10 +3675,7 @@ class PetWindow(QWidget):
         self.settings_synced.emit()
 
     def _on_menu_doze_mode(self, checked: bool) -> None:
-        self.set_doze_mode_enabled(checked)
-
-    def _toggle_doze_mode(self) -> None:
-        self.set_doze_mode_enabled(not self._settings.doze_mode)
+        self.set_doze_mode_enabled(bool(checked))
 
     def _on_menu_scale(self, scale: float) -> None:
         old_bottom = float(self.y() + self.height())
@@ -3920,47 +3689,43 @@ class PetWindow(QWidget):
         self._settings_service.save(self._settings)
         self.settings_synced.emit()
 
-    def _on_menu_dock(self, tag: str) -> None:
-        self._bubble_custom_offset = None
-        area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
-        if tag == "left":
-            self._settings.docked_side = DockSide.LEFT
-            self._settings.anti_gravity_mode = False
-            self.move(area.left(), int(round(area.top() + (area.height() - self.height()) * 0.55)))
-            self._update_dock_alignment()
-            if self._settings.doze_mode:
-                self._override_pose = None
-                self._refresh_sprite_visual()
-            else:
-                self._set_temporary_pose(self._resolve_resting_state(), 4.0, CharacterLore.pick_line("edge"))
-        elif tag == "right":
-            self._settings.docked_side = DockSide.RIGHT
-            self._settings.anti_gravity_mode = False
-            self.move(
-                area.right() + 1 - self.width(),
-                int(round(area.top() + (area.height() - self.height()) * 0.55)),
-            )
-            self._update_dock_alignment()
-            if self._settings.doze_mode:
-                self._override_pose = None
-                self._refresh_sprite_visual()
-            else:
-                self._set_temporary_pose(self._resolve_resting_state(), 4.0, CharacterLore.pick_line("edge"))
-        elif tag == "reset":
-            self.move_to_bottom_right_corner()
-            self.apply_settings_to_window()
-            self.show_and_greet()
-            return
+    def _sync_scale_actions(self) -> None:
+        """右键菜单弹出前按当前缩放同步勾选，避免与设置窗口里的滑杆不一致。"""
+        current = float(self._settings.scale)
+        for value, action in getattr(self, "_scale_actions", {}).items():
+            action.blockSignals(True)
+            try:
+                action.setChecked(abs(value - current) < 0.001)
+            finally:
+                action.blockSignals(False)
 
-        self._settings_service.save(self._settings)
-        self.settings_synced.emit()
+    def _sync_context_menu_checks(self) -> None:
+        """统一刷新右键菜单的勾选状态，保证菜单、托盘与设置窗口显示一致。"""
+        states = (
+            ("_act_pin_on_desktop", not self._settings.auto_walk),
+            ("_act_doze", self._settings.doze_mode),
+            ("_act_show_bubble", self._settings.show_speech_bubble),
+            ("_act_sync_chat", self._ag_mirror_active),
+            ("_act_runtime_log", self._settings.enable_runtime_log),
+        )
+        for attr, checked in states:
+            action = getattr(self, attr, None)
+            if action is None:
+                continue
+            action.blockSignals(True)
+            try:
+                action.setChecked(bool(checked))
+            finally:
+                action.blockSignals(False)
 
-    def _on_menu_click_through(self) -> None:
-        self._settings.click_through = True
-        self._settings_service.save(self._settings)
-        self.apply_settings_to_window()
-        self.settings_synced.emit()
-        self.show_bubble("已开启鼠标穿透！可在右下角托盘图标右键取消喵～", 4.5)
+        current_style = self._settings.style_mode
+        for mode, action in getattr(self, "_style_actions", {}).items():
+            action.blockSignals(True)
+            try:
+                action.setChecked(mode == current_style)
+            finally:
+                action.blockSignals(False)
+        self._sync_scale_actions()
 
     def _set_runtime_log_enabled(self, enabled: bool) -> None:
         self._settings.enable_runtime_log = enabled
@@ -4018,33 +3783,3 @@ class PetWindow(QWidget):
 
         self._sound.play(PetSoundEffect.SPARKLE)
         self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.55, 8)
-
-    def _sync_auto_start_action(self) -> None:
-        self._act_auto_start.blockSignals(True)
-        try:
-            self._act_auto_start.setChecked(SettingsService.is_startup_enabled())
-        finally:
-            self._act_auto_start.blockSignals(False)
-        # 菜单弹出时以实际运行态刷新同步复选框，临时停止后也能显示正确状态。
-        self._act_sync_chat.setChecked(self._ag_mirror_active)
-
-    def _on_menu_auto_start(self, checked: bool) -> None:
-        self.auto_start_changed.emit(bool(checked))
-
-    def _on_menu_follow_antigravity(self, checked: bool) -> None:
-        self.follow_antigravity_changed.emit(checked)
-        self.show_bubble(
-            "已开启「跟随 Antigravity 启动而启动」(原生守护已上线) 喵✦"
-            if checked
-            else "已关闭跟随 Antigravity 启动喵～",
-            4.0,
-        )
-
-    def _on_menu_follow_gemini_app(self, checked: bool) -> None:
-        self.follow_gemini_app_changed.emit(checked)
-        self.show_bubble(
-            "已开启「跟随 Gemini 桌面 App 启动而启动」(原生守护已上线) 喵✦"
-            if checked
-            else "已关闭跟随 Gemini 桌面 App 启动喵～",
-            4.0,
-        )

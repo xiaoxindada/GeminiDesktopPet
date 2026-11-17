@@ -4,7 +4,7 @@
 
 ## 运行效果预览
 
-![Gemini 娘双形态互动、快捷栏与骨骼漫步/贴边预览](preview/images/preview-pet-modes.png)
+![Gemini 娘双形态互动与骨骼漫步/贴边预览](preview/images/preview-pet-modes.png)
 
 | 角色档案与设定 | Q 版表情动作图鉴 |
 | :---: | :---: |
@@ -15,10 +15,10 @@
 | ![Antigravity 剩余额度看板](preview/images/preview-quota.png) |
 
 <details>
-<summary>展开查看：偏好设置</summary>
+<summary>展开查看：设置</summary>
 
 <p align="center">
-  <img src="preview/images/preview-settings.png" alt="偏好设置" width="380" />
+  <img src="preview/images/preview-settings.png" alt="设置" width="520" />
 </p>
 
 </details>
@@ -42,7 +42,7 @@
 
 遇到闪退、联动失效、额度读取失败或更新报错，请到 [GitHub Issues](https://github.com/xiaoxindada/GeminiDesktopPet/issues) 反馈：
 
-1. 在 **偏好设置 → 运行日志与问题排查** 或右键菜单开启运行日志，复现一次问题。
+1. 在 **设置 → 日志与排查** 或右键菜单开启运行日志，复现一次问题。
 2. 提交前先脱敏个人路径、账号与凭据等敏感信息。
 
 ## 开发与打包

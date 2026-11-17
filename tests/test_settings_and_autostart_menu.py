@@ -1,4 +1,4 @@
-"""偏好设置打开、菜单第一层开机启动项与额度弹窗定位/自动关闭行为测试。"""
+"""设置窗口、菜单开机启动项与额度弹窗定位/自动关闭行为测试。"""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QRect
-from PySide6.QtWidgets import QApplication, QCheckBox
+from PySide6.QtWidgets import QApplication
 
 from app import PetApplicationCoordinator
-from models.pet_settings import DockSide, PetSettings, PetStyleMode
+from models.pet_settings import DockSide, PetSettings
 from models.pet_state import PetState
 from services.antigravity_quota_service import (
     AntigravityQuotaService,
@@ -84,33 +84,99 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     coord._pet.show()
                     app.processEvents()
 
-                    pet_autostart = self._find_action(coord._pet._context_menu, "开机自动启动")
-                    tray_autostart = self._find_action(coord._tray._menu, "开机自动启动")
-                    self.assertIsNone(pet_autostart.menu())
-                    self.assertIsNone(tray_autostart.menu())
-                    self.assertTrue(pet_autostart.isCheckable())
-                    self.assertTrue(tray_autostart.isCheckable())
-                    self.assertFalse(pet_autostart.isChecked())
-                    self.assertFalse(tray_autostart.isChecked())
+                    # 桌面菜单：固定/打盹/气泡/同步/缩放/日志/角色/更新/设置/退出
+                    pet_menu_texts = [
+                        act.text() for act in coord._pet._context_menu.actions() if not act.isSeparator()
+                    ]
+                    for expected in (
+                        "固定（自由漫步）",
+                        "打盹模式",
+                        "自动弹出对话气泡",
+                        "实时同步反重力对话",
+                        "形象切换",
+                        "缩放大小",
+                        "记录运行日志",
+                        "自定义角色设定",
+                        "角色档案",
+                        "检查更新",
+                        "设置",
+                        "退出",
+                        "查看反重力额度",
+                    ):
+                        self.assertTrue(any(expected in text for text in pet_menu_texts), expected)
+                    for removed in ("开机自动启动", "反重力悬浮", "贴靠屏幕边缘", "动作表现", "鼠标穿透"):
+                        self.assertFalse(any(removed in text for text in pet_menu_texts), removed)
 
-                    # 通过宠物右键菜单开启开机自启，托盘菜单与启动快捷方式应同步更新
-                    pet_autostart.trigger()
+                    # 托盘菜单 = 桌面菜单同一批 QAction + 唤醒类专用操作
+                    tray_texts = [
+                        act.text() for act in coord._tray._menu.actions() if not act.isSeparator()
+                    ]
+                    for dedicated in ("呼唤 Gemini 娘", "聊天模式", "回到屏幕右下角"):
+                        self.assertTrue(any(dedicated in text for text in tray_texts), dedicated)
+                    for shared in (
+                        "固定（自由漫步）",
+                        "打盹模式",
+                        "自动弹出对话气泡",
+                        "实时同步反重力对话",
+                        "记录运行日志",
+                        "查看反重力额度",
+                        "自定义角色设定",
+                        "角色档案",
+                        "检查更新",
+                        "设置",
+                        "退出",
+                    ):
+                        pet_act = self._find_action(coord._pet._context_menu, shared)
+                        tray_act = self._find_action(coord._tray._menu, shared)
+                        self.assertIs(pet_act, tray_act, shared)
+
+                    # 缩放子菜单的壳各自创建，但四个缩放动作是同一批 QAction
+                    for owner in (coord._pet._context_menu, coord._tray._menu):
+                        self.assertTrue(
+                            any("缩放大小" in a.text() for a in owner.actions() if not a.isSeparator())
+                        )
+                        self.assertTrue(
+                            any("形象切换" in a.text() for a in owner.actions() if not a.isSeparator())
+                        )
+                    pet_scale = self._find_action(coord._pet._context_menu, "缩放大小").menu()
+                    tray_scale = self._find_action(coord._tray._menu, "缩放大小").menu()
+                    self.assertIsNotNone(pet_scale)
+                    self.assertIsNotNone(tray_scale)
+                    pet_scale_actions = [a for a in pet_scale.actions() if not a.isSeparator()]
+                    tray_scale_actions = [a for a in tray_scale.actions() if not a.isSeparator()]
+                    self.assertEqual(len(pet_scale_actions), 4)
+                    for pet_action, tray_action in zip(pet_scale_actions, tray_scale_actions):
+                        self.assertIs(pet_action, tray_action)
+
+                    # 形象切换同样是两个菜单共用同一批动作
+                    pet_style = self._find_action(coord._pet._context_menu, "形象切换").menu()
+                    tray_style = self._find_action(coord._tray._menu, "形象切换").menu()
+                    self.assertIsNotNone(pet_style)
+                    self.assertIsNotNone(tray_style)
+                    pet_style_actions = [a for a in pet_style.actions() if not a.isSeparator()]
+                    tray_style_actions = [a for a in tray_style.actions() if not a.isSeparator()]
+                    self.assertEqual(len(pet_style_actions), 2)
+                    for pet_action, tray_action in zip(pet_style_actions, tray_style_actions):
+                        self.assertIs(pet_action, tray_action)
+                    for removed in ("开机自动启动", "反重力悬浮", "鼠标穿透", "窗口置顶", "互动音效"):
+                        self.assertFalse(any(removed in text for text in tray_texts), removed)
+
+                    # 右键「固定（自由漫步）」勾选后停止漫步，再次点击恢复
+                    pet_pin = self._find_action(coord._pet._context_menu, "固定（自由漫步）")
+                    self.assertIsNone(pet_pin.menu())
+                    self.assertTrue(pet_pin.isCheckable())
+                    self.assertFalse(pet_pin.isChecked())
+                    pet_pin.trigger()
                     app.processEvents()
-                    self.assertTrue(SettingsService.is_startup_enabled())
-                    self.assertTrue((startup_dir / "GeminiDesktopPet.lnk").is_file())
-                    self.assertTrue(pet_autostart.isChecked())
-                    self.assertTrue(tray_autostart.isChecked())
-
-                    # 通过托盘菜单关闭开机自启，两处菜单与快捷方式同步移除
-                    tray_autostart.trigger()
+                    self.assertFalse(coord._settings.auto_walk)
+                    self.assertTrue(pet_pin.isChecked())
+                    pet_pin.trigger()
                     app.processEvents()
-                    self.assertFalse(SettingsService.is_startup_enabled())
-                    self.assertFalse((startup_dir / "GeminiDesktopPet.lnk").exists())
-                    self.assertFalse(pet_autostart.isChecked())
-                    self.assertFalse(tray_autostart.isChecked())
+                    self.assertTrue(coord._settings.auto_walk)
+                    self.assertFalse(pet_pin.isChecked())
 
-                    # 验证打开偏好设置、移除开机启动复选框、关闭后再次从托盘拉起及最小化/离屏恢复
-                    pet_settings_act = self._find_action(coord._pet._context_menu, "偏好设置")
+                    # 设置窗口内开启/关闭开机自启，启动快捷方式同步创建与移除
+                    pet_settings_act = self._find_action(coord._pet._context_menu, "设置")
                     pet_settings_act.trigger()
                     app.processEvents()
 
@@ -119,10 +185,24 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     assert win is not None
                     self.assertTrue(win.isVisible())
                     self.assertTrue(win._status_timer.isActive())
-                    self.assertFalse(hasattr(win, "_chk_autostart"))
-                    self.assertFalse(
-                        any("开机自动启动" in chk.text() for chk in win.findChildren(QCheckBox))
-                    )
+                    self.assertTrue(hasattr(win, "_chk_autostart"))
+                    self.assertFalse(win._chk_autostart.isChecked())
+                    self.assertIsNotNone(win._search_edit)
+                    self.assertEqual(len(win._summary_rows), 25)
+
+                    win._chk_autostart.setChecked(True)
+                    self.assertTrue(win.has_unsaved_changes())
+                    win._confirm_btn.click()
+                    app.processEvents()
+                    self.assertTrue(SettingsService.is_startup_enabled())
+                    self.assertTrue((startup_dir / "GeminiDesktopPet.lnk").is_file())
+                    self.assertTrue(win._chk_autostart.isChecked())
+
+                    win._chk_autostart.setChecked(False)
+                    win._confirm_btn.click()
+                    app.processEvents()
+                    self.assertFalse(SettingsService.is_startup_enabled())
+                    self.assertFalse((startup_dir / "GeminiDesktopPet.lnk").exists())
 
                     win.close()
                     app.processEvents()
@@ -133,7 +213,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     win.showMinimized()
                     app.processEvents()
 
-                    tray_settings_act = self._find_action(coord._tray._menu, "偏好设置")
+                    tray_settings_act = self._find_action(coord._tray._menu, "设置")
                     tray_settings_act.trigger()
                     app.processEvents()
 
@@ -146,7 +226,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     coord.gracefully_exit(allow_respawn_watcher=False)
                     app.processEvents()
 
-    def test_doze_mode_first_level_menus_quick_bar_and_settings_sync(self) -> None:
+    def test_doze_mode_shared_menu_and_settings_sync(self) -> None:
         app = self._ensure_app()
         with (
             tempfile.TemporaryDirectory() as tmp_startup,
@@ -154,10 +234,13 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmp_appdata,
         ):
             startup_dir = Path(tmp_startup)
+            fake_settings = PetSettings()
             with (
                 patch.dict(os.environ, {"USERPROFILE": tmp_home, "APPDATA": tmp_appdata}),
                 patch("services.win32_ipc.get_windows_startup_dir", return_value=startup_dir),
                 patch("services.settings_service.get_windows_startup_dir", return_value=startup_dir),
+                patch("services.settings_service.SettingsService.load", return_value=fake_settings),
+                patch("services.settings_service.SettingsService.save", return_value=None),
                 patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
                 patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
             ):
@@ -165,29 +248,14 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 try:
                     coord._pet.show()
                     app.processEvents()
-
-                    # 原「隐藏待机」已由一级「打盹模式」取代，快捷栏也替换为打盹按钮
-                    self.assertFalse(
-                        any("隐藏待机" in a.text() for a in coord._pet._context_menu.actions() if not a.isSeparator())
-                    )
-                    self.assertFalse(
-                        any("隐藏待机" in a.text() for a in coord._tray._menu.actions() if not a.isSeparator())
-                    )
-                    self.assertFalse(hasattr(coord._pet, "_quick_pat_btn"))
-                    self.assertFalse(
-                        any("摸摸猫耳" in btn.text() for btn in coord._pet._quick_bar.findChildren(type(coord._pet._quick_doze_btn)))
-                    )
+                    self.assertFalse(hasattr(coord._pet, "_quick_bar"))
 
                     pet_doze = self._find_action(coord._pet._context_menu, "打盹模式")
                     tray_doze = self._find_action(coord._tray._menu, "打盹模式")
-                    self.assertIsNone(pet_doze.menu())
-                    self.assertIsNone(tray_doze.menu())
+                    self.assertIs(pet_doze, tray_doze)
                     self.assertTrue(pet_doze.isCheckable())
-                    self.assertTrue(tray_doze.isCheckable())
-                    self.assertFalse(coord._settings.doze_mode)
                     self.assertFalse(pet_doze.isChecked())
-                    self.assertFalse(tray_doze.isChecked())
-                    self.assertEqual(coord._pet._quick_doze_btn.text(), "💤 打盹模式")
+                    self.assertFalse(coord._settings.doze_mode)
 
                     coord.open_settings_window()
                     app.processEvents()
@@ -195,47 +263,32 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     assert win is not None
                     self.assertFalse(win._chk_doze.isChecked())
 
-                    # 1. 悬浮快捷栏点击开启 -> 同步右键菜单、托盘菜单、偏好设置并持久化
-                    coord._pet._quick_doze_btn.click()
+                    # 1. 菜单勾选打盹 -> 进入睡姿，设置窗口与配置同步
+                    pet_doze.trigger()
                     app.processEvents()
                     self.assertTrue(coord._settings.doze_mode)
-                    self.assertTrue(pet_doze.isChecked())
                     self.assertTrue(tray_doze.isChecked())
                     self.assertTrue(win._chk_doze.isChecked())
-                    self.assertEqual(coord._pet._quick_doze_btn.text(), "💤 打盹中")
                     self.assertEqual(coord._pet._resolve_resting_state(), PetState.SLEEPING)
                     self.assertTrue(SettingsService().load().doze_mode)
 
-                    # 2. 偏好设置取消勾选（需点击确认修改后才写入配置并同步两级菜单与快捷栏）
+                    # 2. 设置窗口取消（需确认）-> 菜单勾选同步取消
                     win._chk_doze.setChecked(False)
-                    app.processEvents()
                     self.assertTrue(win.has_unsaved_changes())
-                    self.assertTrue(coord._settings.doze_mode)
-                    self.assertTrue(SettingsService().load().doze_mode)
-
                     win._confirm_btn.click()
                     app.processEvents()
                     self.assertFalse(win.has_unsaved_changes())
                     self.assertIn("保存成功", win._save_feedback_lbl.text())
-                    self.assertEqual(coord._settings.style_mode, PetStyleMode.CHIBI)
                     self.assertFalse(coord._settings.doze_mode)
                     self.assertFalse(pet_doze.isChecked())
-                    self.assertFalse(tray_doze.isChecked())
-                    self.assertEqual(coord._pet._quick_doze_btn.text(), "💤 打盹模式")
                     self.assertFalse(SettingsService().load().doze_mode)
 
-                    # 3. 托盘一级菜单开启、右键一级菜单关闭 -> 全链路保持一致
+                    # 3. 从托盘一侧勾选 -> 设置窗口跟随同步
                     tray_doze.trigger()
                     app.processEvents()
                     self.assertTrue(coord._settings.doze_mode)
                     self.assertTrue(pet_doze.isChecked())
                     self.assertTrue(win._chk_doze.isChecked())
-
-                    pet_doze.trigger()
-                    app.processEvents()
-                    self.assertFalse(coord._settings.doze_mode)
-                    self.assertFalse(tray_doze.isChecked())
-                    self.assertFalse(win._chk_doze.isChecked())
                 finally:
                     coord.gracefully_exit(allow_respawn_watcher=False)
                     app.processEvents()
@@ -243,7 +296,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
     def test_quota_window_places_beside_head_and_auto_closes(self) -> None:
         app = self._ensure_app()
 
-        class _MockDockedPetWithQuickBar:
+        class _MockDockedPet:
             def isVisible(self) -> bool:
                 return True
 
@@ -258,7 +311,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 return QRect(1720, 620, 180, 260)
 
             def get_visual_obstacle_rects(self) -> list[QRect]:
-                # 快捷栏位于人物头顶上方且向左更宽，不应把额度框推到远端或脚底
+                # 气泡位于人物头顶上方且向左更宽，不应把额度框推到远端或脚底
                 return [
                     self.get_visual_sprite_bounds(),
                     QRect(1460, 495, 430, 112),
@@ -268,7 +321,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 rects = self.get_visual_obstacle_rects()
                 return rects[0].united(rects[1])
 
-        pet = _MockDockedPetWithQuickBar()
+        pet = _MockDockedPet()
         win = QuotaWindow(AntigravityQuotaService(), anchor_pet=pet)
         try:
             win.show_loading_card()
@@ -282,7 +335,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 win.height() - shadow * 2,
             )
             sr = pet.get_visual_sprite_bounds()
-            # 加载气泡应紧贴人物头部左侧，而非被推至快捷栏外或人物脚底
+            # 加载气泡应紧贴人物头部左侧，而非被推至远端或人物脚底
             self.assertLessEqual(abs(sr.left() - card_rect.right()), 16)
             self.assertLess(abs(card_rect.top() - sr.top()), 48)
             for obs in pet.get_visual_obstacle_rects():

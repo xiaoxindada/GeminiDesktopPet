@@ -1,4 +1,4 @@
-"""官方 API Key 模型获取与偏好设置测试。"""
+"""官方 API Key 模型获取与设置窗口测试。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from types import SimpleNamespace
 if os.name != "nt" and not os.environ.get("DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton
 
 from models.pet_settings import DEFAULT_GEMINI_MODEL, PetSettings, format_model_display_name
 from services.app_follow_service import AppFollowService
@@ -272,3 +274,139 @@ class TestChatAndSettings(unittest.TestCase):
                         win.close()
                         win.deleteLater()
                         app.processEvents()
+
+    def test_settings_all_page_search_filters_and_navigates(self) -> None:
+        """全部设置汇总页应支持关键词过滤，并可点击跳转到对应分类。"""
+        app = self._ensure_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SettingsService(tmp)
+            settings = PetSettings()
+            win = SettingsWindow(
+                settings=settings,
+                settings_service=svc,
+                app_follow_service=AppFollowService(svc),
+                on_settings_applied=lambda: None,
+            )
+            try:
+                win.show()
+                app.processEvents()
+                self.assertEqual(len(win._summary_rows), 25)
+                self.assertTrue(all(not row.isHidden() for row, _text, _getter in win._summary_rows))
+
+                win._search_edit.setText("气泡")
+                app.processEvents()
+                matched = [row for row, _text, _getter in win._summary_rows if not row.isHidden()]
+                self.assertTrue(matched)
+                self.assertLess(len(matched), 25)
+                self.assertFalse(win._summary_empty.isVisible())
+
+                win._search_edit.setText("不存在的设置项")
+                app.processEvents()
+                self.assertTrue(all(row.isHidden() for row, _text, _getter in win._summary_rows))
+                self.assertTrue(win._summary_empty.isVisible())
+
+                win._search_edit.clear()
+                app.processEvents()
+                self.assertTrue(all(not row.isHidden() for row, _text, _getter in win._summary_rows))
+                self.assertFalse(win._summary_empty.isVisible())
+
+                # 汇总行点击后跳到对应分类并勾选左侧导航
+                win._summary_rows[0][0].activated.emit(SettingsWindow._PAGE_CHAT)
+                app.processEvents()
+                self.assertEqual(win._stack.currentIndex(), SettingsWindow._PAGE_CHAT)
+                self.assertTrue(win._nav_buttons[SettingsWindow._PAGE_CHAT].isChecked())
+            finally:
+                win.close()
+                win.deleteLater()
+                app.processEvents()
+
+    def test_settings_summary_quick_actions_trigger_callbacks(self) -> None:
+        """全部设置末尾的快捷操作应直接打开角色设定、角色档案与更新窗口。"""
+        app = self._ensure_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SettingsService(tmp)
+            calls = {"editor": 0, "profile": 0, "update": 0}
+            win = SettingsWindow(
+                settings=PetSettings(),
+                settings_service=svc,
+                app_follow_service=AppFollowService(svc),
+                on_settings_applied=lambda: None,
+                on_open_update_center=lambda: calls.__setitem__("update", calls["update"] + 1),
+                on_open_character_editor=lambda: calls.__setitem__("editor", calls["editor"] + 1),
+                on_open_profile=lambda: calls.__setitem__("profile", calls["profile"] + 1),
+            )
+            try:
+                win.show()
+                app.processEvents()
+                self.assertEqual(len(win._summary_rows), 25)
+                for (row, _text, _getter), key in zip(
+                    win._summary_rows[-3:], ("editor", "profile", "update")
+                ):
+                    QTest.mouseClick(row, Qt.MouseButton.LeftButton)
+                    app.processEvents()
+                    self.assertEqual(calls[key], 1, key)
+            finally:
+                win.close()
+                win.deleteLater()
+                app.processEvents()
+
+    def test_character_page_actions_trigger_callbacks(self) -> None:
+        """角色设定分类页应提供自定义角色设定与角色档案两个入口。"""
+        app = self._ensure_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SettingsService(tmp)
+            calls = {"editor": 0, "profile": 0}
+            win = SettingsWindow(
+                settings=PetSettings(),
+                settings_service=svc,
+                app_follow_service=AppFollowService(svc),
+                on_settings_applied=lambda: None,
+                on_open_character_editor=lambda: calls.__setitem__("editor", calls["editor"] + 1),
+                on_open_profile=lambda: calls.__setitem__("profile", calls["profile"] + 1),
+            )
+            try:
+                win.show()
+                app.processEvents()
+                win._select_page(SettingsWindow._PAGE_CHARACTER)
+                app.processEvents()
+                page = win._stack.widget(SettingsWindow._PAGE_CHARACTER)
+                buttons = [btn for btn in page.findChildren(QPushButton) if btn.text() == "打开"]
+                self.assertEqual(len(buttons), 2)
+                for button in buttons:
+                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                    app.processEvents()
+                self.assertEqual(calls, {"editor": 1, "profile": 1})
+            finally:
+                win.close()
+                win.deleteLater()
+                app.processEvents()
+
+    def test_bubble_setting_belongs_to_behavior_page(self) -> None:
+        """自动弹出对话气泡属于行为互动，不应留在通用设置里。"""
+        app = self._ensure_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SettingsService(tmp)
+            win = SettingsWindow(
+                settings=PetSettings(),
+                settings_service=svc,
+                app_follow_service=AppFollowService(svc),
+                on_settings_applied=lambda: None,
+            )
+            try:
+                win.show()
+                app.processEvents()
+                behavior_page = win._stack.widget(SettingsWindow._PAGE_BEHAVIOR)
+                general_page = win._stack.widget(SettingsWindow._PAGE_GENERAL)
+                self.assertTrue(behavior_page.isAncestorOf(win._chk_bubble))
+                self.assertFalse(general_page.isAncestorOf(win._chk_bubble))
+
+                bubble_row = next(
+                    row
+                    for row, _text, _getter in win._summary_rows
+                    if any(lbl.text() == "自动弹出对话气泡" for lbl in row.findChildren(QLabel))
+                )
+                self.assertEqual(bubble_row._target, SettingsWindow._PAGE_BEHAVIOR)
+            finally:
+                win.close()
+                win.deleteLater()
+                app.processEvents()

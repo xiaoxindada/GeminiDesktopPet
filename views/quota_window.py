@@ -632,7 +632,7 @@ class QuotaWindow(QWidget):
             area = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
 
             prefer_left = cx >= area.x() + area.width() // 2
-            # 优先贴合角色头部高度，避免默认沉底或被宽快捷栏推离人物
+            # 优先贴合角色头部高度，避免默认沉底或被头顶浮层推离人物
             head_y = max(
                 area.y() + 6,
                 min(

@@ -161,8 +161,13 @@ class PetApplicationCoordinator(QObject):
             sys_monitor=self._sys_monitor,
             chat=self._chat,
         )
-        self._tray = TrayIconService(parent=self, menu_qss=STARLIGHT_MENU_QSS)
-        self._tray.sync_state(self._settings)
+        self._tray = TrayIconService(
+            parent=self,
+            menu_qss=STARLIGHT_MENU_QSS,
+            shared_menu_spec=self._pet.shared_menu_spec,
+            shared_menu_refresh=self._pet.sync_shared_menu,
+            update_action=self._pet.shared_update_action,
+        )
 
         self._wire_signals()
         self._start_watcher()
@@ -183,36 +188,14 @@ class PetApplicationCoordinator(QObject):
         self._pet.open_settings_requested.connect(self.open_settings_window)
         self._pet.open_quota_requested.connect(self.toggle_quota_window)
         self._pet.open_update_requested.connect(self.open_update_window)
-        self._pet.auto_start_changed.connect(self._set_auto_start)
-        self._pet.follow_antigravity_changed.connect(self._set_follow_antigravity)
-        self._pet.follow_gemini_app_changed.connect(self._set_follow_gemini_app)
         self._pet.settings_synced.connect(self._sync_all_views_from_settings)
         self._pet.visual_bounds_changed.connect(self._keep_quota_window_clear)
         self._pet.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
 
-        # TrayIconService signals
+        # TrayIconService signals（其余菜单项直接复用桌面右键菜单的 QAction）
         self._tray.show_and_greet_requested.connect(self._wake_from_tray_or_greet)
         self._tray.open_chat_requested.connect(self._open_chat_from_tray)
         self._tray.reset_position_requested.connect(self._reset_position_from_tray)
-        self._tray.style_toggle_requested.connect(self._pet.toggle_style_mode)
-        self._tray.anti_gravity_toggled.connect(self._set_anti_gravity_from_tray)
-        self._tray.pin_on_desktop_toggled.connect(self._set_pin_from_tray)
-        self._tray.doze_mode_toggled.connect(self._pet.set_doze_mode_enabled)
-        self._tray.speech_bubble_toggled.connect(self._set_bubble_from_tray)
-        self._tray.auto_start_toggled.connect(self._set_auto_start)
-        self._tray.follow_antigravity_toggled.connect(self._set_follow_antigravity)
-        self._tray.follow_gemini_app_toggled.connect(self._set_follow_gemini_app)
-        self._tray.click_through_toggled.connect(self._set_click_through_from_tray)
-        self._tray.always_on_top_toggled.connect(self._set_always_on_top_from_tray)
-        self._tray.sound_toggled.connect(self._set_sound_from_tray)
-        self._tray.runtime_log_toggled.connect(self._set_runtime_log_from_tray)
-        self._tray.open_profile_requested.connect(self.open_profile_window)
-        self._tray.open_character_editor_requested.connect(self.open_character_editor_window)
-        self._tray.open_settings_requested.connect(self.open_settings_window)
-        self._tray.open_quota_requested.connect(self.toggle_quota_window)
-        self._tray.sync_antigravity_toggled.connect(self._pet.set_antigravity_sync_enabled)
-        self._tray.open_update_requested.connect(self.open_update_window)
-        self._tray.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
 
     # ==================== IPC Event Listener ====================
 
@@ -315,20 +298,6 @@ class PetApplicationCoordinator(QObject):
         self._pet.move_to_bottom_right_corner()
         self._pet.show_and_greet("回到桌面右下角就位啦喵✦")
 
-    def _set_anti_gravity_from_tray(self, enabled: bool) -> None:
-        if enabled != self._settings.anti_gravity_mode:
-            self._pet._toggle_anti_gravity()
-
-    def _set_pin_from_tray(self, pinned: bool) -> None:
-        self._settings.auto_walk = not pinned
-        self._settings_service.save(self._settings)
-        self._sync_all_views_from_settings()
-
-    def _set_bubble_from_tray(self, enabled: bool) -> None:
-        self._pet.set_speech_bubble_enabled(enabled)
-        self._settings_service.save(self._settings)
-        self._sync_all_views_from_settings()
-
     def _set_auto_start(self, enabled: bool) -> None:
         ok = SettingsService.set_startup_enabled(bool(enabled))
         actual = SettingsService.is_startup_enabled()
@@ -349,46 +318,8 @@ class PetApplicationCoordinator(QObject):
                 4.0,
             )
 
-    def _set_follow_antigravity(self, enabled: bool) -> None:
-        self._settings.follow_antigravity = enabled
-        self._settings_service.save(self._settings)
-        self._follow_service.sync_and_apply(self._settings)
-        self._sync_all_views_from_settings()
-
-    def _set_follow_gemini_app(self, enabled: bool) -> None:
-        self._settings.follow_gemini_app = enabled
-        self._settings_service.save(self._settings)
-        self._follow_service.sync_and_apply(self._settings)
-        self._sync_all_views_from_settings()
-
-    def _set_click_through_from_tray(self, enabled: bool) -> None:
-        self._settings.click_through = enabled
-        self._settings_service.save(self._settings)
-        self._sync_all_views_from_settings()
-        if enabled:
-            self._pet.show_bubble("已开启鼠标穿透！可在右下角托盘图标右键取消喵～", 4.5, force=True)
-        else:
-            self._pet.show_bubble("已取消鼠标穿透，现在可以抓抓摸摸我啦喵✦", 3.5, force=True)
-
-    def _set_always_on_top_from_tray(self, enabled: bool) -> None:
-        self._settings.always_on_top = enabled
-        self._settings_service.save(self._settings)
-        self._sync_all_views_from_settings()
-
-    def _set_sound_from_tray(self, enabled: bool) -> None:
-        self._settings.sound_enabled = enabled
-        self._settings_service.save(self._settings)
-        self._sync_all_views_from_settings()
-
-    def _set_runtime_log_from_tray(self, enabled: bool) -> None:
-        self._settings.enable_runtime_log = enabled
-        AppLogger.set_enabled(enabled)
-        self._settings_service.save(self._settings)
-        self._sync_all_views_from_settings()
-
     def _sync_all_views_from_settings(self) -> None:
         self._pet.apply_settings_to_window()
-        self._tray.sync_state(self._settings)
         if self._settings_win is not None and self._settings_win.isVisible():
             self._settings_win.sync_from_settings(force=False)
         if self._profile_win is not None and self._profile_win.isVisible():
@@ -461,9 +392,11 @@ class PetApplicationCoordinator(QObject):
                     settings_service=self._settings_service,
                     app_follow_service=self._follow_service,
                     on_settings_applied=self._sync_all_views_from_settings,
-                    on_open_profile_editor=self.open_character_editor_window,
                     on_open_update_center=self.open_update_window,
+                    on_open_character_editor=self.open_character_editor_window,
+                    on_open_profile=self.open_profile_window,
                     on_antigravity_sync_changed=self._pet.set_antigravity_sync_enabled,
+                    on_auto_start_changed=self._set_auto_start,
                 )
             self._settings_win.sync_from_settings()
             self._show_and_focus(self._settings_win)
