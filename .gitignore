@@ -19,6 +19,9 @@ publish/
 *.pkg
 *.pyz
 
+# WorkBuddy local memory (never commit)
+.workbuddy/
+
 # Runtime & OS
 *.log
 *.tmp

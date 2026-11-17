@@ -15,7 +15,10 @@ Assisted-by: <当前模型的代号名称>
 2. **禁止未经允许不要 push**：永远不要在用户不允许的情况下 push 任何本地提交，除非用户明确指定。
 3. **提交前保持标准格式化**：代码提交 git 时需要保持标准格式化。
 4. **提交必须按职责拆分**：禁止将多个不相关或跨模块的改动打包为单次大提交；应按功能模块、逻辑边界或独立修复拆分为多个原子提交，保证每次提交职责单一且可独立编译。
-5. **发布新 Tag 使用 `gh` 发布 Release**：发布新的版本 Tag（如 `v0.3.0`）并获得用户允许推送后，先更新 `models/app_version.py` 中的 `APP_VERSION`、运行 `BuildRelease.bat --no-pause` 生成 `out\GeminiDesktopPet-<tag>-win-x64.zip` 与 `out\git-commit-summary.md`，创建并推送 Tag 后，使用 `gh release create`（若 Release 已存在则用 `gh release upload --clobber` 与 `gh release edit`）上传安装包并发布对应 Tag 的 GitHub Release。
+5. **发布新版本（Tag + Release）**
+   - 运行 `BuildRelease.bat --no-pause` 打包出 `out\GeminiDesktopPet-<tag>-win-x64.zip`。
+   - 创建并推送 Tag 后，汇总描述(AI)自行对比和上个版本的差异, 用简洁的描述整理修改历史后，通过 `gh release create` 发布到对应 Tag 的 GitHub Release；若 Release 已存在则用 `gh release upload --clobber` 与 `gh release edit` 更新。
+   - Release 说明末尾必须附 Full Changelog 一并发布。
 
 # 隐私与敏感信息规范
 1. **编写或修改代码时禁止生成带有敏感数据的代码**：此规则适用于整个开发过程，无论是否提交、推送或发布；禁止在源代码、示例、注释和测试数据中写入真实或未脱敏的密钥、令牌、密码、个人信息及其他敏感数据，需要示例时使用明确的占位符或脱敏数据。

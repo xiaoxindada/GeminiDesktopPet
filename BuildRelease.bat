@@ -30,80 +30,114 @@ if errorlevel 1 (
 
 set "OUTPUT_BASE=%REPO_ROOT%\out"
 set "STAGE_DIR=%OUTPUT_BASE%\GeminiDesktopPet"
+set "CLEAN_DIR=%OUTPUT_BASE%\CleanConfig"
 set "BUILD_WORK=%REPO_ROOT%\build\pyinstaller"
+set "ICON=%REPO_ROOT%\Assets\AppIcon.ico"
+set "SEVENZA=%REPO_ROOT%\tools\7za\7za.exe"
 
-echo [1/5] Stopping any running GeminiDesktopPet instances...
-"%PYTHON_EXE%" "%REPO_ROOT%\main.py" --close-pet --stop-all >nul 2>&1
-taskkill /F /IM GeminiDesktopPet.exe >nul 2>&1
-taskkill /F /IM CleanConfig.exe >nul 2>&1
-
-echo [2/5] Preparing staging folder: %STAGE_DIR%
+echo [1/5] Preparing staging folders...
 if exist "%STAGE_DIR%" rmdir /s /q "%STAGE_DIR%"
+if exist "%CLEAN_DIR%" rmdir /s /q "%CLEAN_DIR%"
 if exist "%BUILD_WORK%" rmdir /s /q "%BUILD_WORK%"
 if not exist "%OUTPUT_BASE%" mkdir "%OUTPUT_BASE%"
-if not exist "%BUILD_WORK%" mkdir "%BUILD_WORK%"
+if not exist "%BUILD_WORK%\spec" mkdir "%BUILD_WORK%\spec"
 
-"%PYTHON_EXE%" -m tools.release_package resolve-version --repo-root "%REPO_ROOT%" --output "%BUILD_WORK%\version.txt"
-if errorlevel 1 (
-    echo [ERROR] Failed to resolve AppVersion or verify release files!
-    set "EXIT_CODE=1"
-    goto finish
-)
-set /p APP_VERSION=<"%BUILD_WORK%\version.txt"
+set "APP_VERSION="
+for /f "usebackq tokens=3" %%A in (`findstr /b "APP_VERSION" "%REPO_ROOT%\models\app_version.py"`) do set "APP_VERSION=%%~A"
 if not defined APP_VERSION (
-    echo [ERROR] Resolved APP_VERSION is empty!
+    echo [ERROR] Failed to read APP_VERSION from models\app_version.py!
     set "EXIT_CODE=1"
     goto finish
 )
-
-set "SPEC_PATH=%BUILD_WORK%\GeminiDesktopPet.spec"
-"%PYTHON_EXE%" -m tools.release_package generate-spec --repo-root "%REPO_ROOT%" --output "%SPEC_PATH%"
-if errorlevel 1 (
-    echo [ERROR] Failed to generate PyInstaller spec file!
-    set "EXIT_CODE=1"
-    goto finish
-)
-
 set "ZIP_PATH=%OUTPUT_BASE%\GeminiDesktopPet-v%APP_VERSION%-win-x64.zip"
-set "SUMMARY_PATH=%OUTPUT_BASE%\git-commit-summary.md"
 if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
-if exist "%SUMMARY_PATH%" del /f /q "%SUMMARY_PATH%"
 
-echo [GeminiDesktopPet] Packaging Python standalone build (v%APP_VERSION%)...
-echo [3/5] Building GeminiDesktopPet.exe ^& CleanConfig.exe (--onedir) via PyInstaller...
+echo [2/5] Building GeminiDesktopPet.exe (--onedir, --windowed)...
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --clean ^
+    --onedir ^
     --distpath "%OUTPUT_BASE%" ^
     --workpath "%BUILD_WORK%\main" ^
-    "%SPEC_PATH%"
+    --specpath "%BUILD_WORK%\spec" ^
+    --name GeminiDesktopPet ^
+    --windowed ^
+    --icon "%ICON%" ^
+    --add-data "%REPO_ROOT%\Assets;Assets" ^
+    --collect-submodules google.genai ^
+    --exclude-module tkinter ^
+    --exclude-module PySide6.QtWebEngineCore ^
+    --exclude-module PySide6.QtWebEngineWidgets ^
+    --exclude-module PySide6.QtWebEngineQuick ^
+    --exclude-module PySide6.QtPdf ^
+    --exclude-module PySide6.QtPdfWidgets ^
+    --exclude-module PySide6.QtQml ^
+    --exclude-module PySide6.QtQuick ^
+    --exclude-module PySide6.Qt3DCore ^
+    --exclude-module PySide6.QtMultimedia ^
+    --exclude-module PySide6.QtNetwork ^
+    "%REPO_ROOT%\main.py"
 if errorlevel 1 (
-    echo [ERROR] PyInstaller build failed!
+    echo [ERROR] GeminiDesktopPet build failed!
     set "EXIT_CODE=1"
     goto finish
 )
 
-echo [4/5] Copying release docs alongside GeminiDesktopPet.exe ^& CleanConfig.exe...
-"%PYTHON_EXE%" -m tools.release_package finalize-stage --repo-root "%REPO_ROOT%" --stage-dir "%STAGE_DIR%"
+echo [3/5] Building CleanConfig.exe (--onedir, console)...
+"%PYTHON_EXE%" -m PyInstaller ^
+    --noconfirm ^
+    --clean ^
+    --onedir ^
+    --distpath "%OUTPUT_BASE%" ^
+    --workpath "%BUILD_WORK%\clean" ^
+    --specpath "%BUILD_WORK%\spec" ^
+    --name CleanConfig ^
+    --icon "%ICON%" ^
+    --exclude-module tkinter ^
+    --exclude-module PySide6 ^
+    --exclude-module shiboken6 ^
+    --exclude-module google ^
+    --exclude-module PIL ^
+    --exclude-module unittest ^
+    "%REPO_ROOT%\clean_config.py"
 if errorlevel 1 (
-    echo [ERROR] Stage copy or layout check failed!
+    echo [ERROR] CleanConfig build failed!
     set "EXIT_CODE=1"
     goto finish
 )
 
-echo [5/5] Generating git commit summary ^& creating release ZIP...
-"%PYTHON_EXE%" -m tools.release_package create-archive --repo-root "%REPO_ROOT%" --stage-dir "%STAGE_DIR%" --version "%APP_VERSION%" --summary-path "%SUMMARY_PATH%" --zip-path "%ZIP_PATH%"
+echo [4/5] Assembling release stage...
+if not exist "%STAGE_DIR%\CleanConfig.exe" (
+    copy /Y "%CLEAN_DIR%\CleanConfig.exe" "%STAGE_DIR%\CleanConfig.exe" >nul
+)
 if errorlevel 1 (
-    echo [ERROR] Release summary or ZIP archive generation failed!
+    echo [ERROR] Failed to place CleanConfig.exe into stage!
+    set "EXIT_CODE=1"
+    goto finish
+)
+for %%F in (README.md CREDITS.md LICENSE) do (
+    if not exist "%STAGE_DIR%\%%F" copy /Y "%REPO_ROOT%\%%F" "%STAGE_DIR%\%%F" >nul
+)
+
+echo [5/5] Creating release ZIP via 7za...
+if not exist "%SEVENZA%" (
+    echo [ERROR] 7za not found: %SEVENZA%
+    set "EXIT_CODE=1"
+    goto finish
+)
+pushd "%STAGE_DIR%" >nul
+"%SEVENZA%" a -tzip "%ZIP_PATH%" . -r -mx=9 >nul
+popd >nul
+if errorlevel 1 (
+    echo [ERROR] ZIP archive generation failed!
     set "EXIT_CODE=1"
     goto finish
 )
 
 echo.
-echo === Publish ^& Package Complete ===
+echo === Package Complete ===
 echo Version   : v%APP_VERSION%
 echo Stage Dir : %STAGE_DIR%
-echo Summary   : %SUMMARY_PATH%
 echo ZIP File  : %ZIP_PATH%
 set "EXIT_CODE=0"
 
