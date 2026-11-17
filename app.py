@@ -384,6 +384,12 @@ class PetApplicationCoordinator(QObject):
             self._profile_win.refresh_profile(self._settings)
         self._pet.show_bubble(f"已应用新角色设定「{profile.name}」喵✦", 4.0, force=True)
 
+    def _preview_appearance_from_settings(
+        self, scale: Optional[float], opacity: Optional[float]
+    ) -> None:
+        """设置窗口拖动滑杆时实时预览，不写盘；None 表示回到已保存值。"""
+        self._pet.set_appearance_preview(scale, opacity)
+
     def open_settings_window(self) -> None:
         try:
             if self._settings_win is None:
@@ -395,6 +401,7 @@ class PetApplicationCoordinator(QObject):
                     on_open_update_center=self.open_update_window,
                     on_open_character_editor=self.open_character_editor_window,
                     on_open_profile=self.open_profile_window,
+                    on_preview_appearance=self._preview_appearance_from_settings,
                     on_antigravity_sync_changed=self._pet.set_antigravity_sync_enabled,
                     on_auto_start_changed=self._set_auto_start,
                 )

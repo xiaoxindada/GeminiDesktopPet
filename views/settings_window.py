@@ -405,6 +405,7 @@ class SettingsWindow(QWidget):
         on_open_update_center: Optional[Callable[[], None]] = None,
         on_open_character_editor: Optional[Callable[[], None]] = None,
         on_open_profile: Optional[Callable[[], None]] = None,
+        on_preview_appearance: Optional[Callable[[Optional[float], Optional[float]], None]] = None,
         on_antigravity_sync_changed: Optional[Callable[[bool], None]] = None,
         on_auto_start_changed: Optional[Callable[[bool], None]] = None,
         parent: Optional[QWidget] = None,
@@ -417,6 +418,8 @@ class SettingsWindow(QWidget):
         self._on_open_update = on_open_update_center
         self._on_open_editor = on_open_character_editor
         self._on_open_profile = on_open_profile
+        self._on_preview_appearance = on_preview_appearance
+        self._preview_active = False
         self._on_antigravity_sync_changed = on_antigravity_sync_changed
         self._on_auto_start_changed = on_auto_start_changed
         self._models_refresh_worker: Optional[_ModelsRefreshWorker] = None
@@ -805,6 +808,7 @@ class SettingsWindow(QWidget):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._scale_slider.valueChanged.connect(self._on_any_changed)
+        self._scale_slider.valueChanged.connect(self._on_appearance_preview)
         card.add_row(self._wrap_slider(self._scale_slider, self._scale_val_lbl), "人物缩放", "调整桌宠在桌面上的显示大小")
 
         self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
@@ -818,6 +822,7 @@ class SettingsWindow(QWidget):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._opacity_slider.valueChanged.connect(self._on_any_changed)
+        self._opacity_slider.valueChanged.connect(self._on_appearance_preview)
         card.add_row(self._wrap_slider(self._opacity_slider, self._opacity_val_lbl), "透明度", "数值越低越透明")
 
         layout.addStretch(1)
@@ -1146,6 +1151,8 @@ class SettingsWindow(QWidget):
             return
         if not force and self._dirty:
             return
+        if force:
+            self._cancel_appearance_preview()
         self._loading = True
         try:
             s = self._settings
@@ -1209,6 +1216,23 @@ class SettingsWindow(QWidget):
         self._opacity_val_lbl.setText(f"{int(round(opacity * 100))}%")
         self._mark_dirty()
 
+    def _on_appearance_preview(self, _value: int = 0) -> None:
+        """拖动缩放/透明度滑杆时实时预览，真正的落盘仍由确认修改完成。"""
+        if self._loading or self._on_preview_appearance is None:
+            return
+        scale = max(0.6, min(1.8, self._scale_slider.value() / 100.0))
+        opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
+        self._preview_active = True
+        self._on_preview_appearance(scale, opacity)
+
+    def _cancel_appearance_preview(self) -> None:
+        """撤销临时预览，让桌宠回到已保存的缩放与透明度。"""
+        if not self._preview_active:
+            return
+        self._preview_active = False
+        if self._on_preview_appearance is not None:
+            self._on_preview_appearance(None, None)
+
     def _on_model_text_changed(self, text: str) -> None:
         if self._loading:
             return
@@ -1270,6 +1294,7 @@ class SettingsWindow(QWidget):
             AppLogger.set_enabled(self._settings.enable_runtime_log)
         except Exception as exc:
             vars(self._settings).update(snapshot)
+            self._cancel_appearance_preview()
             self._dirty = True
             self._discard_btn.setEnabled(True)
             AppLogger.error("[Settings] save failed", exc)
@@ -1479,6 +1504,9 @@ class SettingsWindow(QWidget):
         self._refresh_follow_badges()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        # 关闭未保存的窗口时撤销预览，并把界面草稿还原成已保存配置
+        if self._dirty:
+            self.sync_from_settings(force=True)
         self._status_timer.stop()
         if self._models_refresh_worker is not None and self._models_refresh_worker.isRunning():
             self._models_refresh_worker.requestInterruption()

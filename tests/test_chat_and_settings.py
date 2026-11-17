@@ -410,3 +410,57 @@ class TestChatAndSettings(unittest.TestCase):
                 win.close()
                 win.deleteLater()
                 app.processEvents()
+
+    def test_appearance_sliders_preview_then_save(self) -> None:
+        """缩放/透明度滑杆拖动时应实时预览，确认后才写入配置。"""
+        app = self._ensure_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SettingsService(tmp)
+            settings = PetSettings(scale=1.0, opacity=1.0)
+            svc.save(settings)
+            previews: list[tuple[float | None, float | None]] = []
+            win = SettingsWindow(
+                settings=settings,
+                settings_service=svc,
+                app_follow_service=AppFollowService(svc),
+                on_settings_applied=lambda: None,
+                on_preview_appearance=lambda scale, opacity: previews.append((scale, opacity)),
+            )
+            try:
+                win.show()
+                app.processEvents()
+                self.assertEqual(previews, [])
+
+                win._scale_slider.setValue(130)
+                app.processEvents()
+                self.assertAlmostEqual(previews[-1][0], 1.3)
+                self.assertAlmostEqual(settings.scale, 1.0)  # 预览不写运行配置
+                self.assertEqual(svc.load().scale, 1.0)  # 也不写盘
+
+                win._opacity_slider.setValue(70)
+                app.processEvents()
+                self.assertAlmostEqual(previews[-1][1], 0.7)
+                self.assertAlmostEqual(settings.opacity, 1.0)
+
+                # 还原修改 -> 撤销预览并回到已保存值
+                win._discard_btn.click()
+                app.processEvents()
+                self.assertEqual(previews[-1], (None, None))
+                self.assertAlmostEqual(win._scale_slider.value(), 100)
+                self.assertAlmostEqual(win._opacity_slider.value(), 100)
+                self.assertFalse(win.has_unsaved_changes())
+
+                # 再次调整并确认 -> 真正落盘
+                win._scale_slider.setValue(120)
+                win._opacity_slider.setValue(80)
+                app.processEvents()
+                win._confirm_btn.click()
+                app.processEvents()
+                self.assertAlmostEqual(settings.scale, 1.2)
+                self.assertAlmostEqual(settings.opacity, 0.8)
+                self.assertAlmostEqual(svc.load().scale, 1.2)
+                self.assertAlmostEqual(svc.load().opacity, 0.8)
+            finally:
+                win.close()
+                win.deleteLater()
+                app.processEvents()

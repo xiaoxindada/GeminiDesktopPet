@@ -430,6 +430,9 @@ class PetWindow(QWidget):
         super().__init__(None)
         self._settings = settings
         self._settings_service = settings_service
+        # 设置窗口拖动缩放/透明度滑杆时的临时预览值，不写回配置
+        self._preview_scale: Optional[float] = None
+        self._preview_opacity: Optional[float] = None
         # 未保存尺寸时使用最大预设，已手动调整的尺寸继续保留。
         _, default_chat_width, default_chat_height = self._CHAT_WINDOW_SIZE_PRESETS[-1]
         if settings.chat_width is None:
@@ -1239,27 +1242,49 @@ class PetWindow(QWidget):
 
     # ==================== Settings & Layout Sync ====================
 
+    def _effective_scale(self) -> float:
+        value = self._preview_scale if self._preview_scale is not None else self._settings.scale
+        return max(0.5, min(2.0, float(value)))
+
+    def _effective_opacity(self) -> float:
+        value = (
+            self._preview_opacity
+            if self._preview_opacity is not None
+            else self._settings.opacity
+        )
+        return max(0.35, min(1.0, float(value)))
+
+    def set_appearance_preview(
+        self,
+        scale: Optional[float] = None,
+        opacity: Optional[float] = None,
+    ) -> None:
+        """设置窗口拖动缩放/透明度时临时预览，不写入配置；传 None 恢复已保存值。"""
+        self._preview_scale = None if scale is None else max(0.5, min(2.0, float(scale)))
+        self._preview_opacity = None if opacity is None else max(0.35, min(1.0, float(opacity)))
+        self.apply_settings_to_window()
+
     def _sprite_height_px(self) -> float:
-        s = max(0.5, min(2.0, float(self._settings.scale)))
+        s = self._effective_scale()
         base_h = 300.0 if self._settings.style_mode == PetStyleMode.STANDARD else 240.0
         return base_h * s
 
     def _chibi_rig_size(self) -> tuple[float, float]:
-        s = max(0.5, min(2.0, float(self._settings.scale)))
+        s = self._effective_scale()
         h = 240.0 * s
         return (h * (555.0 / 640.0), h)
 
     def _std_rig_size(self) -> tuple[float, float]:
-        s = max(0.5, min(2.0, float(self._settings.scale)))
+        s = self._effective_scale()
         h = 300.0 * s
         return (h * (337.0 / 977.0), h)
 
     def apply_settings_to_window(self) -> None:
         old_bottom = float(self.y() + self.height()) if self._first_shown else None
 
-        s = max(0.5, min(2.0, float(self._settings.scale)))
+        s = self._effective_scale()
         sprite_h = self._sprite_height_px()
-        opacity = max(0.35, min(1.0, float(self._settings.opacity)))
+        opacity = self._effective_opacity()
         self.setWindowOpacity(opacity)
         self._speech_bubble.setWindowOpacity(opacity)
         self._sound.enabled = bool(self._settings.sound_enabled)
@@ -1757,11 +1782,11 @@ class PetWindow(QWidget):
         ):
             area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
             sprite_rect = self._get_local_sprite_rect()
-            sprite_half = sprite_rect.width() * 0.5 if sprite_rect.width() > 10 else 85.0 * self._settings.scale
+            sprite_half = sprite_rect.width() * 0.5 if sprite_rect.width() > 10 else 85.0 * self._effective_scale()
             min_left = area.left() - (self.width() * 0.5 - sprite_half) + 8.0
             max_left = (area.right() + 1) - (self.width() * 0.5 + sprite_half) - 8.0
 
-            speed = 72.0 * self._settings.scale
+            speed = 72.0 * self._effective_scale()
             next_left = float(self.x()) + self._walk_dir * speed * dt
             if next_left <= min_left:
                 next_left = min_left
@@ -1784,7 +1809,7 @@ class PetWindow(QWidget):
         angle = 0.0
         tx = 0.0
         ty = 0.0
-        s = max(0.5, min(2.0, float(self._settings.scale)))
+        s = self._effective_scale()
 
         if self._settings.docked_side != DockSide.NONE:
             sy = 1.0 + 0.011 * math.sin(self._anim_time * 2.5)
@@ -1852,7 +1877,7 @@ class PetWindow(QWidget):
             sx = 1.0 - 0.006 * math.sin(self._anim_time * 2.4)
 
         if self._use_std_walk_rig and not self._is_walking:
-            self._update_std_walk_rig(self._anim_time * 6.8, self._settings.scale)
+            self._update_std_walk_rig(self._anim_time * 6.8, self._effective_scale())
         if self._is_dozing():
             sy = 1.0 + 0.018 * math.sin(self._anim_time * 1.4)
             if self._settings.docked_side != DockSide.NONE:
@@ -2403,10 +2428,10 @@ class PetWindow(QWidget):
     def _try_edge_dock_or_gravity_drop(self) -> None:
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
         sprite_rect = self._get_local_sprite_rect()
-        sprite_w = sprite_rect.width() if sprite_rect.width() > 10 else 180.0 * self._settings.scale
+        sprite_w = sprite_rect.width() if sprite_rect.width() > 10 else 180.0 * self._effective_scale()
         sprite_left = self.x() + (self.width() - sprite_w) * 0.5
         sprite_right = sprite_left + sprite_w
-        snap_margin = 38.0 * max(0.5, min(2.0, float(self._settings.scale)))
+        snap_margin = 38.0 * self._effective_scale()
         max_y = max(area.top(), area.bottom() + 1 - self.height())
 
         if self._settings.edge_dock_enabled and (self.x() <= area.left() + 10 or sprite_left <= area.left() + snap_margin):
@@ -3657,6 +3682,9 @@ class PetWindow(QWidget):
 
     def _on_menu_scale(self, scale: float) -> None:
         old_bottom = float(self.y() + self.height())
+        # 从菜单直接选缩放时结束设置窗口的临时预览，避免预览值覆盖本次选择
+        self._preview_scale = None
+        self._preview_opacity = None
         self._settings.scale = scale
         self.apply_settings_to_window()
         if self._settings.docked_side != DockSide.NONE:

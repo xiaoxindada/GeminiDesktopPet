@@ -370,5 +370,39 @@ class TestWindowLayoutFixes(unittest.TestCase):
                 self._app.processEvents()
 
 
+    def test_appearance_preview_scales_and_restores(self) -> None:
+        """缩放/透明度预览应即时改变桌宠，取消后回到原样。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_svc = SettingsService(tmp)
+            settings = PetSettings(scale=1.0, opacity=1.0, auto_walk=False, last_left=420.0, last_top=300.0)
+            pet = PetWindow(
+                settings,
+                settings_svc,
+                SpriteManager(),
+                SoundService(),
+                SystemMonitorService(),
+                GeminiChatService(),
+            )
+            try:
+                pet.show()
+                self._app.processEvents()
+                base_width = pet.width()
+                self.assertAlmostEqual(pet.windowOpacity(), 1.0, places=1)
+
+                pet.set_appearance_preview(1.5, 0.5)
+                self._app.processEvents()
+                self.assertGreater(pet.width(), base_width)
+                self.assertAlmostEqual(pet.windowOpacity(), 0.5, places=1)
+
+                pet.set_appearance_preview(None, None)
+                self._app.processEvents()
+                self.assertEqual(pet.width(), base_width)
+                self.assertAlmostEqual(pet.windowOpacity(), 1.0, places=1)
+            finally:
+                pet.close()
+                pet.deleteLater()
+                self._app.processEvents()
+
+
 if __name__ == "__main__":
     unittest.main()
