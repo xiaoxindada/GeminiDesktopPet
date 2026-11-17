@@ -144,7 +144,21 @@ class FollowedAppProbe:
                         continue
             except (psutil.Error, OSError):
                 pass
+        # 额度查询也会短暂启动 agy；按命令识别，避免主程序和后台守护误唤醒。
+        # 不暂停整个监听，因此查询期间用户新开的交互式 CLI 仍可正常联动。
+        pids = {pid for pid in pids if not FollowedAppProbe._is_cli_quota_query(pid)}
         return AppActivitySnapshot(bool(pids), pids, set(pids))
+
+    @staticmethod
+    def _is_cli_quota_query(pid: int) -> bool:
+        try:
+            args = psutil.Process(pid).cmdline()[1:]
+        except (psutil.Error, OSError):
+            return False
+        return any(
+            flag in {"-p", "--print", "--prompt"} and value in {"/usage", "/quota"}
+            for flag, value in zip(args, args[1:])
+        )
 
     @staticmethod
     def detect_running_followed_app_key(
