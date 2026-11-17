@@ -27,7 +27,6 @@ from services.antigravity_quota_service import (
     QuotaSnapshot,
 )
 from services.tray_icon_service import TrayIconService
-from services.win32_ipc import bring_window_topmost_no_activate
 
 
 class _QuotaFetchWorker(QThread):
@@ -263,13 +262,10 @@ class QuotaWindow(QWidget):
         return self._user_dragged
 
     def ensure_on_top(self) -> None:
-        """保持额度卡片位于桌宠之上且不抢夺输入焦点。"""
+        """保持额度卡片位于桌宠前方。"""
         if not self.isVisible():
             return
         self.raise_()
-        hwnd = int(self.winId()) if self.winId() else 0
-        if hwnd:
-            bring_window_topmost_no_activate(hwnd)
 
     def _get_anchor_obstacles(self, sprite_rect: QRect) -> list[QRect]:
         if self._anchor_pet is None:

@@ -662,8 +662,6 @@ class SettingsWindow(QWidget):
 
         card = _Card(layout)
         specs = [
-            (self._PAGE_GENERAL, "窗口始终置顶", "覆盖在其他窗口之上", "通用设置",
-             lambda: self._on_off(self._settings.always_on_top)),
             (self._PAGE_BEHAVIOR, "自动弹出对话气泡", "按需主动说话", "行为互动",
              lambda: self._on_off(self._settings.show_speech_bubble)),
             (self._PAGE_GENERAL, "互动音效", "摸摸头与提示音", "通用设置",
@@ -692,7 +690,7 @@ class SettingsWindow(QWidget):
              lambda: format_model_display_name(self._settings.gemini_model)),
             (self._PAGE_CHAT, "思考强度", "模型推理深度", "对话与模型",
              lambda: format_thinking_level_label(self._settings.thinking_level)),
-            (self._PAGE_CHAT, "实时同步反重力对话", "新消息实时播报到气泡", "对话与模型",
+            (self._PAGE_CHAT, "实时同步 Antigravity 对话", "新消息实时播报到气泡", "对话与模型",
              lambda: self._on_off(self._settings.chat_sync_enabled)),
             (self._PAGE_STARTUP, "Windows 开机自动启动", "登录后静默启动", "启动与联动",
              lambda: self._on_off(self._startup_enabled())),
@@ -771,11 +769,7 @@ class SettingsWindow(QWidget):
     # ---- 通用设置 ----
 
     def _build_general_page(self) -> QWidget:
-        scroll, layout = self._new_page("通用设置", "窗口层级与显示的全局开关。")
-
-        card = _Card(layout, "窗口")
-        self._chk_topmost = self._make_switch()
-        card.add_row(self._chk_topmost, "窗口始终置顶", "覆盖在其他应用窗口之上，方便随时看到 Gemini 娘")
+        scroll, layout = self._new_page("通用设置", "桌宠互动与状态提醒开关。")
 
         card = _Card(layout, "互动反馈")
         self._chk_sound = self._make_switch()
@@ -941,7 +935,7 @@ class SettingsWindow(QWidget):
         self._chk_ag_sync = self._make_switch()
         card.add_row(
             self._chk_ag_sync,
-            "实时同步反重力对话",
+            "实时同步 Antigravity 对话",
             "跟随 Antigravity 当前对话，把新消息实时播报到气泡",
         )
 
@@ -1168,7 +1162,6 @@ class SettingsWindow(QWidget):
             self._opacity_slider.setValue(int(round(s.opacity * 100)))
             self._opacity_val_lbl.setText(f"{int(round(s.opacity * 100))}%")
 
-            self._chk_topmost.setChecked(s.always_on_top)
             self._chk_bubble.setChecked(s.show_speech_bubble)
             self._chk_sound.setChecked(s.sound_enabled)
             self._chk_sysmon.setChecked(s.system_monitor_enabled)
@@ -1259,7 +1252,6 @@ class SettingsWindow(QWidget):
         s.scale = max(0.6, min(1.8, self._scale_slider.value() / 100.0))
         s.opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
 
-        s.always_on_top = self._chk_topmost.isChecked()
         s.show_speech_bubble = self._chk_bubble.isChecked()
         s.sound_enabled = self._chk_sound.isChecked()
         s.system_monitor_enabled = self._chk_sysmon.isChecked()
@@ -1311,7 +1303,7 @@ class SettingsWindow(QWidget):
             self._set_feedback(f"❌ 保存失败：{err_msg}", kind="error")
             return False
 
-        # 实时同步是运行态开关，保存后要真正启停播报；启动失败时回调会把值回落成 False。
+        # 实时同步保存的是用户意图；暂无可同步会话时回调保留启用状态并等待重试。
         if (
             self._on_antigravity_sync_changed is not None
             and bool(self._settings.chat_sync_enabled) != sync_before

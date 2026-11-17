@@ -93,7 +93,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                         "固定（自由漫步）",
                         "打盹模式",
                         "自动弹出对话气泡",
-                        "实时同步反重力对话",
+                        "实时同步 Antigravity 对话",
                         "形象切换",
                         "缩放大小",
                         "记录运行日志",
@@ -120,7 +120,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                         "固定（自由漫步）",
                         "打盹模式",
                         "自动弹出对话气泡",
-                        "实时同步反重力对话",
+                        "实时同步 Antigravity 对话",
                         "记录运行日志",
                         "查看反重力额度",
                         "回到屏幕右下角",
@@ -203,7 +203,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertTrue(hasattr(win, "_chk_autostart"))
                     self.assertFalse(win._chk_autostart.isChecked())
                     self.assertIsNotNone(win._search_edit)
-                    self.assertEqual(len(win._summary_rows), 25)
+                    self.assertEqual(len(win._summary_rows), 24)
 
                     win._chk_autostart.setChecked(True)
                     self.assertTrue(win.has_unsaved_changes())

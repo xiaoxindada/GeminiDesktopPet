@@ -182,7 +182,6 @@ class PetSettings:
     style_mode: PetStyleMode = PetStyleMode.CHIBI
     scale: float = 1.0
     opacity: float = 1.0
-    always_on_top: bool = True
     auto_walk: bool = True
     anti_gravity_mode: bool = False
     # 打盹模式：开启后原地睡觉待机，关闭时不会自行入睡

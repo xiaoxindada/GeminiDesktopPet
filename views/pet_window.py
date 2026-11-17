@@ -9,6 +9,7 @@ from collections import deque
 from pathlib import Path
 import random
 import time
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -38,6 +39,7 @@ from PySide6.QtGui import (
     QImage,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QRegion,
@@ -57,6 +59,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from models import (
@@ -93,12 +96,7 @@ from services.sprite_manager import SpriteManager, WalkRigAssets
 from themes import STARLIGHT_MENU_QSS
 
 
-# Win32 Z-order & extended style helpers to update topmost without recreating Qt HWND
-_HWND_TOPMOST = -1
-_HWND_NOTOPMOST = -2
-_SWP_NOMOVE = 0x0002
-_SWP_NOSIZE = 0x0001
-_SWP_NOACTIVATE = 0x0010
+# Win32 tool-window style helper.
 _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x00000080
 
@@ -118,25 +116,6 @@ _DOZE_ZZZ_ANCHOR: dict[PetStyleMode, tuple[float, float]] = {
     PetStyleMode.CHIBI: (0.18, 0.18),
     PetStyleMode.STANDARD: (0.12, 0.08),
 }
-
-
-def _apply_win32_topmost(hwnd: int, topmost: bool) -> None:
-    if os.name != "nt" or not hwnd:
-        return
-    try:
-        user32 = ctypes.windll.user32
-        insert_after = ctypes.c_void_p(_HWND_TOPMOST if topmost else _HWND_NOTOPMOST)
-        user32.SetWindowPos(
-            ctypes.c_void_p(hwnd),
-            insert_after,
-            0,
-            0,
-            0,
-            0,
-            _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE,
-        )
-    except Exception:
-        pass
 
 
 def _ensure_tool_window_ex_style(hwnd: int) -> None:
@@ -264,9 +243,11 @@ class _SpeechBubbleWindow(QFrame):
     RESIZE_MARGIN = 8
 
     def __init__(self, owner: "PetWindow") -> None:
-        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-        if owner._settings.always_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
+        flags = (
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
         super().__init__(owner, flags)
         self._owner = owner
         self.setObjectName("SpeechBubble")
@@ -277,6 +258,9 @@ class _SpeechBubbleWindow(QFrame):
         self._resizing_edges: Optional[tuple[bool, bool, bool, bool]] = None
         self._resize_start_global = QPoint()
         self._resize_start_geom = QRect()
+        self._drag_start_global = QPoint()
+        self._drag_start_pos = QPoint()
+        self._dragging = False
 
     def is_resizing(self) -> bool:
         return self._resizing_edges is not None
@@ -335,6 +319,13 @@ class _SpeechBubbleWindow(QFrame):
                 self.grabMouse()
                 event.accept()
                 return
+            if self._owner._is_chat_open:
+                self._dragging = True
+                self._drag_start_global = event.globalPosition().toPoint()
+                self._drag_start_pos = self.pos()
+                self.grabMouse()
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -364,6 +355,14 @@ class _SpeechBubbleWindow(QFrame):
             event.accept()
             return
 
+        if self._dragging:
+            delta = event.globalPosition().toPoint() - self._drag_start_global
+            pos = self._owner._clamp_bubble_pos_to_screen(self._drag_start_pos + delta, self.size())
+            self.move(pos)
+            self._owner._on_bubble_moved_by_user(pos)
+            event.accept()
+            return
+
         self._update_resize_cursor(event.position().toPoint())
         super().mouseMoveEvent(event)
 
@@ -374,6 +373,13 @@ class _SpeechBubbleWindow(QFrame):
                 self.releaseMouse()
             self._update_resize_cursor(event.position().toPoint())
             self._owner._on_bubble_resize_finished(self.geometry())
+            event.accept()
+            return
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            self._owner._on_bubble_moved_by_user(self.pos())
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -416,6 +422,79 @@ def _draw_pixmap_uniform(painter: QPainter, pixmap: Optional[QPixmap], target: Q
     dx = target.x() + (target.width() - dw) * 0.5
     dy = target.y() + (target.height() - dh) * 0.5
     painter.drawPixmap(QRectF(dx, dy, dw, dh), pixmap, QRectF(0.0, 0.0, pw, ph))
+
+
+class _ChatActionButton(QPushButton):
+    """用矢量图标绘制会话删除和文件打开按钮，避免系统字体替换图标。"""
+
+    def __init__(self, action: str, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._action = action
+        self.setObjectName("ChatDeleteButton" if action == "delete" else "ChatOpenFileButton")
+        if action == "delete":
+            self.setFixedSize(28, 28)
+        else:
+            self.setFixedSize(92, 28)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("删除对话" if action == "delete" else "打开当前会话文件")
+
+    def paintEvent(self, _event: QEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        active = self.isEnabled()
+        hovered = active and self.underMouse()
+        pressed = active and self.isDown()
+        fill = "#4B3A8F" if pressed else "#302451" if hovered else "#211A3B"
+        border = "#A78BFA" if hovered else "#66539E"
+        foreground = "#FFFFFF" if hovered else "#DDD2FF"
+        if not active:
+            foreground, border = "#82779E", "#4B416A"
+        painter.setBrush(QColor(fill))
+        painter.setPen(QPen(QColor(border), 1.2))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8), 7, 7)
+
+        pen = QPen(QColor(foreground), 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if self._action == "delete":
+            painter.translate(8, 6)
+            painter.drawLine(1, 4, 11, 4)
+            painter.drawLine(4, 2, 8, 2)
+            bin_outline = QPainterPath()
+            bin_outline.moveTo(2, 6)
+            bin_outline.lineTo(3, 15)
+            bin_outline.quadTo(3, 17, 5, 17)
+            bin_outline.lineTo(7, 17)
+            bin_outline.quadTo(9, 17, 9, 15)
+            bin_outline.lineTo(10, 6)
+            painter.drawPath(bin_outline)
+            painter.drawLine(5, 8, 5, 14)
+            painter.drawLine(7, 8, 7, 14)
+        else:
+            painter.translate(11, 6)
+            file_outline = QPainterPath()
+            file_outline.moveTo(2, 1)
+            file_outline.lineTo(9, 1)
+            file_outline.lineTo(13, 5)
+            file_outline.lineTo(13, 17)
+            file_outline.lineTo(2, 17)
+            file_outline.closeSubpath()
+            painter.drawPath(file_outline)
+            painter.drawLine(9, 1, 9, 5)
+            painter.drawLine(9, 5, 13, 5)
+            painter.drawLine(4, 10, 11, 10)
+            painter.drawLine(4, 13, 9, 13)
+            painter.resetTransform()
+            painter.setPen(QColor(foreground))
+            font = painter.font()
+            font.setPointSize(9)
+            painter.setFont(font)
+            painter.drawText(QRect(32, 0, self.width() - 36, self.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             "打开文件")
+        painter.end()
 
 
 class PetWindow(QWidget):
@@ -463,6 +542,13 @@ class PetWindow(QWidget):
         self._ag_sync_state = ChatSyncState()
         self._ag_collector = AntigravityChatCollector(self._ag_sync_service, self._ag_sync_state)
         self._ag_mirror_active = False
+        self._ag_next_retry_at = 0.0
+        self._ag_sync_session_id: Optional[str] = None
+        self._ag_sync_events: list[SyncEvent] = []
+        self._ag_sync_labels: list[QLabel] = []
+        self._ag_viewing_sync = False
+        self._ag_regular_draft = ""
+        self._ag_pending_handoff = False
         # 消费端只认状态叶子差量：基线记各叶子的编号，队列按节奏逐条播。
         self._ag_baseline: dict[str, int] = {}
         self._ag_playback: deque[SyncEvent] = deque()
@@ -486,13 +572,12 @@ class PetWindow(QWidget):
         self._sys_monitor = sys_monitor
         self._chat = chat
 
-        # 无边框透明置顶工具窗口属性配置
+        # 桌宠与独立气泡处于同一置顶层，避免聊天窗口被其他应用遮挡。
         flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
         )
-        if settings.always_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
@@ -800,8 +885,8 @@ class PetWindow(QWidget):
         self._task_folder_btn.setToolTip("为当前会话关联任务文件夹")
         self._task_folder_btn.clicked.connect(self._choose_task_folder)
         session_row.addWidget(self._task_folder_btn)
-        session_row.addStretch(1)
         session_row.addWidget(self._new_chat_btn)
+        session_row.addStretch(1)
         self._chat_session_bar.hide()
         self._bubble_layout.addWidget(self._chat_session_bar)
 
@@ -963,41 +1048,11 @@ class PetWindow(QWidget):
         path_row.setContentsMargins(0, 0, 0, 0)
         path_row.setSpacing(4)
         path_row.addWidget(self._chat_path, 1)
-        self._chat_open_file_btn = QPushButton("📂 打开")
-        self._chat_open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._chat_open_file_btn.setToolTip("直接打开当前会话文件；尚未保存时打开所在文件夹")
-        self._chat_open_file_btn.setStyleSheet(
-            """
-            QPushButton {
-                background: #16112C;
-                color: #D8CCFF;
-                border: 1px solid #4E3F8E;
-                border-radius: 5px;
-                padding: 2px 8px;
-                font-size: 10px;
-            }
-            QPushButton:hover {
-                background: #1F183D;
-                border-color: #7C5CFF;
-                color: #FFFFFF;
-            }
-            """
-        )
+        self._chat_open_file_btn = _ChatActionButton("open", self._chat_path_panel)
+        self._chat_open_file_btn.setToolTip("用系统默认程序打开当前会话文件")
         self._chat_open_file_btn.clicked.connect(self._open_chat_session_file)
         path_row.addWidget(self._chat_open_file_btn)
         path_layout.addLayout(path_row)
-        task_row = QHBoxLayout()
-        task_row.setContentsMargins(0, 0, 0, 0)
-        task_label = QLabel("任务文件夹")
-        task_label.setStyleSheet("color: #A89FD6; font-size: 10px; background: transparent;")
-        task_row.addWidget(task_label)
-        self._task_folder_path = QLineEdit()
-        self._task_folder_path.setReadOnly(True)
-        self._task_folder_path.setMinimumWidth(0)
-        self._task_folder_path.setPlaceholderText("尚未选择")
-        self._task_folder_path.setStyleSheet(self._chat_path.styleSheet())
-        task_row.addWidget(self._task_folder_path, 1)
-        path_layout.addLayout(task_row)
         self._chat_path_panel.hide()
         self._bubble_layout.addWidget(self._chat_path_panel)
         self._update_chat_save_path()
@@ -1057,7 +1112,7 @@ class PetWindow(QWidget):
             tip="关闭后仅在聊天或重要提示时显示气泡",
         )
         self._act_sync_chat = self._new_menu_action(
-            "💬 实时同步反重力对话",
+            "💬 实时同步 Antigravity 对话",
             checkable=True,
             slot=self._on_menu_sync_chat,
             tip="把 Antigravity 的新消息实时播报到气泡",
@@ -1243,6 +1298,7 @@ class PetWindow(QWidget):
             and isinstance(watched, QWidget)
             and (watched is self._speech_bubble or self._speech_bubble.isAncestorOf(watched))
             and self._sync_thinking_visible
+            and not self._is_chat_open
         ):
             # 点击阅读后仍接收思维续写，但不让结尾气泡替换内容或重新启动关闭计时。
             self._sync_thinking_pinned = True
@@ -1399,7 +1455,6 @@ class PetWindow(QWidget):
         if not hwnd:
             return
         _ensure_tool_window_ex_style(hwnd)
-        _apply_win32_topmost(hwnd, bool(self._settings.always_on_top))
         self._sync_bubble_window_styles()
         self.visual_bounds_changed.emit()
 
@@ -1410,7 +1465,6 @@ class PetWindow(QWidget):
         if not bubble_hwnd:
             return
         _ensure_tool_window_ex_style(bubble_hwnd)
-        _apply_win32_topmost(bubble_hwnd, bool(self._settings.always_on_top))
 
     def _update_dock_alignment(self) -> None:
         # 贴边状态变化后气泡需要重新贴近精灵摆放
@@ -1540,10 +1594,14 @@ class PetWindow(QWidget):
         return QPoint(target_x, target_y)
 
     def _clamp_bubble_pos_to_screen(self, pos: QPoint, size: QSize) -> QPoint:
-        area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
+        area = self._get_work_area(pos.x() + size.width() * 0.5, pos.y() + size.height() * 0.5)
         cx = max(area.left() + 6, min(pos.x(), area.right() + 1 - size.width() - 6))
         cy = max(area.top() + 6, min(pos.y(), area.bottom() + 1 - size.height() - 6))
         return QPoint(cx, cy)
+
+    def _on_bubble_moved_by_user(self, pos: QPoint) -> None:
+        self._bubble_custom_offset = pos - self.pos()
+        self.visual_bounds_changed.emit()
 
     def _reposition_speech_bubble_on_move(self) -> None:
         if not self._speech_bubble.isVisible() or self._speech_bubble.is_resizing():
@@ -1598,6 +1656,10 @@ class PetWindow(QWidget):
             if self._speech_bubble.pos() != target_pos:
                 self._speech_bubble.move(target_pos)
             self._speech_bubble.raise_()
+            # 重新排版气泡后，保持已打开的聊天菜单处于气泡前方。
+            menu = getattr(self, "_chat_model_menu", None)
+            if menu is not None and menu.isVisible():
+                menu.raise_()
 
         self.visual_bounds_changed.emit()
 
@@ -1622,6 +1684,8 @@ class PetWindow(QWidget):
         new_y = area.bottom() + 1 - self.height()
         self.move(int(round(new_x)), int(round(new_y)))
         self._update_dock_alignment()
+        self._settings.last_left = float(self.x())
+        self._settings.last_top = float(self.y())
         self._settings_service.save(self._settings)
 
     def reset_to_bottom_right(self) -> None:
@@ -2648,17 +2712,17 @@ class PetWindow(QWidget):
         self._bubble_settings_btn.setVisible(in_chat)
         self._chat_toolbar.setVisible(in_chat)
         self._chat_session_bar.setVisible(in_chat)
-        self._chat_path_panel.setVisible(in_chat)
+        self._chat_path_panel.setVisible(in_chat and not self._ag_viewing_sync)
         self._history_list.setVisible(in_chat and self._history_expanded)
         busy = bool(self._waiting_chat_workers)
         self._history_list.setEnabled(not busy)
         self._new_chat_btn.setEnabled(not busy)
-        self._task_folder_btn.setEnabled(not busy)
+        self._task_folder_btn.setEnabled(not busy and not self._ag_viewing_sync)
         self._chat_clear_btn.setEnabled(not busy)
         self._chat_input_panel.setEnabled(not busy and not self._chat_readonly)
         self._chat_input_panel.setVisible(in_chat)
         self._chat_input.setPlaceholderText(
-            "反重力实时同步中（只读）" if self._chat_readonly else "输入聊天内容或指令…"
+            "Antigravity 实时同步中（只读）" if self._chat_readonly else "输入聊天内容或指令…"
         )
         if not in_chat:
             return
@@ -2702,6 +2766,12 @@ class PetWindow(QWidget):
         return self._settings.chat_offline_mode or not (self._settings.gemini_api_key or "").strip()
 
     def _populate_connection_menu(self, menu: QMenu) -> None:
+        self._populate_chat_mode_actions(menu)
+        menu.addSeparator()
+        settings = menu.addAction("⚙️ API Key 与模型设置...")
+        settings.triggered.connect(self.open_settings_requested)
+
+    def _populate_chat_mode_actions(self, menu: QMenu) -> None:
         modes = QActionGroup(menu)
         modes.setExclusive(True)
         effective_offline = self._effective_chat_offline()
@@ -2714,12 +2784,6 @@ class PetWindow(QWidget):
             action.triggered.connect(
                 lambda _checked=False, value=offline, act=action: self._select_chat_mode_from_menu(act, value)
             )
-        menu.addSeparator()
-        refresh = menu.addAction("🔄 获取 / 刷新官方模型")
-        refresh.setEnabled(not self._settings.chat_offline_mode)
-        refresh.triggered.connect(lambda: self._refresh_chat_models_async(explicit=True))
-        settings = menu.addAction("⚙️ 设置 API Key...")
-        settings.triggered.connect(self.open_settings_requested)
 
     def _select_chat_mode_from_menu(self, action: QAction, offline: bool) -> None:
         """点击菜单后按实际生效模式回写勾选，避免无 Key 时在线挡被误选。"""
@@ -2734,6 +2798,8 @@ class PetWindow(QWidget):
             )
 
     def select_chat_offline_mode(self, offline: bool) -> None:
+        if self._ag_viewing_sync:
+            self._return_to_regular_chat()
         previous = self._settings.chat_offline_mode
         if previous == offline:
             # 无 Key 时在线挡实际仍走离线，重复点击时提示补全配置。
@@ -2772,10 +2838,7 @@ class PetWindow(QWidget):
         menu.popup(anchor)
 
     def _build_chat_model_menu(self) -> QMenu:
-        """构建级联式模型、思考强度与 API Key 设置菜单（不展示新/旧标签）。"""
-        channel, badge_text, models, current = self._resolve_active_chat_channel_and_models()
-        current_thinking = normalize_thinking_level(self._settings.thinking_level)
-
+        """构建模型与思考强度菜单。"""
         menu = QMenu(self._speech_bubble)
         menu.setStyleSheet(
             STARLIGHT_MENU_QSS
@@ -2790,12 +2853,26 @@ class PetWindow(QWidget):
             """
         )
 
-        status = menu.addAction(badge_text)
-        status.setEnabled(False)
-        connection_menu = menu.addMenu("🌐 聊天模式")
-        connection_menu.setStyleSheet(STARLIGHT_MENU_QSS)
-        self._populate_connection_menu(connection_menu)
+        menu.setProperty("chat_model_list", True)
+        self._populate_chat_model_menu(menu)
+        self._chat_model_menu = menu
+        return menu
 
+    def _populate_chat_model_menu(self, menu: QMenu) -> None:
+        _channel, _badge_text, models, current = self._resolve_active_chat_channel_and_models()
+        current_thinking = normalize_thinking_level(self._settings.thinking_level)
+        menu.clear()
+        # QWidgetAction 内的按钮不会触发 QMenu 的自动关闭行为。
+        refresh = QWidgetAction(menu)
+        refresh.setText("🔄 获取 / 刷新官方模型")
+        button = QPushButton(refresh.text(), menu)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setStyleSheet("QPushButton { text-align: left; color: #F6F3FF; background: transparent; border: 0; border-radius: 7px; padding: 7px 24px 7px 14px; margin: 1px 4px; } QPushButton:hover { background: #3C2E75; } QPushButton:disabled { color: #7D75A8; }")
+        refresh.setDefaultWidget(button)
+        menu.addAction(refresh)
+        busy = self._chat_models_discovery_worker is not None and self._chat_models_discovery_worker.isRunning()
+        refresh.setEnabled(not self._settings.chat_offline_mode and not busy)
+        button.clicked.connect(lambda: self._refresh_chat_models_async(explicit=True))
         menu.addSeparator()
         hdr = menu.addAction("模型")
         hdr.setEnabled(False)
@@ -2824,25 +2901,8 @@ class PetWindow(QWidget):
                     lambda _checked=False, m=model_id, lv=lvl: self.select_chat_model(m, lv)
                 )
 
-        menu.addSeparator()
-        act_sync = menu.addAction("💬 实时同步反重力对话")
-        act_sync.setCheckable(True)
-        act_sync.setChecked(self._ag_mirror_active)
-        act_sync.triggered.connect(self._on_menu_sync_chat)
-        menu.addSeparator()
-        act_refresh = menu.addAction("🔄 获取 / 刷新官方模型")
-        act_refresh.setEnabled(not self._settings.chat_offline_mode)
-        act_refresh.triggered.connect(
-            lambda: self._refresh_chat_models_async(explicit=True)
-        )
-        act_settings = menu.addAction("⚙️ API Key 与模型设置...")
-        act_settings.triggered.connect(self.open_settings_requested)
-        self._chat_model_menu = menu
-        return menu
 
     def _open_chat_model_menu(self) -> None:
-        if self._chat.resolve_chat_provider(self._settings) and not GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key):
-            self._refresh_chat_models_async()
         menu = self._build_chat_model_menu()
         anchor_pos = self._chat_model_btn.mapToGlobal(QPoint(0, self._chat_model_btn.height() + 4))
         menu.popup(anchor_pos)
@@ -2882,6 +2942,9 @@ class PetWindow(QWidget):
         worker.completed.connect(self._on_chat_models_discovered)
         self._chat_models_discovery_worker = worker
         worker.start()
+        menu = self._chat_model_menu
+        if menu is not None and menu.property("chat_model_list") and menu.isVisible():
+            menu.actions()[0].setEnabled(False)
 
     def _on_chat_models_discovered(self, models: list[str], err_msg: str, explicit: bool = False) -> None:
         worker = self._chat_models_discovery_worker
@@ -2893,6 +2956,9 @@ class PetWindow(QWidget):
             if worker._settings.gemini_api_key != self._settings.gemini_api_key:
                 return
         self._sync_chat_controls()
+        menu = self._chat_model_menu
+        if menu is not None and menu.property("chat_model_list") and menu.isVisible():
+            self._populate_chat_model_menu(menu)
         # 切换离线后忽略先前已发出的模型请求结果，避免出现联网成功提示。
         if self._settings.chat_offline_mode:
             return
@@ -3091,32 +3157,31 @@ class PetWindow(QWidget):
         self._relayout_stage_top()
 
     def _update_chat_save_path(self) -> None:
-        self._task_folder_path.setText(self._chat_archive.task_folder)
-        self._task_folder_path.setCursorPosition(0)
-        self._task_folder_path.setToolTip(self._chat_archive.task_folder or "尚未选择任务文件夹")
         path = self._chat_archive.session_path()
         self._chat_path.setText(str(path))
         self._chat_path.setCursorPosition(0)
         self._chat_path.setToolTip(str(path))
+        saved = path.is_file()
+        self._chat_open_file_btn.setEnabled(saved)
+        self._chat_open_file_btn.setToolTip(
+            "用系统默认程序打开当前会话文件" if saved
+            else "首条消息保存后可打开会话文件"
+        )
         if self._archive_error:
             self._chat_save_status.setText("保存失败 · 请检查配置目录是否可写")
         else:
             self._chat_save_status.setText(
-                "当前对话保存路径 · 已保存" if path.exists()
+                "当前对话保存路径 · 已保存" if saved
                 else "当前对话保存路径 · 首条消息后保存"
             )
 
     def _open_chat_session_file(self) -> None:
-        # 右侧按钮：用系统默认程序直接打开当前会话文件（聊天配置文件）。
         path = self._chat_archive.session_path()
-        if path.exists():
-            target = path
-        else:
-            # 首条消息尚未保存时没有文件可开，退而打开会话所在文件夹。
-            path.parent.mkdir(parents=True, exist_ok=True)
-            target = path.parent
+        if not path.is_file():
+            self._update_chat_save_path()
+            return
         try:
-            os.startfile(str(target))
+            os.startfile(str(path))
         except OSError:
             self._chat_save_status.setText("打开会话文件失败，请检查文件是否被占用")
 
@@ -3135,66 +3200,66 @@ class PetWindow(QWidget):
             self._history_list.clear()
             records = self._chat_archive.sessions()
             current = self._chat_archive.session_id
-            if not any(record["id"] == current for record in records):
-                records.insert(0, {"id": current, "title": "新对话", "updated": "尚未发送消息"})
+            if self._ag_sync_session_id is not None:
+                records.insert(0, {
+                    "id": self._ag_sync_session_id,
+                    "title": "Antigravity 实时对话",
+                    "updated": "同步中",
+                })
+            # 历史列表只展示已落盘的会话；未发送消息的新会话留在聊天区。
+            selected = False
             for record in records:
                 title = " ".join(str(record.get("title", "未命名会话")).split())
-                item = QListWidgetItem(title + "\n" + str(record.get("updated", "")).replace("T", " "))
+                # 自定义行负责全部文字和按钮；条目本身不能再绘制一份文本。
+                item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, record["id"])
+                item.setData(Qt.ItemDataRole.AccessibleTextRole, f"{title} {record.get('updated', '')}")
                 item.setToolTip(title)
                 self._history_list.addItem(item)
-                # 条目右上角放 × 直接删除：置顶浮窗会盖住任何弹窗，确认框不可用。
                 row_widget = self._make_history_row_widget(
                     record["id"], title, str(record.get("updated", "")).replace("T", " ")
                 )
                 item.setSizeHint(row_widget.sizeHint())
                 self._history_list.setItemWidget(item, row_widget)
-                if record["id"] == current:
+                if (self._ag_viewing_sync and record["id"] == self._ag_sync_session_id) or (
+                    not self._ag_viewing_sync and record["id"] == current
+                ):
                     self._history_list.setCurrentItem(item)
+                    selected = True
+            if not selected:
+                self._history_list.setCurrentRow(-1)
         finally:
             self._history_list.blockSignals(False)
 
     def _make_history_row_widget(self, session_id: str, title: str, updated: str) -> QWidget:
-        """构造历史条目的自定义行：标题+时间在左，右上角 × 按钮直接删除该会话。"""
+        """历史行只保留一份标题与时间；临时同步行不显示删除按钮。"""
         wrapper = QWidget(self._history_list)
         wrapper.setStyleSheet("background: transparent;")
         row = QHBoxLayout(wrapper)
-        row.setContentsMargins(8, 6, 6, 6)
-        row.setSpacing(4)
+        row.setContentsMargins(9, 7, 7, 7)
+        row.setSpacing(6)
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(1)
         title_lbl = QLabel(title)
+        title_lbl.setMinimumWidth(0)
+        title_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title_lbl.setToolTip(title)
         title_lbl.setStyleSheet("color: #D8CCFF; font-size: 11px; background: transparent;")
         time_lbl = QLabel(updated)
+        time_lbl.setMinimumWidth(0)
+        time_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         time_lbl.setStyleSheet("color: #A89FD6; font-size: 10px; background: transparent;")
         text_col.addWidget(title_lbl)
         text_col.addWidget(time_lbl)
         row.addLayout(text_col, 1)
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setToolTip("删除该对话")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background: #2A2146;
-                color: #A89FD6;
-                border: 1px solid #4E3F8E;
-                border-radius: 4px;
-                font-size: 14px;
-                line-height: 14px;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background: #8B2E4E;
-                color: #FFFFFF;
-                border-color: #C05070;
-            }
-        """)
-        # QPushButton 会消费鼠标事件，不会传播到列表触发条目选中切换。
-        close_btn.clicked.connect(lambda _checked=False, sid=session_id: self._delete_session(sid))
-        row.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignTop)
+        if session_id != self._ag_sync_session_id:
+            close_btn = _ChatActionButton("delete", wrapper)
+            close_btn.setToolTip("删除该对话")
+            # QPushButton 会消费鼠标事件，不会传播到列表触发条目选中切换。
+            close_btn.clicked.connect(lambda _checked=False, sid=session_id: self._delete_session(sid))
+            row.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         return wrapper
 
     def _toggle_chat_history(self, checked: bool) -> None:
@@ -3217,25 +3282,28 @@ class PetWindow(QWidget):
             self._chat_messages_layout.removeWidget(row)
             row.deleteLater()
         self._chat_message_rows.clear()
+        self._ag_sync_labels.clear()
 
     def _select_chat_session(self, item, previous=None) -> None:
         if item is None or self._waiting_chat_workers:
             return
         session_id = item.data(Qt.ItemDataRole.UserRole)
-        if session_id == self._chat_archive.session_id:
-            if self._ag_mirror_active:
-                self.stop_antigravity_sync(persist=False)
+        if session_id == self._ag_sync_session_id:
+            self._show_sync_chat_session()
             return
-        self._ag_mirror_active = False
-        self._ag_collector.reset()
-        self._ag_playback.clear()
-        self._ag_baseline = {}
+        if session_id == self._chat_archive.session_id:
+            if self._ag_viewing_sync:
+                self._return_to_regular_chat()
+            return
         try:
             record = self._chat_archive.load(session_id)
         except (OSError, ValueError):
             self._refresh_chat_sessions()
             self._chat_save_status.setText("无法读取所选会话，当前对话保持不变")
             return
+        self._ag_viewing_sync = False
+        self._ag_pending_handoff = False
+        self._ag_regular_draft = ""
         self._chat_archive.session_id = session_id
         self._chat_archive.task_folder = record.get("task_folder", "")
         self._chat.restore_conversation(record["messages"])
@@ -3245,21 +3313,86 @@ class PetWindow(QWidget):
         self._chat_readonly = record.get("source") == "antigravity"
         # 浏览历史时保留全部卡片，不沿用旧版只显示最近 60 行的限制。
         if not record["messages"]:
-            self._bubble_text_lbl.setText("任务文件夹已就绪，想聊什么呀喵？✦")
+            self._bubble_text_lbl.setText("想聊什么呀喵？✦")
         self._render_chat_messages(record)
         self._update_chat_save_path()
         self._sync_chat_controls()
         self._chat_input.setFocus()
 
+    def _show_sync_chat_session(self) -> None:
+        """将同步播报放到内存会话，保留普通聊天的存档与上下文。"""
+        if self._ag_sync_session_id is None or self._waiting_chat_workers:
+            return
+        if not self._ag_viewing_sync:
+            self._ag_regular_draft = self._chat_input.text()
+        self._sync_thinking_pinned = False
+        self._ag_viewing_sync = True
+        self._chat_readonly = True
+        self._chat_input.clear()
+        self._render_sync_chat_events()
+        self._refresh_chat_sessions()
+        self._sync_chat_controls()
+        self._relayout_stage_top()
+
+    def _render_sync_chat_events(self) -> None:
+        self._clear_chat_rows()
+        self._chat_messages_panel.setVisible(False)
+        self._bubble_text_lbl.setVisible(True)
+        self._bubble_text_lbl.setText("Antigravity 实时对话 · 等待新消息✦")
+        for event in self._ag_sync_events:
+            self._append_sync_chat_event(event)
+        self._relayout_stage_top()
+
+    def _append_sync_chat_event(self, event: SyncEvent) -> None:
+        if event.kind == "message" and event.role == "user":
+            role, sender = "user", "你"
+        elif event.kind == "message" and event.role == "assistant":
+            role, sender = "assistant", "Antigravity"
+        else:
+            role, sender = "system", ""
+        _, _, label = self._append_chat_turn(role=role, sender=sender, text=self._sync_event_text(event))
+        self._ag_sync_labels.append(label)
+
+    def _return_to_regular_chat(self) -> None:
+        if not self._ag_viewing_sync:
+            return
+        self._ag_viewing_sync = False
+        self._chat_readonly = False
+        path = self._chat_archive.session_path()
+        if path.is_file():
+            try:
+                record = self._chat_archive.load(self._chat_archive.session_id)
+                self._chat.restore_conversation(record["messages"])
+                self._render_chat_messages(record)
+            except (OSError, ValueError):
+                self._clear_chat_rows()
+                self._chat.reset_conversation()
+        else:
+            self._clear_chat_rows()
+            self._chat.reset_conversation()
+            self._chat_messages_panel.setVisible(False)
+            self._bubble_text_lbl.setVisible(True)
+            self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
+        self._chat_input.setText(self._ag_regular_draft)
+        self._ag_regular_draft = ""
+        self._update_chat_save_path()
+        self._refresh_chat_sessions()
+        self._sync_chat_controls()
+        self._relayout_stage_top()
+        self._chat_input.setFocus()
+
     def _clear_chat_history(self) -> None:
         if self._waiting_chat_workers:
             return
+        self._reset_chat_session("已开始新对话，旧会话已保存在历史对话中✦")
+
+    def _reset_chat_session(self, notice: str) -> None:
+        """新建与删除当前会话共用同一套界面和上下文重置。"""
         self._chat_archive.new_session()
         self._chat_readonly = False
-        self._ag_mirror_active = False
-        self._ag_collector.reset()
-        self._ag_playback.clear()
-        self._ag_baseline = {}
+        self._ag_viewing_sync = False
+        self._ag_pending_handoff = False
+        self._ag_regular_draft = ""
         self._archive_error = ""
         self._last_chat_api_notice = ""
         self._clear_chat_rows()
@@ -3269,7 +3402,7 @@ class PetWindow(QWidget):
         self._bubble_text_lbl.setStyleSheet(
             "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
         )
-        self._bubble_text_lbl.setText("已开始新对话，旧会话已保存在历史对话中✦")
+        self._bubble_text_lbl.setText(notice)
         self._bubble_text_lbl.setVisible(True)
         self._update_chat_save_path()
         self._refresh_chat_sessions()
@@ -3278,8 +3411,10 @@ class PetWindow(QWidget):
         self._chat_input.setFocus()
 
     def _delete_session(self, session_id: str) -> None:
-        """直接删除指定会话并立即刷新历史列表；无确认弹窗（置顶浮窗会挡住弹窗）。"""
+        """删除指定会话并刷新历史列表。"""
         if self._waiting_chat_workers:
+            return
+        if session_id == self._ag_sync_session_id:
             return
         # 尚未落盘的新对话没有文件可删。
         if (
@@ -3293,28 +3428,9 @@ class PetWindow(QWidget):
             self._chat_save_status.setText("删除对话失败，请检查配置目录权限")
             return
         if session_id == self._chat_archive.session_id:
-            # 删除的就是当前会话：清空消息界面并开启全新会话。
-            self._chat_archive.new_session()
-            self._chat_readonly = False
-            self._ag_mirror_active = False
-            self._ag_collector.reset()
-            self._ag_playback.clear()
-            self._ag_baseline = {}
-            self._archive_error = ""
-            self._last_chat_api_notice = ""
-            self._clear_chat_rows()
-            self._chat.reset_conversation()
-            self._chat_input.clear()
-            self._chat_messages_panel.setVisible(False)
-            self._bubble_text_lbl.setStyleSheet(
-                "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
-            )
-            self._bubble_text_lbl.setText("已删除所选对话，开始新对话喵✦")
-            self._bubble_text_lbl.setVisible(True)
-        self._update_chat_save_path()
+            self._reset_chat_session("已删除所选对话，开始新对话喵✦")
+            return
         self._refresh_chat_sessions()
-        self._sync_chat_controls()
-        self._relayout_stage_top()
 
     # ==================== Antigravity 对话气泡播报 ====================
 
@@ -3324,18 +3440,29 @@ class PetWindow(QWidget):
             f"点击播报：active={self._ag_mirror_active}, "
             f"bubble={self._speech_bubble.isVisible() if self._speech_bubble else 'n/a'}",
         )
-        self.set_antigravity_sync_enabled(not self._ag_mirror_active)
+        self.set_antigravity_sync_enabled(not self._settings.chat_sync_enabled)
 
     def set_antigravity_sync_enabled(self, enabled: bool, *, silent: bool = False) -> None:
-        """按目标状态开启/停止实时同步；菜单复选框、托盘与设置窗口共用一个入口。"""
+        """保存用户的同步意图；会话暂不可用时由轮询稍后重试。"""
         want = bool(enabled)
+        previous = self._settings.chat_sync_enabled
+        self._settings.chat_sync_enabled = want
+        try:
+            self._settings_service.save(self._settings)
+        except OSError as exc:
+            self._settings.chat_sync_enabled = previous
+            self._sync_context_menu_checks()
+            AppLogger.error("ChatSync", "保存实时同步设置失败", exc)
+            if not silent:
+                self.show_bubble("保存实时同步设置失败，请检查配置目录", 4.0, force=True)
+            return
         if want and not self._ag_mirror_active:
             self.start_antigravity_sync(silent=silent)
-        elif not want and self._ag_mirror_active:
+            self._ag_next_retry_at = time.monotonic() + 10.0
+        elif not want and (self._ag_mirror_active or self._ag_sync_session_id is not None):
             self.stop_antigravity_sync(silent=silent)
-        # 启动失败（没找到会话等）时回落到实际运行态，保证三处勾选状态一致。
-        self._settings.chat_sync_enabled = self._ag_mirror_active
-        self._settings_service.save(self._settings)
+        if not want:
+            self._ag_next_retry_at = 0.0
         self._sync_context_menu_checks()
         self.settings_synced.emit()
 
@@ -3351,8 +3478,11 @@ class PetWindow(QWidget):
             conversation = self._ag_sync_service.latest_conversation()
             if conversation is None or not conversation.messages:
                 if not silent:
-                    self.show_bubble("没有找到可播报的反重力对话喵～", 3.5)
-                AppLogger.warn("ChatSync", "没有找到可播报的反重力对话")
+                    if self._is_chat_open:
+                        self._chat_save_status.setText("等待可同步的 Antigravity 对话")
+                    else:
+                        self.show_bubble("等待可同步的 Antigravity 对话喵～", 3.5)
+                    AppLogger.warn("ChatSync", "尚无可同步的反重力对话，稍后重试")
                 return
             self._ag_mirror_active = True
             self._ag_collector.reset()
@@ -3364,10 +3494,15 @@ class PetWindow(QWidget):
             self._ag_dbg_last = time.monotonic()
             # 首拉只记基线：已有的历史不重放，只播之后的新内容。
             self._ag_baseline = self._ag_sync_state.counters()
-            self._settings.chat_sync_enabled = True
-            self._settings_service.save(self._settings)
-            if not silent:
-                self.show_bubble("反重力对话播报已开启喵～新消息会出现在这里", 4.0)
+            if self._is_chat_open:
+                self._ag_sync_session_id = f"sync:{uuid.uuid4().hex}"
+                self._ag_sync_events.clear()
+                if self._waiting_chat_workers:
+                    self._ag_pending_handoff = True
+                else:
+                    self._show_sync_chat_session()
+            if not silent and not self._is_chat_open:
+                self.show_bubble("Antigravity 对话播报已开启喵～新消息会出现在这里", 4.0)
             AppLogger.info(
                 "ChatSync",
                 f"开始播报：{conversation.source_id[:8]}, 基线={len(conversation.messages)}",
@@ -3377,12 +3512,17 @@ class PetWindow(QWidget):
             self._ag_collector.reset()
             self._ag_playback.clear()
             self._ag_baseline = {}
+            self._ag_sync_session_id = None
+            self._ag_sync_events.clear()
+            self._ag_pending_handoff = False
+            if self._ag_viewing_sync:
+                self._return_to_regular_chat()
             AppLogger.error("ChatSync", "启动反重力播报失败", exc)
             if not silent:
-                self.show_bubble(f"反重力播报启动失败：{exc}", 5.0, force=True)
+                self.show_bubble(f"Antigravity 播报启动失败：{exc}", 5.0, force=True)
 
-    def stop_antigravity_sync(self, *, silent: bool = False, persist: bool = True) -> None:
-        """停止播报。persist=False 用于界面切换这类临时停止，不改用户偏好。"""
+    def stop_antigravity_sync(self, *, silent: bool = False) -> None:
+        """停止运行中的播报，并移除内存中的同步会话。"""
         self._sync_thinking_pinned = False
         self._sync_thinking_visible = False
         self._ag_mirror_active = False
@@ -3390,22 +3530,30 @@ class PetWindow(QWidget):
         self._ag_playback.clear()
         self._ag_baseline = {}
         self._ag_last_replace = 0.0
-        if persist:
-            self._settings.chat_sync_enabled = False
-            self._settings_service.save(self._settings)
-        if not silent:
-            self.show_bubble("已停止反重力播报喵～", 3.0)
+        self._ag_sync_session_id = None
+        self._ag_sync_events.clear()
+        self._ag_pending_handoff = False
+        if self._ag_viewing_sync:
+            self._return_to_regular_chat()
+        else:
+            self._refresh_chat_sessions()
+        if not silent and not self._is_chat_open:
+            self.show_bubble("已停止 Antigravity 播报喵～", 3.0)
 
     def _auto_resume_antigravity_sync(self) -> None:
         """启动时恢复上次的播报开关：静默开启，不覆盖问候气泡。"""
         if self._ag_mirror_active or not self._settings.chat_sync_enabled:
             return
-        # 找不到会话时静默回落，避免托盘/菜单/设置窗口出现"勾着却没运行"的状态。
-        self.set_antigravity_sync_enabled(True, silent=True)
+        self._ag_next_retry_at = time.monotonic() + 10.0
+        self.start_antigravity_sync(silent=True)
 
     def _refresh_antigravity_sync(self) -> None:
         """十几拍一次的状态采集：读库 → 取差量 → 播队列。"""
         if not self._ag_mirror_active:
+            now = time.monotonic()
+            if self.isVisible() and self._settings.chat_sync_enabled and now >= self._ag_next_retry_at:
+                self._ag_next_retry_at = now + 10.0
+                self.start_antigravity_sync(silent=True)
             return
         self._ag_dbg_ticks += 1
         now = time.monotonic()
@@ -3429,7 +3577,7 @@ class PetWindow(QWidget):
         for name, data in self._ag_sync_state.take_since(self._ag_baseline):
             if name == "status":
                 if data.get("switched"):
-                    self.show_bubble(f"✦ 已切换到新的反重力对话：{data.get('title', '')}", 3.0)
+                    self.show_bubble(f"✦ 已切换到新的 Antigravity 对话：{data.get('title', '')}", 3.0)
                 continue
             items = (data.get("items") or []) if isinstance(data, dict) else []
             if not items:
@@ -3439,7 +3587,7 @@ class PetWindow(QWidget):
                 if self._ag_playback:
                     # 队列末条就是这条消息，换成最新文本，保持播放顺序。
                     self._ag_playback[-1] = newest
-                elif not self._is_chat_open:
+                elif not self._is_chat_open or self._ag_sync_session_id is not None:
                     # 续写刷新走气泡；聊天面板开着时每条都追加系统行，会堆重复卡片。
                     now = time.monotonic()
                     if not self._ag_last_replace or now - self._ag_last_replace >= _SYNC_REPLACE_INTERVAL:
@@ -3468,27 +3616,56 @@ class PetWindow(QWidget):
         self._show_sync_event(event)
         AppLogger.info("ChatSync", f"播报：{event.role}/{event.kind} {event.text[:24]}")
 
+    @staticmethod
+    def _sync_event_text(event: SyncEvent) -> str:
+        text = event.text.strip()
+        if event.kind == "thinking":
+            return f"💭 {text}"
+        if event.kind == "error":
+            return f"⚠ {text}"
+        if event.kind == "tool":
+            return f"⚙ {text}"
+        if event.role == "user":
+            return f"你：{text}"
+        return text
+
     def _show_sync_event(self, event: SyncEvent) -> None:
         if self._sync_thinking_pinned and event.kind != "thinking":
             return
-        text = event.text.strip()
-        if not text:
+        if not event.text.strip():
             return
-        if event.kind == "thinking":
-            message = f"💭 {text}"
-        elif event.kind == "error":
-            message = f"⚠ {text}"
-        elif event.kind == "tool":
-            message = f"⚙ {text}"
-        elif event.role == "user":
-            message = f"你：{text}"
-        else:
-            message = text
+        message = self._sync_event_text(event)
         self._sync_thinking_visible = event.kind == "thinking"
+        if self._ag_sync_session_id is not None:
+            replace_last = bool(event.replace and self._ag_sync_events and (
+                self._ag_sync_events[-1].kind == event.kind
+                and self._ag_sync_events[-1].role == event.role
+            ))
+            if replace_last:
+                self._ag_sync_events[-1] = event
+            else:
+                self._ag_sync_events.append(event)
+            if self._ag_viewing_sync:
+                if replace_last and self._ag_sync_labels:
+                    # 续写只更新当前文本，保留卡片、布局及用户的滚动位置。
+                    label = self._ag_sync_labels[-1]
+                    if label.text() != message:
+                        label.setText(message)
+                else:
+                    self._append_sync_chat_event(event)
+            elif self._is_chat_open:
+                # 普通聊天仍可浏览；同步流一有新内容就交接到实时会话。
+                # 正在发送的普通消息先等回复落盘，避免切换时丢失上下文。
+                if self._waiting_chat_workers:
+                    self._ag_pending_handoff = True
+                else:
+                    self._show_sync_chat_session()
+        if self._is_chat_open:
+            return
         duration = max(3.5, min(9.0, len(message) / 28.0))
         # 播报期间锁一个固定宽度：文本每长一点都按最长行重算宽度，视觉上会一直抖。
         self._sync_bubble_width = 320
-        self.show_bubble(message, duration, force=self._is_chat_open, from_sync=True)
+        self.show_bubble(message, duration, from_sync=True)
         self._sync_guard_until = time.monotonic() + duration
 
     def _render_chat_messages(self, record: dict) -> None:
@@ -3548,16 +3725,22 @@ class PetWindow(QWidget):
             return
 
         self._is_forced_bubble_active = force
-        self._chat_messages_panel.setVisible(False)
-        self._bubble_text_lbl.setStyleSheet(
-            "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+        already_showing_sync = (
+            from_sync and time.monotonic() < self._sync_guard_until
+            and self._speech_bubble.isVisible() and self._bubble_text_lbl.isVisible()
         )
-        self._bubble_text_lbl.setVisible(True)
+        if not already_showing_sync:
+            self._chat_messages_panel.setVisible(False)
+            self._bubble_text_lbl.setStyleSheet(
+                "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+            )
+            self._bubble_text_lbl.setVisible(True)
         scroll_position = self._bubble_scroll.verticalScrollBar().value()
         self._bubble_text_lbl.setText(message)
-        self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self._speech_bubble.setVisible(True)
-        self._sync_bubble_window_styles()
+        if not already_showing_sync:
+            self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            self._speech_bubble.setVisible(True)
+            self._sync_bubble_window_styles()
         self._relayout_stage_top()
         self._bubble_timer.stop()
         if self._sync_thinking_pinned:
@@ -3587,12 +3770,20 @@ class PetWindow(QWidget):
             self.show()
         self.open_chat_dialog()
         self.raise_()
+        self._speech_bubble.raise_()
 
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
+        if self._ag_mirror_active and self._ag_sync_session_id is None:
+            self._ag_sync_session_id = f"sync:{uuid.uuid4().hex}"
+            self._ag_sync_events.clear()
+            if self._waiting_chat_workers:
+                self._ag_pending_handoff = True
+            else:
+                self._show_sync_chat_session()
         self._toggle_chat_history(True)
         # 未填写 Key 不会产生请求错误，进入聊天时也需要明确显示配置提示。
-        invalid_reason = (
+        invalid_reason = "" if self._ag_viewing_sync else (
             "尚未填写 Gemini API Key"
             if not (self._settings.gemini_api_key or "").strip()
             else self._chat.get_api_error(self._settings)
@@ -3617,7 +3808,10 @@ class PetWindow(QWidget):
                 self._bubble_text_lbl.setStyleSheet(
                     f"color: {color}; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
                 )
-            elif not self._speech_bubble.isVisible() or self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用"):
+            elif not self._ag_viewing_sync and (
+                not self._speech_bubble.isVisible()
+                or self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用")
+            ):
                 self._bubble_text_lbl.setStyleSheet(
                     "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
                 )
@@ -3670,7 +3864,7 @@ class PetWindow(QWidget):
 
     def _submit_chat(self) -> None:
         if self._chat_readonly:
-            self._chat_save_status.setText("反重力实时同步中，输入已禁用喵")
+            self._chat_save_status.setText("Antigravity 实时同步中，输入已禁用喵")
             return
         text = self._chat_input.text().strip()
         if not text or self._waiting_chat_workers:
@@ -3734,6 +3928,10 @@ class PetWindow(QWidget):
         if worker in self._active_chat_workers:
             self._active_chat_workers.remove(worker)
         worker.deleteLater()
+        if self._ag_pending_handoff and not self._waiting_chat_workers:
+            self._ag_pending_handoff = False
+            if self._ag_mirror_active and self._is_chat_open:
+                self._show_sync_chat_session()
 
     def _on_chat_reply_ready(
         self,
@@ -3980,7 +4178,7 @@ class PetWindow(QWidget):
             ("_act_pin_on_desktop", not self._settings.auto_walk),
             ("_act_doze", self._settings.doze_mode),
             ("_act_show_bubble", self._settings.show_speech_bubble),
-            ("_act_sync_chat", self._ag_mirror_active),
+            ("_act_sync_chat", self._settings.chat_sync_enabled),
             ("_act_runtime_log", self._settings.enable_runtime_log),
         )
         for attr, checked in states:
@@ -3992,6 +4190,11 @@ class PetWindow(QWidget):
                 action.setChecked(bool(checked))
             finally:
                 action.blockSignals(False)
+
+        self._act_sync_chat.setToolTip(
+            "已启用，等待可同步的 Antigravity 对话" if self._settings.chat_sync_enabled and not self._ag_mirror_active
+            else "把 Antigravity 的新消息实时播报到气泡"
+        )
 
         current_style = self._settings.style_mode
         for mode, action in getattr(self, "_style_actions", {}).items():

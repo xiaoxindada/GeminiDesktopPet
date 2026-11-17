@@ -221,7 +221,7 @@ def _build_conversation(
     for _idx, produced, _added in steps:
         messages.extend(produced)
     first_user = next((message.text for message in messages if message.role == "user"), "")
-    title = " ".join(first_user.split())[:40] or "反重力对话"
+    title = " ".join(first_user.split())[:40] or "Antigravity 对话"
     return SyncedConversation(path.stem, title, messages, path, mtime_ns, size)
 
 

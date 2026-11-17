@@ -198,18 +198,6 @@ def ensure_app_user_model_id(app_id: str = "GeminiDesktopPet") -> None:
         pass
 
 
-def bring_window_topmost_no_activate(hwnd: int) -> None:
-    """将窗口移到置顶层最上方但不抢占输入焦点。"""
-    if not hwnd:
-        return
-    try:
-        _user32.SetWindowPos(
-            hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE
-        )
-    except Exception:
-        pass
-
-
 def bring_window_to_front(hwnd: int) -> None:
     """将普通设置/详情窗口还原、提到前层并请求前台焦点。"""
     if not hwnd or sys.platform != "win32":

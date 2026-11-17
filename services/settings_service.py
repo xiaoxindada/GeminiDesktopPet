@@ -144,7 +144,6 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
         _make_clamped_float(0.35, 1.0),
         lambda v: round(float(v), 2),
     ),
-    _SettingFieldSpec("always_on_top", "appearance", "always_on_top", _parse_bool, bool),
     _SettingFieldSpec("show_speech_bubble", "appearance", "show_speech_bubble", _parse_bool, bool),
     _SettingFieldSpec("auto_walk", "behavior", "auto_walk", _parse_bool, bool),
     _SettingFieldSpec("anti_gravity_mode", "behavior", "anti_gravity_mode", _parse_bool, bool),
