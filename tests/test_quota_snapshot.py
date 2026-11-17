@@ -11,6 +11,11 @@ from services.antigravity_quota_service import (
     _parse_quota_summary,
     _parse_user_status,
 )
+from services.followed_app_probe import AppActivitySnapshot, FollowedAppProbe
+
+
+def _not_running() -> AppActivitySnapshot:
+    return AppActivitySnapshot(is_running=False, active_pids=set(), primary_pids=set())
 
 
 def test_parse_quota_summary_normalizes_groups_and_skips_unusable_buckets() -> None:
@@ -68,6 +73,13 @@ def test_parse_legacy_user_status_reads_account_and_model_pools() -> None:
 
 def test_fetch_quota_without_sources_reports_friendly_failure(monkeypatch) -> None:
     service = AntigravityQuotaService()
+    # 隔离本机真实运行的桌面端/CLI 进程，确保测试稳定走“无数据源”分支。
+    monkeypatch.setattr(
+        FollowedAppProbe, "sample_antigravity_activity", staticmethod(_not_running)
+    )
+    monkeypatch.setattr(
+        FollowedAppProbe, "sample_antigravity_cli_activity", staticmethod(_not_running)
+    )
     monkeypatch.setattr(AntigravityQuotaService, "_discover_sources", staticmethod(lambda: []))
 
     snapshot = service.fetch_quota()

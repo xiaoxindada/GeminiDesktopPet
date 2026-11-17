@@ -299,14 +299,14 @@ class TestChatAndSettings(unittest.TestCase):
             try:
                 win.show()
                 app.processEvents()
-                self.assertEqual(len(win._summary_rows), 24)
+                self.assertEqual(len(win._summary_rows), 25)
                 self.assertTrue(all(not row.isHidden() for row, _text, _getter in win._summary_rows))
 
                 win._search_edit.setText("气泡")
                 app.processEvents()
                 matched = [row for row, _text, _getter in win._summary_rows if not row.isHidden()]
                 self.assertTrue(matched)
-                self.assertLess(len(matched), 24)
+                self.assertLess(len(matched), 25)
                 self.assertFalse(win._summary_empty.isVisible())
 
                 win._search_edit.setText("不存在的设置项")
@@ -347,7 +347,7 @@ class TestChatAndSettings(unittest.TestCase):
             try:
                 win.show()
                 app.processEvents()
-                self.assertEqual(len(win._summary_rows), 24)
+                self.assertEqual(len(win._summary_rows), 25)
                 for (row, _text, _getter), key in zip(
                     win._summary_rows[-3:], ("editor", "profile", "update")
                 ):
