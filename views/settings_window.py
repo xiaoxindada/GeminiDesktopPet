@@ -674,7 +674,7 @@ class SettingsWindow(QWidget):
              lambda: f"{self._settings.scale:.2f}x"),
             (self._PAGE_APPEARANCE, "透明度", "整体不透明度", "外观形象",
              lambda: f"{int(round(self._settings.opacity * 100))}%"),
-            (self._PAGE_BEHAVIOR, "固定在桌面（自由漫步）", "固定待机或自由漫步", "行为互动",
+            (self._PAGE_BEHAVIOR, "固定位置", "固定待机或自由漫步", "行为互动",
              lambda: "自由漫步" if self._settings.auto_walk else "已固定"),
             (self._PAGE_BEHAVIOR, "打盹模式", "原地睡觉待机", "行为互动",
              lambda: self._on_off(self._settings.doze_mode)),
@@ -854,8 +854,8 @@ class SettingsWindow(QWidget):
         self._chk_pin = self._make_switch()
         card.add_row(
             self._chk_pin,
-            "固定在桌面（自由漫步）",
-            "开启后原地待机不乱跑；关闭时自由漫步",
+            "固定位置",
+            "开启后原地待机，关闭后自由漫步",
         )
         self._chk_doze = self._make_switch()
         card.add_row(self._chk_doze, "打盹模式", "停止漫步与闲聊，原地睡觉待机")

@@ -1094,7 +1094,7 @@ class PetWindow(QWidget):
             tip="打开 AI 聊天模式（支持多轮对话与模型选择）",
         )
         self._act_pin_on_desktop = self._new_menu_action(
-            "📌 固定（自由漫步）",
+            "📌 固定位置",
             checkable=True,
             slot=self._on_menu_pin_on_desktop,
             tip="勾选后固定在桌面不乱跑；取消勾选恢复自由漫步",
@@ -1145,6 +1145,7 @@ class PetWindow(QWidget):
         populate_shared_menu(menu, self.shared_menu_spec())
         menu.aboutToShow.connect(self._sync_context_menu_checks)
         self._context_menu = menu
+        self._sync_context_menu_checks()
 
     def _new_menu_action(
         self,
@@ -4193,8 +4194,12 @@ class PetWindow(QWidget):
 
     def _sync_context_menu_checks(self) -> None:
         """统一刷新右键菜单的勾选状态，保证菜单、托盘与设置窗口显示一致。"""
+        pinned = not self._settings.auto_walk
+        # 共用 QAction 的文案和勾选同时更新，两个菜单都能收到变更通知。
+        self._act_pin_on_desktop.setChecked(pinned)
+        status = "已固定" if pinned else "关闭后自由漫步"
+        self._act_pin_on_desktop.setText(f"📌 固定位置（{status}）")
         states = (
-            ("_act_pin_on_desktop", not self._settings.auto_walk),
             ("_act_doze", self._settings.doze_mode),
             ("_act_show_bubble", self._settings.show_speech_bubble),
             ("_act_sync_chat", self._settings.chat_sync_enabled),

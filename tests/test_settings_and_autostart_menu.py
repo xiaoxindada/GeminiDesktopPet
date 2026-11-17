@@ -90,7 +90,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     ]
                     for expected in (
                         "聊天模式",
-                        "固定（自由漫步）",
+                        "固定位置（关闭后自由漫步）",
                         "打盹模式",
                         "自动弹出对话气泡",
                         "实时同步 Antigravity 对话",
@@ -117,7 +117,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                         self.assertTrue(any(dedicated in text for text in tray_texts), dedicated)
                     for shared in (
                         "聊天模式",
-                        "固定（自由漫步）",
+                        "固定位置（关闭后自由漫步）",
                         "打盹模式",
                         "自动弹出对话气泡",
                         "实时同步 Antigravity 对话",
@@ -176,19 +176,21 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     for removed in ("开机自动启动", "反重力悬浮", "鼠标穿透", "窗口置顶", "互动音效"):
                         self.assertFalse(any(removed in text for text in tray_texts), removed)
 
-                    # 右键「固定（自由漫步）」勾选后停止漫步，再次点击恢复
-                    pet_pin = self._find_action(coord._pet._context_menu, "固定（自由漫步）")
+                    # 共用操作从右键开启、从托盘关闭，两边的状态文案立即更新。
+                    pet_pin = self._find_action(coord._pet._context_menu, "固定位置（关闭后自由漫步）")
                     self.assertIsNone(pet_pin.menu())
                     self.assertTrue(pet_pin.isCheckable())
                     self.assertFalse(pet_pin.isChecked())
                     pet_pin.trigger()
-                    app.processEvents()
                     self.assertFalse(coord._settings.auto_walk)
                     self.assertTrue(pet_pin.isChecked())
-                    pet_pin.trigger()
-                    app.processEvents()
+                    self.assertIn("固定位置（已固定）", pet_pin.text())
+                    tray_pin = self._find_action(coord._tray._menu, "固定位置（已固定）")
+                    self.assertIs(tray_pin, pet_pin)
+                    tray_pin.trigger()
                     self.assertTrue(coord._settings.auto_walk)
                     self.assertFalse(pet_pin.isChecked())
+                    self.assertIn("固定位置（关闭后自由漫步）", pet_pin.text())
 
                     # 设置窗口内开启/关闭开机自启，启动快捷方式同步创建与移除
                     pet_settings_act = self._find_action(coord._pet._context_menu, "设置")
