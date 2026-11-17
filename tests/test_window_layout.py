@@ -404,6 +404,79 @@ class TestWindowLayoutFixes(unittest.TestCase):
                 pet.deleteLater()
                 self._app.processEvents()
 
+    def test_quota_window_full_display_and_non_overlapping_placement(self) -> None:
+        """额度卡片加载后应完整展开且不压住桌宠可视区域。"""
+        app = QApplication.instance() or QApplication([])
+
+        class _FakePet:
+            def isVisible(self) -> bool:
+                return True
+
+            def frameGeometry(self) -> QRect:
+                return QRect(1540, 560, 360, 440)
+
+            def screen(self):
+                return None
+
+            def get_visual_sprite_bounds(self) -> QRect:
+                return QRect(1670, 740, 180, 260)
+
+            def get_visual_ui_bounds(self) -> QRect:
+                return QRect(1550, 600, 320, 400)
+
+        win = QuotaWindow(AntigravityQuotaService(), anchor_pet=_FakePet())
+        try:
+            win.show_loading_card()
+            app.processEvents()
+            loading_h = win.height()
+
+            snap = QuotaSnapshot(
+                success=True,
+                error_message=None,
+                source_detail="Antigravity app · pid 1234 · http://127.0.0.1:56789",
+                account_email=None,
+                account_plan="Google AI Pro",
+                overview_description=None,
+                fetched_at=datetime.now(timezone.utc),
+                groups=[
+                    QuotaGroupInfo(
+                        "Gemini Models",
+                        "Gemini pool",
+                        [
+                            QuotaBucketInfo("w", "Weekly Limit Remaining", "weekly", 0.48, datetime.now(timezone.utc)),
+                            QuotaBucketInfo("5h", "Five Hour Limit Remaining", "5h", 0.634, datetime.now(timezone.utc)),
+                        ],
+                    ),
+                    QuotaGroupInfo(
+                        "Claude and GPT models",
+                        "Claude/GPT pool",
+                        [
+                            QuotaBucketInfo("w2", "Weekly Limit Remaining", "weekly", 1.0, datetime.now(timezone.utc)),
+                            QuotaBucketInfo("5h2", "Five Hour Limit Remaining", "5h", 0.92, datetime.now(timezone.utc)),
+                        ],
+                    ),
+                    QuotaGroupInfo(
+                        "Gemini 4 Argon",
+                        "Argon pool",
+                        [
+                            QuotaBucketInfo("arg", "Gemini 4 Argon Weekly Limit", "weekly", 0.75, datetime.now(timezone.utc)),
+                        ],
+                    ),
+                ],
+            )
+            win.apply_snapshot(snap)
+            app.processEvents()
+
+            self.assertGreater(win.height(), loading_h + 250)
+            self.assertGreaterEqual(win._quota_widget.height(), win._scroll.height() + 40)
+            shadow = 14
+            card_rect = QRect(win.x() + shadow, win.y() + shadow, win.width() - shadow * 2, win.height() - shadow * 2)
+            self.assertFalse(card_rect.intersects(_FakePet().get_visual_ui_bounds()))
+        finally:
+            win.close()
+            win.deleteLater()
+            app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton
 
-from models.pet_settings import DEFAULT_GEMINI_MODEL, PetSettings, format_model_display_name
+from models.pet_settings import (
+    DEFAULT_GEMINI_MODEL,
+    PetSettings,
+    format_model_display_name,
+    resolve_effective_thinking_level,
+)
 from services.app_follow_service import AppFollowService
 from services.gemini_chat_service import GeminiChatService
 from services.settings_service import SettingsService
@@ -38,6 +43,10 @@ class TestChatAndSettings(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         app.setQuitOnLastWindowClosed(False)
         return app
+
+    def test_unsupported_thinking_level_falls_back_to_model_default(self) -> None:
+        self.assertEqual(resolve_effective_thinking_level("gemini-3.1-flash-lite", "xhigh"), "auto")
+        self.assertEqual(resolve_effective_thinking_level("gemini-4-hydrogen", "xhigh"), "xhigh")
 
     def test_api_key_chat_uses_official_client_and_keeps_context(self) -> None:
         client = MagicMock()

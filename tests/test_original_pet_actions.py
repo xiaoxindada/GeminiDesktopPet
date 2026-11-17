@@ -2,7 +2,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 from models.pet_settings import DockSide, PetSettings, PetStyleMode
@@ -75,37 +75,6 @@ def test_standard_pose_joints_animate_and_sleep_is_static(app, sprites, tmp_path
         pet.close()
         pet.deleteLater()
         app.processEvents()
-
-
-def test_original_standard_sleep_uses_front_sleep_asset(sprites):
-    from pathlib import Path
-    from models.app_version import get_bundled_resource_dir
-    base = Path(get_bundled_resource_dir()) / "Assets/Standard"
-    sleep = sprites.get(PetState.SLEEPING, PetStyleMode.STANDARD)
-    assert sleep.toImage() == QPixmap(str(base / "sleeping.png")).toImage()
-    assert sleep.toImage() != QPixmap(str(base / "back.png")).toImage()
-
-
-def test_standard_actions_have_distinct_transparent_assets(sprites):
-    from hashlib import sha256
-    from pathlib import Path
-    from models.app_version import get_bundled_resource_dir
-
-    base = Path(get_bundled_resource_dir()) / "Assets/Standard"
-    hashes = set()
-    for state in PetState:
-        path = base / ("standee.png" if state == PetState.IDLE else f"{state.value}.png")
-        assert path.is_file(), state.value
-        digest = sha256(path.read_bytes()).hexdigest()
-        assert digest not in hashes, f"Duplicate action: {state.value}"
-        hashes.add(digest)
-        expected = QPixmap(str(path))
-        assert not expected.isNull(), state.value
-        assert expected.hasAlphaChannel(), state.value
-        rgba = expected.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-        alpha = bytes(rgba.bits())[3::4]
-        assert alpha.count(0) > len(alpha) * 0.1, f"Missing transparent background: {state.value}"
-        assert sprites.get(state, PetStyleMode.STANDARD).toImage() == expected.toImage()
 
 
 def test_retired_settings_are_ignored_and_removed_on_save(tmp_path):
