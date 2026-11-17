@@ -190,7 +190,6 @@ class PetApplicationCoordinator(QObject):
         self._pet.open_quota_requested.connect(self.toggle_quota_window)
         self._pet.open_update_requested.connect(self.open_update_window)
         self._pet.settings_synced.connect(self._sync_all_views_from_settings)
-        self._pet.follow_antigravity_cli_requested.connect(self._set_follow_antigravity_cli)
         self._pet.visual_bounds_changed.connect(self._keep_quota_window_clear)
         self._pet.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
 
@@ -318,13 +317,6 @@ class PetApplicationCoordinator(QObject):
                 else "已关闭 Windows 开机自动启动喵～",
                 4.0,
             )
-
-    def _set_follow_antigravity_cli(self, enabled: bool) -> None:
-        self._settings.follow_antigravity_cli = bool(enabled)
-        self._settings_service.save(self._settings)
-        # 菜单切换同样应用后台守护配置，保证关闭主窗口后仍能联动。
-        self._follow_service.sync_and_apply(self._settings)
-        self._sync_all_views_from_settings()
 
     def _sync_all_views_from_settings(self) -> None:
         self._pet.apply_settings_to_window()

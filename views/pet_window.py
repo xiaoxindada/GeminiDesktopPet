@@ -427,7 +427,6 @@ class PetWindow(QWidget):
     open_quota_requested = Signal()
     open_update_requested = Signal()
     settings_synced = Signal()
-    follow_antigravity_cli_requested = Signal(bool)
     visual_bounds_changed = Signal()
     exit_requested = Signal()
 
@@ -1033,12 +1032,6 @@ class PetWindow(QWidget):
             slot=self._on_menu_sync_chat,
             tip="把 Antigravity 的新消息实时播报到气泡",
         )
-        self._act_follow_cli = self._new_menu_action(
-            "🔗 跟随 Antigravity CLI 启动",
-            checkable=True,
-            slot=self.follow_antigravity_cli_requested,
-            tip="Antigravity CLI 启动时自动唤醒桌宠",
-        )
         self._act_runtime_log = self._new_menu_action(
             "📝 记录运行日志",
             checkable=True,
@@ -1093,7 +1086,6 @@ class PetWindow(QWidget):
             self._act_doze,
             self._act_show_bubble,
             self._act_sync_chat,
-            self._act_follow_cli,
             MENU_SEPARATOR,
             ("🎀 形象切换", list(self._style_actions.values())),
             ("📏 缩放大小", list(self._scale_actions.values())),
@@ -3444,7 +3436,12 @@ class PetWindow(QWidget):
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
         self._toggle_chat_history(True)
-        invalid_reason = self._chat.get_api_error(self._settings)
+        # 未填写 Key 不会产生请求错误，进入聊天时也需要明确显示配置提示。
+        invalid_reason = (
+            "尚未填写 Gemini API Key"
+            if not (self._settings.gemini_api_key or "").strip()
+            else self._chat.get_api_error(self._settings)
+        )
         if self._chat_message_rows:
             self._bubble_text_lbl.setVisible(False)
             self._chat_messages_panel.setVisible(True)
@@ -3459,15 +3456,12 @@ class PetWindow(QWidget):
             self._chat_messages_panel.setVisible(False)
             self._bubble_text_lbl.setVisible(True)
             if invalid_reason:
-                notice = (
-                    f"⚠️ API Key 不可用（{invalid_reason}）\n"
-                    "请在设置中检查 Gemini API Key，再点击顶部状态重新获取模型。"
-                )
-                self._last_chat_api_notice = notice
+                # 保留当前提示文字，普通欢迎文字不应继承错误提示的红色。
+                is_error_notice = self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用")
+                color = "#FCA5A5" if is_error_notice else "#F6F3FF"
                 self._bubble_text_lbl.setStyleSheet(
-                    "color: #FCA5A5; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+                    f"color: {color}; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
                 )
-                self._bubble_text_lbl.setText(notice)
             elif not self._speech_bubble.isVisible() or self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用"):
                 self._bubble_text_lbl.setStyleSheet(
                     "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
@@ -3832,7 +3826,6 @@ class PetWindow(QWidget):
             ("_act_doze", self._settings.doze_mode),
             ("_act_show_bubble", self._settings.show_speech_bubble),
             ("_act_sync_chat", self._ag_mirror_active),
-            ("_act_follow_cli", self._settings.follow_antigravity_cli),
             ("_act_runtime_log", self._settings.enable_runtime_log),
         )
         for attr, checked in states:
