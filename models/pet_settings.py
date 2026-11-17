@@ -195,8 +195,8 @@ class PetSettings:
     follow_antigravity: bool = True
     follow_antigravity_cli: bool = True
     follow_gemini_app: bool = True
-    # 反重力对话播报：记住上次的开关状态，重启桌宠后自动恢复
-    chat_sync_enabled: bool = False
+    # 反重力对话播报默认开启，重启时恢复已保存的开关状态。
+    chat_sync_enabled: bool = True
 
 
     last_left: float | None = None

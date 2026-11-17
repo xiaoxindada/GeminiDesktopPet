@@ -402,7 +402,7 @@ class PetApplicationCoordinator(QObject):
                     on_open_character_editor=self.open_character_editor_window,
                     on_open_profile=self.open_profile_window,
                     on_preview_appearance=self._preview_appearance_from_settings,
-                    on_antigravity_sync_changed=self._pet.set_antigravity_sync_enabled,
+                    on_antigravity_sync_changed=self._pet.apply_antigravity_sync_preference,
                     on_auto_start_changed=self._set_auto_start,
                 )
             self._settings_win.sync_from_settings()

@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from models.pet_settings import PetSettings
+from services.app_follow_service import AppFollowService
 from services.chat_history_service import ChatHistoryService
 from services.antigravity_chat_collector import SyncEvent
 from services.gemini_chat_service import GeminiChatService, ChatReply
@@ -16,6 +17,7 @@ from services.sound_service import SoundService
 from services.sprite_manager import SpriteManager
 from services.system_monitor_service import SystemMonitorService
 from views.pet_window import PetWindow
+from views.settings_window import SettingsWindow
 
 
 def test_archive_restart_and_late_reply_stay_in_original_session():
@@ -183,14 +185,35 @@ def test_menu_sync_preference_persists_until_a_conversation_is_available():
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     with tempfile.TemporaryDirectory() as tmp:
-        settings = PetSettings(auto_walk=False, sound_enabled=False)
         service = SettingsService(tmp)
+        assert service.load().chat_sync_enabled
+        service.settings_path.write_text(
+            '{"behavior":{"auto_walk":false,"sound_enabled":false}}', encoding="utf-8"
+        )
+        settings = service.load()
         sound = SoundService()
         sound.enabled = False
         pet = PetWindow(settings, service, SpriteManager(), sound,
                         SystemMonitorService(), GeminiChatService())
+        win = SettingsWindow(
+            settings=settings,
+            settings_service=service,
+            app_follow_service=AppFollowService(service),
+            on_settings_applied=pet.apply_settings_to_window,
+            on_antigravity_sync_changed=pet.apply_antigravity_sync_preference,
+        )
+        pet.settings_synced.connect(lambda: win.sync_from_settings(force=False))
         try:
-            with patch.object(pet._ag_sync_service, "latest_conversation", return_value=None):
+            assert pet._act_sync_chat.isChecked()
+            assert win._chk_ag_sync.isChecked()
+            with patch.object(pet._ag_sync_service, "latest_conversation", return_value=None) as latest:
+                pet.show()
+                app.processEvents()
+                latest.assert_called_once()
+                assert not pet._ag_mirror_active
+
+                pet._act_sync_chat.trigger()
+                assert not service.load().chat_sync_enabled
                 pet._act_sync_chat.trigger()
             assert settings.chat_sync_enabled
             assert service.load().chat_sync_enabled
@@ -208,12 +231,31 @@ def test_menu_sync_preference_persists_until_a_conversation_is_available():
             assert pet._ag_mirror_active
             assert service.load().chat_sync_enabled
 
+            # 菜单保存关闭状态后，确认设置窗口的另一项草稿也不能把它重新打开。
+            win._chk_sysmon.setChecked(False)
             pet._act_sync_chat.trigger()
             assert not settings.chat_sync_enabled
             assert not service.load().chat_sync_enabled
             assert not pet._act_sync_chat.isChecked()
             assert not pet._ag_mirror_active
+            assert not win._chk_ag_sync.isChecked()
+            assert win.has_unsaved_changes()
+            win._confirm_btn.click()
+            assert not service.load().chat_sync_enabled
+            assert not service.load().system_monitor_enabled
+
+            win._chk_ag_sync.setChecked(True)
+            with (
+                patch.object(pet._ag_sync_service, "latest_conversation", return_value=None),
+                patch.object(service, "save", wraps=service.save) as save,
+            ):
+                win._confirm_btn.click()
+                save.assert_called_once()
+            assert service.load().chat_sync_enabled
+            assert pet._act_sync_chat.isChecked()
         finally:
+            win.close()
+            win.deleteLater()
             pet.close()
             pet.deleteLater()
             app.processEvents()

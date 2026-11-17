@@ -1247,7 +1247,7 @@ class PetWindow(QWidget):
             self._ai_timer.start()
             self._monitor_timer.start()
             if self._settings.chat_sync_enabled:
-                # 上次退出前开着播报：等窗口真正可见再恢复，避免气泡被吞。
+                # 等窗口真正可见再启动播报，避免气泡被吞。
                 QTimer.singleShot(0, self._auto_resume_antigravity_sync)
         else:
             self._apply_win32_extended_styles()
@@ -3471,15 +3471,19 @@ class PetWindow(QWidget):
             if not silent:
                 self.show_bubble("保存实时同步设置失败，请检查配置目录", 4.0, force=True)
             return
-        if want and not self._ag_mirror_active:
+        self.apply_antigravity_sync_preference(want, silent=silent)
+        self.settings_synced.emit()
+
+    def apply_antigravity_sync_preference(self, enabled: bool, *, silent: bool = False) -> None:
+        """应用已保存的播报开关，供菜单和设置窗口共用。"""
+        if enabled and not self._ag_mirror_active:
             self.start_antigravity_sync(silent=silent)
             self._ag_next_retry_at = time.monotonic() + 10.0
-        elif not want and (self._ag_mirror_active or self._ag_sync_session_id is not None):
-            self.stop_antigravity_sync(silent=silent)
-        if not want:
+        elif not enabled:
+            if self._ag_mirror_active or self._ag_sync_session_id is not None:
+                self.stop_antigravity_sync(silent=silent)
             self._ag_next_retry_at = 0.0
         self._sync_context_menu_checks()
-        self.settings_synced.emit()
 
     def _on_menu_sync_chat(self, checked: bool) -> None:
         self.set_antigravity_sync_enabled(checked)
@@ -4171,7 +4175,6 @@ class PetWindow(QWidget):
         old_bottom = float(self.y() + self.height())
         # 从菜单直接选缩放时结束设置窗口的临时预览，避免预览值覆盖本次选择
         self._preview_scale = None
-        self._preview_opacity = None
         self._settings.scale = scale
         self.apply_settings_to_window()
         if self._settings.docked_side != DockSide.NONE:

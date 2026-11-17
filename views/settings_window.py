@@ -427,6 +427,7 @@ class SettingsWindow(QWidget):
         self._loading = True
         self._self_updating = False
         self._dirty = False
+        self._saved_menu_values: dict[str, int | bool] = {}
         self._drag_offset = None
         self._positioned = False
         self._summary_rows: list[tuple[_SummaryRow, str, Callable[[], str]]] = []
@@ -1146,28 +1147,49 @@ class SettingsWindow(QWidget):
         finally:
             self._model_combo.blockSignals(False)
 
+    def _sync_menu_controls(self, preserve_drafts: bool) -> None:
+        s = self._settings
+        controls = (
+            (
+                "style_mode",
+                self._style_combo.setCurrentIndex,
+                0 if s.style_mode == PetStyleMode.CHIBI else 1,
+            ),
+            ("scale", self._scale_slider.setValue, int(round(s.scale * 100))),
+            ("show_speech_bubble", self._chk_bubble.setChecked, s.show_speech_bubble),
+            ("auto_walk", self._chk_pin.setChecked, not s.auto_walk),
+            ("doze_mode", self._chk_doze.setChecked, s.doze_mode),
+            ("chat_sync_enabled", self._chk_ag_sync.setChecked, s.chat_sync_enabled),
+            ("enable_runtime_log", self._chk_log.setChecked, s.enable_runtime_log),
+        )
+        # 菜单变更已经落盘，刷新对应控件，避免确认其他草稿时把旧值写回去。
+        for field, set_value, value in controls:
+            if not preserve_drafts or value != self._saved_menu_values.get(field):
+                set_value(value)
+                self._saved_menu_values[field] = value
+        self._scale_val_lbl.setText(f"{self._scale_slider.value() / 100:.2f}x")
+
     def sync_from_settings(self, force: bool = True, clear_feedback: bool = True) -> None:
         if self._self_updating:
             return
-        if not force and self._dirty:
-            return
+        preserve_drafts = not force and self._dirty
         if force:
             self._cancel_appearance_preview()
         self._loading = True
         try:
+            self._sync_menu_controls(preserve_drafts)
+            if preserve_drafts:
+                self._refresh_summary_values()
+                self._filter_summary(self._search_edit.text())
+                return
+
             s = self._settings
-            self._style_combo.setCurrentIndex(0 if s.style_mode == PetStyleMode.CHIBI else 1)
-            self._scale_slider.setValue(int(round(s.scale * 100)))
-            self._scale_val_lbl.setText(f"{s.scale:.2f}x")
             self._opacity_slider.setValue(int(round(s.opacity * 100)))
             self._opacity_val_lbl.setText(f"{int(round(s.opacity * 100))}%")
 
-            self._chk_bubble.setChecked(s.show_speech_bubble)
             self._chk_sound.setChecked(s.sound_enabled)
             self._chk_sysmon.setChecked(s.system_monitor_enabled)
 
-            self._chk_pin.setChecked(not s.auto_walk)
-            self._chk_doze.setChecked(s.doze_mode)
             self._chk_antigrav.setChecked(s.anti_gravity_mode)
             self._chk_gravity.setChecked(s.gravity_enabled)
             self._chk_particles.setChecked(s.particles_enabled)
@@ -1185,14 +1207,12 @@ class SettingsWindow(QWidget):
                 0,
             )
             self._thinking_combo.setCurrentIndex(t_idx)
-            self._chk_ag_sync.setChecked(s.chat_sync_enabled)
 
             self._chk_autostart.setChecked(self._startup_enabled())
             self._chk_follow_ag.setChecked(s.follow_antigravity)
             self._chk_follow_cli.setChecked(s.follow_antigravity_cli)
             self._chk_follow_gem.setChecked(s.follow_gemini_app)
 
-            self._chk_log.setChecked(s.enable_runtime_log)
             self._chk_autocheck.setChecked(s.auto_check_updates)
             self._upstream_btn.setText(
                 f"上游追踪源：{UpdateService.normalize_releases_url(s.update_releases_url)}"
