@@ -1044,7 +1044,7 @@ class PetWindow(QWidget):
             "✏️ 自定义角色设定...", slot=self.open_character_editor_requested
         )
         self._act_profile = self._new_menu_action(
-            "📖 角色档案与三视图", slot=self.open_profile_requested
+            "📖 角色档案", slot=self.open_profile_requested
         )
         self._act_update = self._new_menu_action("🆕 检查更新...", slot=self.open_update_requested)
         self._act_update.setData("update")

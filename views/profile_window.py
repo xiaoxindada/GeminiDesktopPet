@@ -86,7 +86,7 @@ class ProfileWindow(QWidget):
         self._on_preview_state = on_preview_state
         self._on_open_editor = on_open_editor
 
-        self.setWindowTitle("Gemini 娘 · 角色档案与设定图鉴")
+        self.setWindowTitle("Gemini 娘 · 角色档案")
         self.setWindowIcon(TrayIconService.load_app_icon())
         self.resize(880, 660)
         self.setMinimumSize(720, 540)

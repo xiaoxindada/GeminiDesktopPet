@@ -716,7 +716,7 @@ class SettingsWindow(QWidget):
         # 右键菜单里的快捷操作也汇入「全部设置」，按所属分类标注
         action_specs = [
             ("自定义角色设定", "修改人设、台词与形象素材", "角色设定", self._handle_open_editor),
-            ("角色档案与三视图", "查看角色设定与三视图", "角色设定", self._handle_open_profile),
+            ("角色档案", "查看角色设定与三视图", "角色设定", self._handle_open_profile),
             ("检查更新", "查看更新日志并升级", "关于与更新", self._handle_open_update),
         ]
         for title, desc, category, callback in action_specs:
@@ -842,7 +842,7 @@ class SettingsWindow(QWidget):
         )
         card.add_row(
             self._make_open_button(self._handle_open_profile),
-            "角色档案与三视图",
+            "角色档案",
             "查看角色设定与三视图",
         )
 
