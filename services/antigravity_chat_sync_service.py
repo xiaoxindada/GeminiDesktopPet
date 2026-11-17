@@ -18,9 +18,6 @@ _CONVERSATION_DIRS = (
 )
 # 会话库里的步骤类型：14 是用户输入，15 是助手回复，132 是工具调用。
 _TOOL_STEP_TYPE = 132
-_MAX_MESSAGE_CHARS = 4000
-_MAX_THINKING_CHARS = 300
-_MAX_TOOL_CHARS = 400
 # 一次追赶的步数上限：落后太多说明中间被大改过，重新全解比逐段拼更稳。
 _MAX_CATCHUP_STEPS = 64
 # 只读连接的等锁上限：采集跑在界面线程里，宁可这一拍读不到也不能卡住界面。
@@ -143,16 +140,6 @@ def _step_time(payload: bytes) -> str:
     return ""
 
 
-def _one_line(text: str, limit: int) -> str:
-    cleaned = " ".join(text.split())
-    return cleaned[:limit] + ("…" if len(cleaned) > limit else "")
-
-
-def _truncate(text: str, limit: int) -> str:
-    cleaned = text.strip()
-    return cleaned[:limit] + ("\n…（已截断）" if len(cleaned) > limit else "")
-
-
 def _tool_event(metadata: bytes, payload: bytes, time: str) -> Optional[SyncedMessage]:
     tool_name = _path_text(metadata, (4, 2)) or "tool"
     summary = ""
@@ -173,17 +160,17 @@ def _tool_event(metadata: bytes, payload: bytes, time: str) -> Optional[SyncedMe
     detail = ""
     marker = "Command output:"
     if marker in result:
-        detail = _one_line(result.split(marker, 1)[1], 160)
+        detail = result.split(marker, 1)[1].strip()
 
     text = tool_name
     if summary:
-        text += f" · {_one_line(summary, 120)}"
+        text += f" · {summary}"
     text += exit_note
     if detail:
         text += f"\n{detail}"
     if not text.strip():
         return None
-    return SyncedMessage("system", _truncate(text, _MAX_TOOL_CHARS), time, "tool")
+    return SyncedMessage("system", text.strip(), time, "tool")
 
 
 def _decode_step(
@@ -203,11 +190,12 @@ def _decode_step(
     if step_type == 14:
         text = _path_text(raw_payload, (19, 2)) or _path_text(raw_payload, (19, 3))
         if text and text.strip():
-            produced.append(SyncedMessage("user", _truncate(text, _MAX_MESSAGE_CHARS), time))
+            produced.append(SyncedMessage("user", text.strip(), time))
     elif step_type == 15:
         thinking = _path_text(raw_payload, (20, 3))
         if thinking and thinking.strip():
-            cleaned = _one_line(thinking, _MAX_THINKING_CHARS)
+            # 保留完整思维及换行；按全文去重，避免相同开头的续写被吞掉。
+            cleaned = thinking.strip()
             # 同一段思考会在多个步骤里重复出现，只保留首次。
             if cleaned not in seen_thinking:
                 seen_thinking.add(cleaned)
@@ -215,7 +203,7 @@ def _decode_step(
                 produced.append(SyncedMessage("system", cleaned, time, "thinking"))
         answer = _path_text(raw_payload, (20, 1)) or _path_text(raw_payload, (20, 8))
         if answer and answer.strip():
-            produced.append(SyncedMessage("assistant", _truncate(answer, _MAX_MESSAGE_CHARS), time))
+            produced.append(SyncedMessage("assistant", answer.strip(), time))
     elif step_type == _TOOL_STEP_TYPE:
         event = _tool_event(raw_metadata, raw_payload, time)
         if event is not None:

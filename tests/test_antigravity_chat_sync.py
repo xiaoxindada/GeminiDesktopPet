@@ -89,6 +89,22 @@ class TestAntigravityChatSync(unittest.TestCase):
             self.assertTrue(conversation.messages[0].time.startswith("2026-"))
             self.assertEqual(conversation.title, "示例问题")
 
+    def test_long_content_and_thinking_suffix_are_preserved(self) -> None:
+        from services.antigravity_chat_sync_service import _decode_step
+
+        text = ("完整长输出，保留换行。\n" * 700) + "末尾标记"
+        thinking = text + "思维后缀"
+        payload = _bytes_field(20, _bytes_field(3, thinking.encode()) + _bytes_field(1, text.encode()))
+        seen = set()
+        messages, _ = _decode_step(15, b"", payload, seen)
+        self.assertEqual([m.text for m in messages], [thinking, text])
+        extended = _bytes_field(20, _bytes_field(3, (thinking + "续写").encode()))
+        messages, _ = _decode_step(15, b"", extended, seen)
+        self.assertEqual(messages[0].text, thinking + "续写")
+        user = _bytes_field(19, _bytes_field(2, text.encode()))
+        messages, _ = _decode_step(14, b"", user, set())
+        self.assertEqual(messages[0].text, text)
+
     def test_repeated_thinking_text_is_collapsed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "repeat.db"
