@@ -191,7 +191,6 @@ class PetSettings:
     edge_dock_enabled: bool = True
     sound_enabled: bool = True
     particles_enabled: bool = True
-    click_through: bool = False
     system_monitor_enabled: bool = True
     show_speech_bubble: bool = False
     follow_antigravity: bool = True

@@ -153,7 +153,6 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     _SettingFieldSpec("edge_dock_enabled", "behavior", "edge_dock_enabled", _parse_bool, bool),
     _SettingFieldSpec("sound_enabled", "behavior", "sound_enabled", _parse_bool, bool),
     _SettingFieldSpec("particles_enabled", "behavior", "particles_enabled", _parse_bool, bool),
-    _SettingFieldSpec("click_through", "behavior", "click_through", _parse_bool, bool),
     _SettingFieldSpec("system_monitor_enabled", "behavior", "system_monitor_enabled", _parse_bool, bool),
     _SettingFieldSpec("follow_antigravity", "behavior", "follow_antigravity", _parse_bool, bool),
     _SettingFieldSpec("follow_gemini_app", "behavior", "follow_gemini_app", _parse_bool, bool),
@@ -257,9 +256,6 @@ class SettingsService:
                 pass
         settings.gemini_model = normalize_gemini_model(settings.gemini_model)
         settings.thinking_level = normalize_thinking_level(settings.thinking_level)
-        # 鼠标穿透只在当前会话内有效：若跨启动保留，桌宠会连自己的鼠标事件一起吞掉，
-        # 下次启动就无法拖动或右键，只能从托盘绕回来。
-        settings.click_through = False
         return settings
 
     def save(self, settings: PetSettings) -> None:

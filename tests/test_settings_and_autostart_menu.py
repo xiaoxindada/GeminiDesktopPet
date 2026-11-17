@@ -188,7 +188,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertTrue(hasattr(win, "_chk_autostart"))
                     self.assertFalse(win._chk_autostart.isChecked())
                     self.assertIsNotNone(win._search_edit)
-                    self.assertEqual(len(win._summary_rows), 25)
+                    self.assertEqual(len(win._summary_rows), 24)
 
                     win._chk_autostart.setChecked(True)
                     self.assertTrue(win.has_unsaved_changes())

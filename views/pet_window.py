@@ -87,7 +87,6 @@ from services.chat_history_service import ChatHistoryService
 from services.chat_sync_state import ChatSyncState
 from services.shared_menu import MENU_SEPARATOR, populate_shared_menu
 from services.sprite_manager import SpriteManager, WalkRigAssets
-from services.win32_ipc import set_click_through_ex_style
 from themes import STARLIGHT_MENU_QSS
 
 
@@ -546,7 +545,6 @@ class PetWindow(QWidget):
         # Hover & bubble/chat state
         self._is_hovering = False
         self._is_bubble_hovered = False
-        self._click_through_noticed = bool(settings.click_through)
         self._suppress_loaded_default_greeting = False
         self._is_forced_bubble_active = False
         self._is_chat_open = False
@@ -1297,7 +1295,6 @@ class PetWindow(QWidget):
 
         self._update_dock_alignment()
         self._apply_win32_extended_styles()
-        self._notify_click_through_state()
         self._refresh_sprite_visual()
         self._sync_chat_controls()
         self._relayout_stage_top()
@@ -1309,22 +1306,8 @@ class PetWindow(QWidget):
             return
         _ensure_tool_window_ex_style(hwnd)
         _apply_win32_topmost(hwnd, bool(self._settings.always_on_top))
-        set_click_through_ex_style(hwnd, bool(self._settings.click_through))
         self._sync_bubble_window_styles()
         self.visual_bounds_changed.emit()
-
-    def _notify_click_through_state(self) -> None:
-        # 开启穿透后桌宠不再接收鼠标事件，先给一次明确提示，避免以为程序卡死
-        enabled = bool(self._settings.click_through)
-        if enabled == self._click_through_noticed:
-            return
-        self._click_through_noticed = enabled
-        if enabled:
-            self.show_bubble(
-                "已开启鼠标穿透，桌宠暂时点不到啦；可在托盘菜单 → 设置里关闭喵～",
-                6.0,
-                force=True,
-            )
 
     def _sync_bubble_window_styles(self) -> None:
         if not self._speech_bubble.isVisible():
@@ -1334,10 +1317,6 @@ class PetWindow(QWidget):
             return
         _ensure_tool_window_ex_style(bubble_hwnd)
         _apply_win32_topmost(bubble_hwnd, bool(self._settings.always_on_top))
-        set_click_through_ex_style(
-            bubble_hwnd,
-            bool(self._settings.click_through) and not self._is_chat_open,
-        )
 
     def _update_dock_alignment(self) -> None:
         # 贴边状态变化后气泡需要重新贴近精灵摆放
@@ -1921,9 +1900,8 @@ class PetWindow(QWidget):
     def _paint_stage(self, painter: QPainter) -> None:
         sprite_rect = self._get_local_sprite_rect()
 
-        # 非穿透模式下在角色有效区域填充 alpha=1 底色，保证发丝镂空区也可正常拖拽
-        if not self._settings.click_through:
-            painter.fillRect(sprite_rect, QColor(0, 0, 0, 1))
+        # 在角色有效区域填充 alpha=1 底色，保证发丝镂空区也可正常拖拽
+        painter.fillRect(sprite_rect, QColor(0, 0, 0, 1))
 
         if self._settings.docked_side == DockSide.LEFT:
             pivot_x = sprite_rect.left()

@@ -28,8 +28,6 @@ _WAIT_TIMEOUT = 0x00000102
 _WAIT_FAILED = 0xFFFFFFFF
 
 _GWL_EXSTYLE = -20
-_WS_EX_LAYERED = 0x00080000
-_WS_EX_TRANSPARENT = 0x00000020
 
 _HWND_TOPMOST = -1
 _HWND_NOTOPMOST = -2
@@ -195,22 +193,6 @@ def wait_any_events(events: Iterable[Win32Event], timeout_ms: int) -> int:
 def ensure_app_user_model_id(app_id: str = "GeminiDesktopPet") -> None:
     try:
         _shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
-    except Exception:
-        pass
-
-
-def set_click_through_ex_style(hwnd: int, enable: bool) -> None:
-    """切换 Win32 窗口扩展样式中的 WS_EX_TRANSPARENT，实现真实鼠标穿透。"""
-    if not hwnd:
-        return
-    try:
-        ex_style = _user32.GetWindowLongPtrW(hwnd, _GWL_EXSTYLE)
-        if enable:
-            _user32.SetWindowLongPtrW(
-                hwnd, _GWL_EXSTYLE, ex_style | _WS_EX_LAYERED | _WS_EX_TRANSPARENT
-            )
-        else:
-            _user32.SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, ex_style & ~_WS_EX_TRANSPARENT)
     except Exception:
         pass
 

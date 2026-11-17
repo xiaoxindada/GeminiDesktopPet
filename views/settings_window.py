@@ -661,8 +661,6 @@ class SettingsWindow(QWidget):
         specs = [
             (self._PAGE_GENERAL, "窗口始终置顶", "覆盖在其他窗口之上", "通用设置",
              lambda: self._on_off(self._settings.always_on_top)),
-            (self._PAGE_GENERAL, "鼠标穿透", "让点击落到桌宠下方的窗口", "通用设置",
-             lambda: self._on_off(self._settings.click_through)),
             (self._PAGE_BEHAVIOR, "自动弹出对话气泡", "按需主动说话", "行为互动",
              lambda: self._on_off(self._settings.show_speech_bubble)),
             (self._PAGE_GENERAL, "互动音效", "摸摸头与提示音", "通用设置",
@@ -768,17 +766,11 @@ class SettingsWindow(QWidget):
     # ---- 通用设置 ----
 
     def _build_general_page(self) -> QWidget:
-        scroll, layout = self._new_page("通用设置", "窗口层级与鼠标行为的全局开关。")
+        scroll, layout = self._new_page("通用设置", "窗口层级与显示的全局开关。")
 
         card = _Card(layout, "窗口")
         self._chk_topmost = self._make_switch()
         card.add_row(self._chk_topmost, "窗口始终置顶", "覆盖在其他应用窗口之上，方便随时看到 Gemini 娘")
-        self._chk_click_through = self._make_switch()
-        card.add_row(
-            self._chk_click_through,
-            "鼠标穿透",
-            "开启后桌宠不再响应鼠标，可在托盘的「设置」里关闭；仅当前会话有效",
-        )
 
         card = _Card(layout, "互动反馈")
         self._chk_sound = self._make_switch()
@@ -1164,7 +1156,6 @@ class SettingsWindow(QWidget):
             self._opacity_val_lbl.setText(f"{int(round(s.opacity * 100))}%")
 
             self._chk_topmost.setChecked(s.always_on_top)
-            self._chk_click_through.setChecked(s.click_through)
             self._chk_bubble.setChecked(s.show_speech_bubble)
             self._chk_sound.setChecked(s.sound_enabled)
             self._chk_sysmon.setChecked(s.system_monitor_enabled)
@@ -1238,7 +1229,6 @@ class SettingsWindow(QWidget):
         s.opacity = max(0.4, min(1.0, self._opacity_slider.value() / 100.0))
 
         s.always_on_top = self._chk_topmost.isChecked()
-        s.click_through = self._chk_click_through.isChecked()
         s.show_speech_bubble = self._chk_bubble.isChecked()
         s.sound_enabled = self._chk_sound.isChecked()
         s.system_monitor_enabled = self._chk_sysmon.isChecked()
