@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal DisableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "REPO_ROOT=%SCRIPT_DIR:~0,-1%"
@@ -15,32 +15,40 @@ shift
 goto parse_args
 :args_done
 
-set "PYTHON_EXE=python"
-if exist "%REPO_ROOT%\.venv\Scripts\python.exe" (
-    set "PYTHON_EXE=%REPO_ROOT%\.venv\Scripts\python.exe"
+if not defined PYTHON_EXE (
+    if exist "%REPO_ROOT%\.venv\Scripts\python.exe" (
+        set "PYTHON_EXE=%REPO_ROOT%\.venv\Scripts\python.exe"
+    ) else (
+        for %%I in (python.exe) do set "PYTHON_EXE=%%~$PATH:I"
+    )
 )
+if not defined PYTHON_EXE goto failed
+for %%I in ("%PYTHON_EXE%") do set "PYTHON_EXE=%%~fI"
 
-"%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1
+rem Prevent PyInstaller from collecting unrelated DLLs (such as ICU) from PATH.
+set "PATH=%SystemRoot%\System32;%SystemRoot%"
+set "PYTHONPATH="
+set "PYTHONHOME="
+set "PYTHONNOUSERSITE=1"
+"%PYTHON_EXE%" -c "import sysconfig, PyInstaller; from PySide6 import QtCore, QtGui, QtWidgets; raise SystemExit(sysconfig.get_platform() != 'win-amd64')"
 if errorlevel 1 (
-    echo [ERROR] PyInstaller not found in %PYTHON_EXE%
-    echo         Run: uv sync --extra build   or   pip install ".[build]"
+    echo [ERROR] Build requires 64-bit Python with working PyInstaller and PySide6.
+    echo         Run: uv sync --locked --extra build
     set "EXIT_CODE=1"
     goto finish
 )
 
 set "OUTPUT_BASE=%REPO_ROOT%\out"
 set "STAGE_DIR=%OUTPUT_BASE%\GeminiDesktopPet"
-set "CLEAN_DIR=%OUTPUT_BASE%\CleanConfig"
 set "BUILD_WORK=%REPO_ROOT%\build\pyinstaller"
+set "PYINSTALLER_CONFIG_DIR=%BUILD_WORK%\cache"
+set "CLEAN_DIR=%BUILD_WORK%\helper"
 set "ICON=%REPO_ROOT%\Assets\AppIcon.ico"
 set "SEVENZA=%REPO_ROOT%\tools\7za\7za.exe"
 
 echo [1/5] Preparing staging folders...
-if exist "%STAGE_DIR%" rmdir /s /q "%STAGE_DIR%"
-if exist "%CLEAN_DIR%" rmdir /s /q "%CLEAN_DIR%"
-if exist "%BUILD_WORK%" rmdir /s /q "%BUILD_WORK%"
-if not exist "%OUTPUT_BASE%" mkdir "%OUTPUT_BASE%"
-if not exist "%BUILD_WORK%\spec" mkdir "%BUILD_WORK%\spec"
+if not exist "%OUTPUT_BASE%\" mkdir "%OUTPUT_BASE%"
+if not exist "%BUILD_WORK%\spec\" mkdir "%BUILD_WORK%\spec"
 
 set "APP_VERSION="
 for /f "usebackq tokens=3" %%A in (`findstr /b "APP_VERSION" "%REPO_ROOT%\models\app_version.py"`) do set "APP_VERSION=%%~A"
@@ -50,12 +58,15 @@ if not defined APP_VERSION (
     goto finish
 )
 set "ZIP_PATH=%OUTPUT_BASE%\GeminiDesktopPet-v%APP_VERSION%-win-x64.zip"
-if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
+set "TEMP_ZIP=%ZIP_PATH%.tmp"
+if exist "%TEMP_ZIP%" del /q "%TEMP_ZIP%"
+if exist "%TEMP_ZIP%" goto failed
 
 echo [2/5] Building GeminiDesktopPet.exe (--onedir, --windowed)...
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --clean ^
+    --noupx ^
     --onedir ^
     --distpath "%OUTPUT_BASE%" ^
     --workpath "%BUILD_WORK%\main" ^
@@ -63,7 +74,7 @@ echo [2/5] Building GeminiDesktopPet.exe (--onedir, --windowed)...
     --name GeminiDesktopPet ^
     --windowed ^
     --icon "%ICON%" ^
-    --add-data "%REPO_ROOT%\Assets;Assets" ^
+    --add-data "%REPO_ROOT%\Assets:Assets" ^
     --collect-submodules google.genai ^
     --exclude-module tkinter ^
     --exclude-module PySide6.QtWebEngineCore ^
@@ -75,7 +86,6 @@ echo [2/5] Building GeminiDesktopPet.exe (--onedir, --windowed)...
     --exclude-module PySide6.QtQuick ^
     --exclude-module PySide6.Qt3DCore ^
     --exclude-module PySide6.QtMultimedia ^
-    --exclude-module PySide6.QtNetwork ^
     "%REPO_ROOT%\main.py"
 if errorlevel 1 (
     echo [ERROR] GeminiDesktopPet build failed!
@@ -83,12 +93,14 @@ if errorlevel 1 (
     goto finish
 )
 
-echo [3/5] Building CleanConfig.exe (--onedir, console)...
+rem The helper is copied as a single executable, so it must carry its own runtime.
+echo [3/5] Building CleanConfig.exe (--onefile, console)...
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --clean ^
-    --onedir ^
-    --distpath "%OUTPUT_BASE%" ^
+    --noupx ^
+    --onefile ^
+    --distpath "%CLEAN_DIR%" ^
     --workpath "%BUILD_WORK%\clean" ^
     --specpath "%BUILD_WORK%\spec" ^
     --name CleanConfig ^
@@ -107,16 +119,15 @@ if errorlevel 1 (
 )
 
 echo [4/5] Assembling release stage...
-if not exist "%STAGE_DIR%\CleanConfig.exe" (
-    copy /Y "%CLEAN_DIR%\CleanConfig.exe" "%STAGE_DIR%\CleanConfig.exe" >nul
-)
+copy /Y "%CLEAN_DIR%\CleanConfig.exe" "%STAGE_DIR%\CleanConfig.exe" >nul
 if errorlevel 1 (
     echo [ERROR] Failed to place CleanConfig.exe into stage!
     set "EXIT_CODE=1"
     goto finish
 )
 for %%F in (README.md CREDITS.md LICENSE) do (
-    if not exist "%STAGE_DIR%\%%F" copy /Y "%REPO_ROOT%\%%F" "%STAGE_DIR%\%%F" >nul
+    copy /Y "%REPO_ROOT%\%%F" "%STAGE_DIR%\%%F" >nul
+    if errorlevel 1 goto failed
 )
 
 echo [5/5] Creating release ZIP via 7za...
@@ -126,13 +137,15 @@ if not exist "%SEVENZA%" (
     goto finish
 )
 pushd "%STAGE_DIR%" >nul
-"%SEVENZA%" a -tzip "%ZIP_PATH%" . -r -mx=9 >nul
+if errorlevel 1 goto failed
+"%SEVENZA%" a -tzip "%TEMP_ZIP%" . -r -mx=9 >nul
+set "ZIP_EXIT=%ERRORLEVEL%"
 popd >nul
-if errorlevel 1 (
-    echo [ERROR] ZIP archive generation failed!
-    set "EXIT_CODE=1"
-    goto finish
-)
+if not "%ZIP_EXIT%"=="0" goto failed
+"%SEVENZA%" t -tzip "%TEMP_ZIP%" >nul
+if errorlevel 1 goto failed
+move /Y "%TEMP_ZIP%" "%ZIP_PATH%" >nul
+if errorlevel 1 goto failed
 
 echo.
 echo === Package Complete ===
@@ -140,6 +153,11 @@ echo Version   : v%APP_VERSION%
 echo Stage Dir : %STAGE_DIR%
 echo ZIP File  : %ZIP_PATH%
 set "EXIT_CODE=0"
+goto finish
+
+:failed
+echo [ERROR] Release preparation, staging or archive verification failed.
+set "EXIT_CODE=1"
 
 :finish
 popd >nul

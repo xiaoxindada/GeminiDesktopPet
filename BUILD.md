@@ -37,5 +37,6 @@ python clean_config.py
 BuildRelease.bat --no-pause
 ```
 
-- **打包输出**：生成目录 `out\GeminiDesktopPet\` 并打包为 `out\GeminiDesktopPet-v<版本>-win-x64.zip`。
+- **纯净构建**：在没有旧 `.venv` 的源码目录中，用 64 位 Python 运行 `uv sync --locked --extra build --no-dev`，再执行打包命令。也可通过 `PYTHON_EXE` 指定独立虚拟环境的 Python。
+- **打包输出**：生成目录 `out\GeminiDesktopPet\`，并打包为 `out\GeminiDesktopPet-v<版本>-win-x64.zip`。分发时保留完整的 `_internal` 目录。
 - **版本号**：统一维护在 [models/app_version.py](models/app_version.py) 的 `APP_VERSION`。
