@@ -50,6 +50,7 @@ def _handle_disable_follow() -> int:
     service = SettingsService()
     settings = service.load()
     settings.follow_antigravity = False
+    settings.follow_antigravity_cli = False
     settings.follow_gemini_app = False
     service.save(settings)
     AppFollowService(service).disable_follow()

@@ -34,6 +34,7 @@
     - 查询开始/结束联动桌宠动作
 - 启动与联动
     - 跟随 Antigravity 启动
+    - 跟随 Antigravity CLI 启动
     - 跟随 Gemini 桌面 App 启动
 - 角色档案
 

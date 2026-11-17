@@ -194,6 +194,7 @@ class PetSettings:
     system_monitor_enabled: bool = True
     show_speech_bubble: bool = False
     follow_antigravity: bool = True
+    follow_antigravity_cli: bool = True
     follow_gemini_app: bool = True
     # 反重力对话播报：记住上次的开关状态，重启桌宠后自动恢复
     chat_sync_enabled: bool = False

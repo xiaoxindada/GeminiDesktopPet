@@ -51,6 +51,7 @@ class FollowWatcherOptions:
     poll_interval_ms: int = 1200
     sample_antigravity: Optional[Callable[[], AppActivitySnapshot]] = None
     sample_gemini: Optional[Callable[[], AppActivitySnapshot]] = None
+    sample_antigravity_cli: Optional[Callable[[], AppActivitySnapshot]] = None
     custom_wake_launcher: Optional[Callable[[str], bool]] = None
 
 
@@ -83,7 +84,7 @@ class AppFollowService:
 
     @staticmethod
     def any_follow_enabled(settings: PetSettings) -> bool:
-        return bool(settings.follow_antigravity or settings.follow_gemini_app)
+        return bool(settings.follow_antigravity or settings.follow_gemini_app or settings.follow_antigravity_cli)
 
     @classmethod
     def get_follow_watcher_shortcut_path(cls) -> Path:
@@ -121,7 +122,7 @@ class AppFollowService:
             self.wait_and_stop_live_watcher(500)
         AppLogger.info(
             "AppFollow",
-            f"同步应用联动状态：Antigravity={settings.follow_antigravity}, GeminiApp={settings.follow_gemini_app}, StartupShortcut={enabled}",
+            f"同步应用联动状态：Antigravity={settings.follow_antigravity}, GeminiApp={settings.follow_gemini_app}, AntigravityCLI={settings.follow_antigravity_cli}, StartupShortcut={enabled}",
         )
 
     def disable_follow(self) -> None:
@@ -371,10 +372,11 @@ class AppFollowService:
 
             sample_ag = options.sample_antigravity or FollowedAppProbe.sample_antigravity_activity
             sample_gem = options.sample_gemini or FollowedAppProbe.sample_gemini_activity
+            sample_cli = options.sample_antigravity_cli or FollowedAppProbe.sample_antigravity_cli_activity
 
             if not options.from_exit and not cls.is_main_instance_running(options.main_mutex_name):
                 already_key = FollowedAppProbe.detect_running_followed_app_key(
-                    settings, sample_ag, sample_gem
+                    settings, sample_ag, sample_gem, sample_cli
                 )
                 if already_key:
                     AppLogger.info("FollowWatcher", f"冷启动监听检测到目标已运行，立即唤醒主程序：{already_key}")
@@ -383,9 +385,13 @@ class AppFollowService:
 
             init_ag = sample_ag()
             init_gem = sample_gem()
+            init_cli = sample_cli()
             now_utc = datetime.now(timezone.utc)
             was_ag = init_ag.is_running
             was_gem = init_gem.is_running
+            was_cli = init_cli.is_running
+            known_cli = set(init_cli.active_pids)
+            last_cli_start = now_utc if was_cli else None
             known_ag = set(init_ag.active_pids)
             known_gem = set(init_gem.active_pids)
             last_ag_start = now_utc if was_ag else None
@@ -426,6 +432,7 @@ class AppFollowService:
 
                 ag_snap = sample_ag()
                 gem_snap = sample_gem()
+                cli_snap = sample_cli()
                 now = datetime.now(timezone.utc)
 
                 ag_started, _, was_ag, known_ag, last_ag_start = FollowedAppProbe.evaluate_transition(
@@ -435,15 +442,20 @@ class AppFollowService:
                     gem_snap, was_gem, known_gem, last_gem_start, now
                 )
 
+                cli_started, _, was_cli, known_cli, last_cli_start = FollowedAppProbe.evaluate_transition(
+                    cli_snap, was_cli, known_cli, last_cli_start, now
+                )
+
+                wake_cli = settings.follow_antigravity_cli and cli_started
                 wake_ag = settings.follow_antigravity and ag_started
                 wake_gem = settings.follow_gemini_app and gem_started
-                if not wake_ag and not wake_gem:
+                if not wake_ag and not wake_gem and not wake_cli:
                     continue
 
                 if cls.is_main_instance_running(options.main_mutex_name):
                     continue
 
-                app_key = "antigravity" if wake_ag else "gemini"
+                app_key = "antigravity" if wake_ag else ("gemini" if wake_gem else "antigravity-cli")
                 AppLogger.info("FollowWatcher", f"检测到冷启动目标应用：{app_key}，正在唤醒桌宠主程序")
                 if cls._launch_wake_target(options, [f"--woken-by:{app_key}"], stop_event):
                     return 0

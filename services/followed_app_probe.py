@@ -126,10 +126,32 @@ class FollowedAppProbe:
         return FollowedAppProbe.sample_app_activity(GEMINI_PROCESS_NAME)
 
     @staticmethod
+    def sample_antigravity_cli_activity() -> AppActivitySnapshot:
+        # CLI 没有独立主窗口且线程数较少，不能套用 Electron 的活跃进程过滤。
+        try:
+            pids = {
+                pid for pid, name, _ in _snapshot_process_entries()
+                if name.lower() in {"agy", "agy.exe"}
+            }
+        except Exception:
+            pids = set()
+            try:
+                for proc in psutil.process_iter(["pid", "name"]):
+                    try:
+                        if (proc.info.get("name") or "").lower() in {"agy", "agy.exe"}:
+                            pids.add(int(proc.info["pid"]))
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, ValueError):
+                        continue
+            except (psutil.Error, OSError):
+                pass
+        return AppActivitySnapshot(bool(pids), pids, set(pids))
+
+    @staticmethod
     def detect_running_followed_app_key(
         settings: PetSettings,
         sample_ag: Optional[Callable[[], AppActivitySnapshot]] = None,
         sample_gemini: Optional[Callable[[], AppActivitySnapshot]] = None,
+        sample_cli: Optional[Callable[[], AppActivitySnapshot]] = None,
     ) -> Optional[str]:
         if settings.follow_antigravity:
             snap = (sample_ag or FollowedAppProbe.sample_antigravity_activity)()
@@ -139,6 +161,10 @@ class FollowedAppProbe:
             snap = (sample_gemini or FollowedAppProbe.sample_gemini_activity)()
             if snap.is_running:
                 return "gemini"
+        if settings.follow_antigravity_cli:
+            snap = (sample_cli or FollowedAppProbe.sample_antigravity_cli_activity)()
+            if snap.is_running:
+                return "antigravity-cli"
         return None
 
     @staticmethod

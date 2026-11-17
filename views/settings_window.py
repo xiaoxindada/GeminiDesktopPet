@@ -698,6 +698,8 @@ class SettingsWindow(QWidget):
              lambda: self._on_off(self._startup_enabled())),
             (self._PAGE_STARTUP, "跟随 Antigravity 启动", "检测到启动时自动唤醒", "启动与联动",
              lambda: self._on_off(self._settings.follow_antigravity)),
+            (self._PAGE_STARTUP, "跟随 Antigravity CLI 启动", "检测到启动时自动唤醒", "启动与联动",
+             lambda: self._on_off(self._settings.follow_antigravity_cli)),
             (self._PAGE_STARTUP, "跟随 Gemini 桌面 App 启动", "检测到启动时自动唤醒", "启动与联动",
              lambda: self._on_off(self._settings.follow_gemini_app)),
             (self._PAGE_LOGS, "运行日志", "按日期写入排错日志", "日志与排查",
@@ -949,7 +951,7 @@ class SettingsWindow(QWidget):
     # ---- 启动与联动 ----
 
     def _build_startup_page(self) -> QWidget:
-        scroll, layout = self._new_page("启动与联动", "开机自启，以及跟随 Antigravity / Gemini 桌面端唤醒。")
+        scroll, layout = self._new_page("启动与联动", "开机自启，以及跟随 Antigravity、Antigravity CLI / Gemini 桌面端唤醒。")
 
         card = _Card(layout, "联动状态")
         badge_host = QWidget()
@@ -958,6 +960,7 @@ class SettingsWindow(QWidget):
         badge_row.setContentsMargins(0, 0, 0, 0)
         badge_row.setSpacing(6)
         self._ag_badge = self._make_status_badge("检测中...")
+        self._cli_badge = self._make_status_badge("检测中...")
         self._gem_badge = self._make_status_badge("检测中...")
         self._watch_badge = self._make_status_badge("联动状态检测中...")
         badge_row.addWidget(self._ag_badge)
@@ -965,9 +968,10 @@ class SettingsWindow(QWidget):
         badge_row.addWidget(self._watch_badge)
         badge_row.addStretch(1)
         card.add_widget(badge_host, top=2)
+        card.add_widget(self._cli_badge, top=2)
 
         desc = QLabel(
-            "联动由主程序与轻量后台原生检测 Antigravity.exe / Gemini.exe，并在当前用户启动目录建立 .lnk 快捷方式，不写入注册表或外部脚本。"
+            "开启对应开关后，目标应用启动时会自动唤醒桌宠；关闭桌宠后仍可在后台等待下次启动。"
         )
         desc.setObjectName("RowDesc")
         desc.setWordWrap(True)
@@ -978,6 +982,8 @@ class SettingsWindow(QWidget):
         card.add_row(self._chk_autostart, "Windows 开机自动启动", "登录系统后静默启动桌宠")
         self._chk_follow_ag = self._make_switch()
         card.add_row(self._chk_follow_ag, "跟随 Antigravity 启动", "检测到 Antigravity 启动时自动唤醒")
+        self._chk_follow_cli = self._make_switch()
+        card.add_row(self._chk_follow_cli, "跟随 Antigravity CLI 启动", "检测到 Antigravity CLI 启动时自动唤醒")
         self._chk_follow_gem = self._make_switch()
         card.add_row(self._chk_follow_gem, "跟随 Gemini 桌面 App 启动", "检测到 Gemini 启动时自动唤醒")
 
@@ -1190,6 +1196,7 @@ class SettingsWindow(QWidget):
 
             self._chk_autostart.setChecked(self._startup_enabled())
             self._chk_follow_ag.setChecked(s.follow_antigravity)
+            self._chk_follow_cli.setChecked(s.follow_antigravity_cli)
             self._chk_follow_gem.setChecked(s.follow_gemini_app)
 
             self._chk_log.setChecked(s.enable_runtime_log)
@@ -1270,6 +1277,7 @@ class SettingsWindow(QWidget):
         s.chat_sync_enabled = self._chk_ag_sync.isChecked()
 
         s.follow_antigravity = self._chk_follow_ag.isChecked()
+        s.follow_antigravity_cli = self._chk_follow_cli.isChecked()
         s.follow_gemini_app = self._chk_follow_gem.isChecked()
 
         s.auto_check_updates = self._chk_autocheck.isChecked()
@@ -1280,6 +1288,7 @@ class SettingsWindow(QWidget):
         snapshot = dict(vars(self._settings))
         follow_changed = (
             self._settings.follow_antigravity != self._chk_follow_ag.isChecked()
+            or self._settings.follow_antigravity_cli != self._chk_follow_cli.isChecked()
             or self._settings.follow_gemini_app != self._chk_follow_gem.isChecked()
         )
         sync_before = bool(self._settings.chat_sync_enabled)
@@ -1383,12 +1392,15 @@ class SettingsWindow(QWidget):
 
     def _on_sync_follow_btn(self) -> None:
         self._settings.follow_antigravity = self._chk_follow_ag.isChecked()
+        self._settings.follow_antigravity_cli = self._chk_follow_cli.isChecked()
         self._settings.follow_gemini_app = self._chk_follow_gem.isChecked()
         if not AppFollowService.any_follow_enabled(self._settings):
             self._settings.follow_antigravity = True
+            self._settings.follow_antigravity_cli = True
             self._settings.follow_gemini_app = True
             self._loading = True
             self._chk_follow_ag.setChecked(True)
+            self._chk_follow_cli.setChecked(True)
             self._chk_follow_gem.setChecked(True)
             self._loading = False
         try:
@@ -1403,15 +1415,17 @@ class SettingsWindow(QWidget):
         QMessageBox.information(
             self,
             "已启用应用联动",
-            "已通过原生后台守护与用户启动目录快捷方式启用开机静默待机联动（不新建注册表项，也不生成外部 VBS 文件）。当 Antigravity 或 Gemini 桌面端启动时，Gemini 娘会自动出现。",
+            "已通过原生后台守护与用户启动目录快捷方式启用开机静默待机联动（不新建注册表项，也不生成外部 VBS 文件）。当所选的 Antigravity、Antigravity CLI 或 Gemini 桌面端启动时，Gemini 娘会自动出现。",
         )
 
     def _on_stop_follow_btn(self) -> None:
         self._loading = True
         self._chk_follow_ag.setChecked(False)
+        self._chk_follow_cli.setChecked(False)
         self._chk_follow_gem.setChecked(False)
         self._loading = False
         self._settings.follow_antigravity = False
+        self._settings.follow_antigravity_cli = False
         self._settings.follow_gemini_app = False
         try:
             self._settings_service.save(self._settings)
@@ -1426,6 +1440,7 @@ class SettingsWindow(QWidget):
     def _refresh_follow_badges(self) -> None:
         try:
             ag_on = FollowedAppProbe.sample_antigravity_activity().is_running
+            cli_on = FollowedAppProbe.sample_antigravity_cli_activity().is_running
             gem_on = FollowedAppProbe.sample_gemini_activity().is_running
             watch_on = AppFollowService.is_follow_watcher_running()
             run_on = AppFollowService.is_follow_watcher_run_enabled()
@@ -1434,6 +1449,7 @@ class SettingsWindow(QWidget):
             return
 
         self._ag_badge.setText(f"Antigravity: {'运行中 ✦' if ag_on else '未运行'}")
+        self._cli_badge.setText(f"Antigravity CLI: {'运行中 ✦' if cli_on else '未运行'}")
         self._gem_badge.setText(f"Gemini App: {'运行中 ✦' if gem_on else '未运行'}")
         self._watch_badge.setText(
             f"原生守护: {'运行中' if watch_on else ('开机待机已就绪' if run_on else '未启用')}"

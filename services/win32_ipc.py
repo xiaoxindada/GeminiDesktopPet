@@ -14,6 +14,7 @@ import uuid
 MAIN_MUTEX_NAME = "GeminiDesktopPet_SingleInstance_Mutex"
 WATCHER_MUTEX_NAME = "GeminiDesktopPet_FollowWatcher_Mutex"
 WAKE_EVENT_NAME = "GeminiDesktopPet_WakeSignal_Event"
+WAKE_AG_CLI_EVENT_NAME = "GeminiDesktopPet_WakeAgCliSignal_Event"
 WAKE_AG_EVENT_NAME = "GeminiDesktopPet_WakeAgSignal_Event"
 WAKE_GEMINI_EVENT_NAME = "GeminiDesktopPet_WakeGeminiSignal_Event"
 CLOSE_EVENT_NAME = "GeminiDesktopPet_CloseSignal_Event"

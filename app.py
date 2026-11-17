@@ -37,6 +37,7 @@ from services.win32_ipc import (
     CLOSE_EVENT_NAME,
     MAIN_MUTEX_NAME,
     WAKE_AG_EVENT_NAME,
+    WAKE_AG_CLI_EVENT_NAME,
     WAKE_EVENT_NAME,
     WAKE_GEMINI_EVENT_NAME,
     Win32Event,
@@ -189,6 +190,7 @@ class PetApplicationCoordinator(QObject):
         self._pet.open_quota_requested.connect(self.toggle_quota_window)
         self._pet.open_update_requested.connect(self.open_update_window)
         self._pet.settings_synced.connect(self._sync_all_views_from_settings)
+        self._pet.follow_antigravity_cli_requested.connect(self._set_follow_antigravity_cli)
         self._pet.visual_bounds_changed.connect(self._keep_quota_window_clear)
         self._pet.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
 
@@ -209,6 +211,7 @@ class PetApplicationCoordinator(QObject):
         ev_wake = Win32Event(WAKE_EVENT_NAME, manual_reset=False, initial_state=False)
         ev_wake_ag = Win32Event(WAKE_AG_EVENT_NAME, manual_reset=False, initial_state=False)
         ev_wake_gem = Win32Event(WAKE_GEMINI_EVENT_NAME, manual_reset=False, initial_state=False)
+        ev_wake_cli = Win32Event(WAKE_AG_CLI_EVENT_NAME, manual_reset=False, initial_state=False)
         ev_close = Win32Event(CLOSE_EVENT_NAME, manual_reset=False, initial_state=False)
 
         events = [
@@ -217,6 +220,7 @@ class PetApplicationCoordinator(QObject):
             ev_wake_gem,
             ev_close,
             self._ipc_stop_event,
+            ev_wake_cli,
         ]
         try:
             while not self._ipc_stop_flag.is_set() and not self._is_exiting:
@@ -229,6 +233,8 @@ class PetApplicationCoordinator(QObject):
                     self._ipc_bridge.wake_requested.emit("antigravity")
                 elif idx == 2:
                     self._ipc_bridge.wake_requested.emit("gemini")
+                elif idx == 5:
+                    self._ipc_bridge.wake_requested.emit("antigravity-cli")
                 elif idx == 3:
                     self._ipc_bridge.close_requested.emit()
                     break
@@ -236,6 +242,7 @@ class PetApplicationCoordinator(QObject):
             ev_wake.close()
             ev_wake_ag.close()
             ev_wake_gem.close()
+            ev_wake_cli.close()
             ev_close.close()
 
     @Slot(str)
@@ -257,12 +264,17 @@ class PetApplicationCoordinator(QObject):
     def _start_watcher(self) -> None:
         self._watcher.on_antigravity_started = self._on_antigravity_started
         self._watcher.on_gemini_app_started = self._on_gemini_app_started
+        self._watcher.on_antigravity_cli_started = self._on_antigravity_cli_started
         self._watcher.start()
 
     def _on_antigravity_started(self) -> None:
         AppLogger.info("Watcher", "Watcher detected Antigravity started.")
         if self._settings.follow_antigravity:
             self._show_pet_with_wake_greeting("antigravity")
+
+    def _on_antigravity_cli_started(self) -> None:
+        if self._settings.follow_antigravity_cli:
+            self._show_pet_with_wake_greeting("antigravity-cli")
 
     def _on_gemini_app_started(self) -> None:
         AppLogger.info("Watcher", "Watcher detected Gemini desktop app started.")
@@ -272,6 +284,8 @@ class PetApplicationCoordinator(QObject):
     def _show_pet_with_wake_greeting(self, app_key: str) -> None:
         if app_key == "antigravity":
             msg = "检测到 Antigravity 启动啦，Gemini 娘上线陪你一起写超棒的代码喵✦"
+        elif app_key == "antigravity-cli":
+            msg = "检测到 Antigravity CLI 启动啦，Gemini 娘来陪你写代码喵✦"
         elif app_key == "gemini":
             msg = "检测到 Gemini 桌面 App 启动了喵～随时在线陪你一起思考和聊天✦"
         else:
@@ -304,6 +318,13 @@ class PetApplicationCoordinator(QObject):
                 else "已关闭 Windows 开机自动启动喵～",
                 4.0,
             )
+
+    def _set_follow_antigravity_cli(self, enabled: bool) -> None:
+        self._settings.follow_antigravity_cli = bool(enabled)
+        self._settings_service.save(self._settings)
+        # 菜单切换同样应用后台守护配置，保证关闭主窗口后仍能联动。
+        self._follow_service.sync_and_apply(self._settings)
+        self._sync_all_views_from_settings()
 
     def _sync_all_views_from_settings(self) -> None:
         self._pet.apply_settings_to_window()
@@ -548,6 +569,8 @@ def run_gui_app(args: list[str]) -> int:
                 break
         if woken_by == "antigravity":
             AppFollowService.try_signal_named_event(WAKE_AG_EVENT_NAME)
+        elif woken_by == "antigravity-cli":
+            AppFollowService.try_signal_named_event(WAKE_AG_CLI_EVENT_NAME)
         elif woken_by == "gemini":
             AppFollowService.try_signal_named_event(WAKE_GEMINI_EVENT_NAME)
         else:

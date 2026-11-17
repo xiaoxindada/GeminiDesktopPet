@@ -20,6 +20,10 @@ class AntigravityWatcherService:
         self._timer.timeout.connect(self._poll)
 
         self._was_ag_running = False
+        self._was_cli_running = False
+        self._known_cli_pids: set[int] = set()
+        self._last_cli_start_utc: Optional[datetime] = None
+        self.on_antigravity_cli_started: Optional[Callable[[], None]] = None
         self._was_gemini_running = False
         self._known_ag_pids: set[int] = set()
         self._known_gemini_pids: set[int] = set()
@@ -44,6 +48,7 @@ class AntigravityWatcherService:
 
     def start(self) -> None:
         ag = FollowedAppProbe.sample_antigravity_activity()
+        cli = FollowedAppProbe.sample_antigravity_cli_activity()
         gem = FollowedAppProbe.sample_gemini_activity()
         now = datetime.now(timezone.utc)
         self._was_ag_running = ag.is_running
@@ -52,6 +57,9 @@ class AntigravityWatcherService:
         self._known_gemini_pids = set(gem.active_pids)
         self._last_ag_start_utc = now if ag.is_running else None
         self._last_gemini_start_utc = now if gem.is_running else None
+        self._was_cli_running = cli.is_running
+        self._known_cli_pids = set(cli.active_pids)
+        self._last_cli_start_utc = now if cli.is_running else None
         self._initialized = True
         self._timer.start()
 
@@ -94,6 +102,19 @@ class AntigravityWatcherService:
         ) = FollowedAppProbe.evaluate_transition(
             gem_snap, self._was_gemini_running, self._known_gemini_pids, self._last_gemini_start_utc, now
         )
+
+        cli_snap = FollowedAppProbe.sample_antigravity_cli_activity()
+        (
+            cli_started,
+            _,
+            self._was_cli_running,
+            self._known_cli_pids,
+            self._last_cli_start_utc,
+        ) = FollowedAppProbe.evaluate_transition(
+            cli_snap, self._was_cli_running, self._known_cli_pids, self._last_cli_start_utc, now
+        )
+        if cli_started and self.on_antigravity_cli_started:
+            self.on_antigravity_cli_started()
 
         if ag_started and self.on_antigravity_started:
             self.on_antigravity_started()

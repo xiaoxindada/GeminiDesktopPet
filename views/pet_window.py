@@ -427,6 +427,7 @@ class PetWindow(QWidget):
     open_quota_requested = Signal()
     open_update_requested = Signal()
     settings_synced = Signal()
+    follow_antigravity_cli_requested = Signal(bool)
     visual_bounds_changed = Signal()
     exit_requested = Signal()
 
@@ -1028,6 +1029,12 @@ class PetWindow(QWidget):
             slot=self._on_menu_sync_chat,
             tip="把 Antigravity 的新消息实时播报到气泡",
         )
+        self._act_follow_cli = self._new_menu_action(
+            "🔗 跟随 Antigravity CLI 启动",
+            checkable=True,
+            slot=self.follow_antigravity_cli_requested,
+            tip="Antigravity CLI 启动时自动唤醒桌宠",
+        )
         self._act_runtime_log = self._new_menu_action(
             "📝 记录运行日志",
             checkable=True,
@@ -1082,6 +1089,7 @@ class PetWindow(QWidget):
             self._act_doze,
             self._act_show_bubble,
             self._act_sync_chat,
+            self._act_follow_cli,
             MENU_SEPARATOR,
             ("🎀 形象切换", list(self._style_actions.values())),
             ("📏 缩放大小", list(self._scale_actions.values())),
@@ -3792,6 +3800,7 @@ class PetWindow(QWidget):
             ("_act_doze", self._settings.doze_mode),
             ("_act_show_bubble", self._settings.show_speech_bubble),
             ("_act_sync_chat", self._ag_mirror_active),
+            ("_act_follow_cli", self._settings.follow_antigravity_cli),
             ("_act_runtime_log", self._settings.enable_runtime_log),
         )
         for attr, checked in states:
