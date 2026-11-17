@@ -112,14 +112,8 @@ class AppFollowService:
     def sync_and_apply(self, settings: PetSettings) -> None:
         enabled = self.any_follow_enabled(settings)
         self.set_follow_watcher_run(enabled)
-        if enabled:
-            if not self.is_stop_all_signaled():
-                self._replace_mismatched_watcher_if_needed()
-                if not self.is_follow_watcher_running():
-                    self.spawn_follow_watcher(from_exit=True)
-        else:
-            self.signal_stop_follow_watcher()
-            self.wait_and_stop_live_watcher(500)
+        # 主界面自带联动监听，接管时停止从登录启动项唤起的进程。
+        self.stop_follow_watcher()
         AppLogger.info(
             "AppFollow",
             f"同步应用联动状态：Antigravity={settings.follow_antigravity}, GeminiApp={settings.follow_gemini_app}, AntigravityCLI={settings.follow_antigravity_cli}, StartupShortcut={enabled}",
@@ -127,8 +121,7 @@ class AppFollowService:
 
     def disable_follow(self) -> None:
         self.set_follow_watcher_run(False)
-        self.signal_stop_follow_watcher()
-        self.wait_and_stop_live_watcher(500)
+        self.stop_follow_watcher()
         AppLogger.info("AppFollow", "已停用应用跟随联动并清除开机待机入口")
 
     @staticmethod
@@ -154,10 +147,6 @@ class AppFollowService:
         ev = Win32Event(stop_all_event_name, manual_reset=True, initial_state=True)
         Win32Event.open_and_set(stop_all_event_name)
         return ev
-
-    @staticmethod
-    def signal_stop_follow_watcher() -> bool:
-        return Win32Event.open_and_set(STOP_WATCHER_EVENT_NAME)
 
     @staticmethod
     def is_main_instance_running(main_mutex_name: str = MAIN_MUTEX_NAME) -> bool:
@@ -246,19 +235,33 @@ class AppFollowService:
         try:
             proc.wait(timeout=max(0.01, timeout_ms / 1000.0))
             return True
-        except psutil.TimeoutExpired:
-            return False
-        except Exception:
+        except psutil.NoSuchProcess:
             return True
+        except (psutil.TimeoutExpired, psutil.AccessDenied, OSError):
+            return False
 
-    @staticmethod
-    def wait_and_stop_live_watcher(timeout_ms: int = 800) -> None:
-        watcher = AppFollowService.try_get_live_watcher_process()
-        if watcher is None:
-            return
-        if not AppFollowService.wait_for_process_exit(watcher, timeout_ms):
-            AppFollowService.kill_process_tree_safe(watcher)
-            AppFollowService.wait_for_process_exit(watcher, 1000)
+    @classmethod
+    def stop_follow_watcher(cls, timeout_ms: int = 800) -> None:
+        # 保留停止事件直到等待结束，并在发信号前取得进程，避免 PID 标记被退出中的守护先清除。
+        stop_event = Win32Event(STOP_WATCHER_EVENT_NAME, manual_reset=True)
+        try:
+            watcher = cls.try_get_live_watcher_process()
+            stop_event.set()
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            while watcher is None and cls.is_follow_watcher_running() and time.monotonic() < deadline:
+                time.sleep(0.025)
+                watcher = cls.try_get_live_watcher_process()
+            if watcher is not None and not cls.wait_for_process_exit(watcher, timeout_ms):
+                # 守护可能刚启动桌宠，强制回收时只能结束守护本身。
+                watcher.kill()
+                if not cls.wait_for_process_exit(watcher, 1000):
+                    AppLogger.warn("AppFollow", "等待后台联动守护退出超时")
+        except psutil.NoSuchProcess:
+            pass
+        except (psutil.AccessDenied, OSError) as exc:
+            AppLogger.error("AppFollow", "停止后台联动守护失败", exc)
+        finally:
+            stop_event.close()
 
     @staticmethod
     def stop_all_instances(stop_all: bool = True, force: bool = True) -> None:
@@ -286,8 +289,7 @@ class AppFollowService:
                     time.sleep(0.1)
 
             if stop_all:
-                AppFollowService.signal_stop_follow_watcher()
-                AppFollowService.wait_and_stop_live_watcher(1500)
+                AppFollowService.stop_follow_watcher(1500)
 
             if stop_all or force:
                 if live_main is not None and live_main.is_running():
@@ -302,18 +304,6 @@ class AppFollowService:
         finally:
             if stop_all_handle is not None:
                 stop_all_handle.close()
-
-    @staticmethod
-    def spawn_follow_watcher(from_exit: bool) -> bool:
-        if AppFollowService.is_stop_all_signaled():
-            return False
-        args = ["--follow-watcher", "--from-exit"] if from_exit else ["--follow-watcher"]
-        proc = AppFollowService.try_launch_pet_with_args(args)
-        if proc is None:
-            AppLogger.warn("AppFollow", f"启动后台冷启动监听进程失败：args={' '.join(args)}")
-            return False
-        AppLogger.info("AppFollow", f"已交接至后台冷启动监听进程：args={' '.join(args)}")
-        return True
 
     @staticmethod
     def try_launch_pet_with_args(args: list[str]) -> Optional[subprocess.Popen]:
@@ -338,7 +328,10 @@ class AppFollowService:
     @classmethod
     def run_follow_watcher_core(cls, options: FollowWatcherOptions) -> int:
         is_standalone = not (options.custom_settings_folder and options.custom_settings_folder.strip())
-        if cls.is_stop_all_signaled(options.stop_all_event_name):
+        if (
+            cls.is_stop_all_signaled(options.stop_all_event_name)
+            or cls.is_main_instance_running(options.main_mutex_name)
+        ):
             return 0
 
         settings_service = SettingsService(options.custom_settings_folder)
@@ -352,23 +345,18 @@ class AppFollowService:
 
         watcher_mutex = Win32Mutex(options.watcher_mutex_name)
         if not watcher_mutex.acquire():
+            watcher_mutex.release()
             AppLogger.info("FollowWatcher", "已有后台监听实例在运行，当前进程退出")
             return 0
-
-        if is_standalone:
-            cls.record_watcher_pid(os.getpid())
 
         stop_event = Win32Event(options.stop_watcher_event_name, manual_reset=True, initial_state=False)
         stop_all_event = Win32Event(options.stop_all_event_name, manual_reset=True, initial_state=False)
         try:
-            # 重置历史残余的 stopWatcher 信号（若非处于 stopAll 中）
-            if wait_any_events([stop_all_event], 0) == 0:
-                AppLogger.info("FollowWatcher", "检测到强制全部停止信号，后台监听直接退出")
+            if is_standalone:
+                cls.record_watcher_pid(os.getpid())
+            # 停止信号可能在进程初始化期间发出，启动时也必须遵守。
+            if wait_any_events([stop_event, stop_all_event], 0) >= 0:
                 return 0
-
-            import ctypes
-
-            ctypes.WinDLL("kernel32", use_last_error=True).ResetEvent(stop_event.handle)
 
             sample_ag = options.sample_antigravity or FollowedAppProbe.sample_antigravity_activity
             sample_gem = options.sample_gemini or FollowedAppProbe.sample_gemini_activity
@@ -413,6 +401,8 @@ class AppFollowService:
             )
 
             while wait_any_events([stop_event, stop_all_event], poll_ms) == -1:
+                if cls.is_main_instance_running(options.main_mutex_name):
+                    break
                 if is_standalone and watch_target and not os.path.exists(watch_target):
                     AppLogger.info("FollowWatcher", "检测到主程序文件已移除，后台监听自动退出以释放占用")
                     break
@@ -485,35 +475,10 @@ class AppFollowService:
             if wait_any_events([stop_event], 120) == 0 or cls.is_stop_all_signaled():
                 return True
             if cls.is_main_instance_running(options.main_mutex_name):
-                return False
+                return True
             if proc.poll() is not None:
                 return wait_any_events([stop_event], 0) == 0 or cls.is_stop_all_signaled()
         return wait_any_events([stop_event], 0) == 0 or cls.is_stop_all_signaled()
-
-    @classmethod
-    def _replace_mismatched_watcher_if_needed(cls) -> None:
-        live = cls.try_get_live_watcher_process()
-        if live is None:
-            return
-        try:
-            current_dir = os.path.normcase(os.path.abspath(get_app_base_dir()))
-            proc_exe = os.path.normcase(os.path.abspath(live.exe()))
-            if getattr(sys, "frozen", False):
-                if os.path.normcase(os.path.abspath(sys.executable)) == proc_exe:
-                    return
-            else:
-                entry = os.path.normcase(os.path.abspath(get_project_entry_script()))
-                if any(os.path.normcase(os.path.abspath(a)) == entry for a in (live.cmdline() or ())):
-                    return
-                if current_dir in proc_exe:
-                    return
-            AppLogger.info("AppFollow", f"检测到旧路径后台监听进程 (PID={live.pid})，正在替换为当前实例")
-            cls.signal_stop_follow_watcher()
-            if not cls.wait_for_process_exit(live, 1200):
-                cls.kill_process_tree_safe(live)
-                cls.wait_for_process_exit(live, 1000)
-        except Exception:
-            pass
 
     @staticmethod
     def _write_pid_marker(filename: str, pid: int) -> None:
@@ -554,6 +519,10 @@ class AppFollowService:
             proc = psutil.Process(pid)
             if not proc.is_running() or not _is_pet_process(proc):
                 raise ValueError("Process mismatch")
+            if filename == _WATCHER_PID_FILE and "--follow-watcher" not in (
+                arg.lower() for arg in proc.cmdline()
+            ):
+                raise ValueError("Process is not a follow watcher")
             if len(parts) >= 2:
                 rec_ts = int(parts[1])
                 if abs(int(proc.create_time()) - rec_ts) > 5:

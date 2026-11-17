@@ -1258,13 +1258,17 @@ class PetWindow(QWidget):
             if self._first_shown:
                 self._settings.last_left = float(self.x())
                 self._settings.last_top = float(self.y())
-            self._settings_service.save(self._settings)
+            try:
+                self._settings_service.save(self._settings)
+            except OSError as exc:
+                AppLogger.error("PetWindow", "退出时保存桌宠位置失败", exc)
 
         self._frame_timer.stop()
         self._ai_timer.stop()
         self._bubble_timer.stop()
         self._monitor_timer.stop()
         self._hover_grace_timer.stop()
+        self._ag_sync_timer.stop()
         for worker in list(self._active_chat_workers):
             if worker.isRunning():
                 worker.wait(400)

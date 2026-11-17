@@ -77,6 +77,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 patch("services.settings_service.SettingsService.load", return_value=fake_settings),
                 patch("services.settings_service.SettingsService.save", return_value=None),
                 patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
+                patch("services.app_follow_service.AppFollowService.stop_follow_watcher") as stop_follow,
                 patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
             ):
                 coord = PetApplicationCoordinator(app, [], MagicMock())
@@ -239,8 +240,13 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertTrue(win._status_timer.isActive())
                     avail = (win.screen() or app.primaryScreen()).availableGeometry()
                     self.assertTrue(avail.intersects(win.frameGeometry()))
+
+                    self._find_action(coord._tray._menu, "退出").trigger()
+                    stop_follow.assert_called_once_with()
+                    self.assertTrue(fake_settings.follow_antigravity)
+                    self.assertFalse(coord._pet.isVisible())
                 finally:
-                    coord.gracefully_exit(allow_respawn_watcher=False)
+                    coord.gracefully_exit()
                     app.processEvents()
 
     def test_doze_mode_shared_menu_and_settings_sync(self) -> None:
@@ -259,6 +265,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 patch("services.settings_service.SettingsService.load", return_value=fake_settings),
                 patch("services.settings_service.SettingsService.save", return_value=None),
                 patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
+                patch("services.app_follow_service.AppFollowService.stop_follow_watcher"),
                 patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
             ):
                 coord = PetApplicationCoordinator(app, [], MagicMock())
@@ -307,7 +314,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertTrue(pet_doze.isChecked())
                     self.assertTrue(win._chk_doze.isChecked())
                 finally:
-                    coord.gracefully_exit(allow_respawn_watcher=False)
+                    coord.gracefully_exit()
                     app.processEvents()
 
     def test_quota_window_places_beside_head_and_auto_closes(self) -> None:
@@ -396,6 +403,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 patch("services.settings_service.SettingsService.load", return_value=fake_settings),
                 patch("services.settings_service.SettingsService.save", return_value=None),
                 patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
+                patch("services.app_follow_service.AppFollowService.stop_follow_watcher"),
                 patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
                 patch("views.quota_window.QuotaWindow.start_refresh", return_value=None),
             ):
@@ -407,7 +415,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     assert coord._quota_win is not None
                     self.assertTrue(coord._quota_win._auto_close_enabled)
                 finally:
-                    coord.gracefully_exit(allow_respawn_watcher=False)
+                    coord.gracefully_exit()
                     app.processEvents()
 
 

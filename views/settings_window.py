@@ -966,7 +966,7 @@ class SettingsWindow(QWidget):
         card.add_widget(self._cli_badge, top=2)
 
         desc = QLabel(
-            "开启对应开关后，目标应用启动时会自动唤醒桌宠；关闭桌宠后仍可在后台等待下次启动。"
+            "Windows 登录后会等待所选应用启动并唤醒桌宠。退出桌宠时会结束本次联动监听。"
         )
         desc.setObjectName("RowDesc")
         desc.setWordWrap(True)

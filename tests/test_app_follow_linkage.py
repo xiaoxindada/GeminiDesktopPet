@@ -194,9 +194,6 @@ def test_cli_background_wakes_on_existing_process_and_later_start(tmp_path, monk
     monkeypatch.setattr(follow, "Win32Event", Mock())
     monkeypatch.setattr(follow.AppFollowService, "is_stop_all_signaled", lambda *args: False)
     monkeypatch.setattr(follow.AppFollowService, "is_main_instance_running", lambda *args: False)
-    # 只模拟信号与进程快照，不创建启动项或启动真实桌宠。
-    import ctypes
-    monkeypatch.setattr(ctypes, "WinDLL", Mock())
     for from_exit in (False, True):
         waits = iter([-1, -1, 0])
         monkeypatch.setattr(follow, "wait_any_events", lambda *args: next(waits))
@@ -212,6 +209,55 @@ def test_cli_background_wakes_on_existing_process_and_later_start(tmp_path, monk
         )
         assert follow.AppFollowService.run_follow_watcher_core(options) == 0
         assert launch.call_args.args[1] == ["--woken-by:antigravity-cli"]
+
+
+def test_background_watcher_exits_when_gui_takes_over(tmp_path, monkeypatch) -> None:
+    from unittest.mock import Mock
+    from services import app_follow_service as follow
+
+    mutex = Mock()
+    monkeypatch.setattr(follow, "Win32Mutex", Mock(return_value=mutex))
+    monkeypatch.setattr(follow, "Win32Event", Mock())
+    monkeypatch.setattr(follow, "wait_any_events", Mock(return_value=-1))
+    monkeypatch.setattr(follow.AppFollowService, "is_stop_all_signaled", Mock(return_value=False))
+    monkeypatch.setattr(follow.AppFollowService, "is_main_instance_running", Mock(side_effect=[False, True]))
+    launch = Mock()
+    monkeypatch.setattr(follow.AppFollowService, "_launch_wake_target", launch)
+    options = follow.FollowWatcherOptions(
+        from_exit=True,
+        custom_settings_folder=str(tmp_path),
+        sample_antigravity=lambda: _snapshot(False),
+        sample_gemini=lambda: _snapshot(False),
+        sample_antigravity_cli=lambda: _snapshot(False),
+    )
+
+    assert follow.AppFollowService.run_follow_watcher_core(options) == 0
+    launch.assert_not_called()
+    mutex.release.assert_called_once_with()
+
+
+def test_stopping_watcher_waits_and_never_kills_its_gui_child(monkeypatch) -> None:
+    from unittest.mock import Mock, call
+    from services import app_follow_service as follow
+
+    lifecycle = Mock()
+    watcher = lifecycle.watcher
+    monkeypatch.setattr(follow, "Win32Event", Mock(return_value=lifecycle.event))
+    lifecycle.read_marker.return_value = watcher
+    monkeypatch.setattr(follow.AppFollowService, "try_get_live_watcher_process", lifecycle.read_marker)
+    lifecycle.wait.side_effect = [False, True]
+    monkeypatch.setattr(follow.AppFollowService, "wait_for_process_exit", lifecycle.wait)
+
+    follow.AppFollowService.stop_follow_watcher()
+
+    assert lifecycle.mock_calls == [
+        call.read_marker(),
+        call.event.set(),
+        call.wait(watcher, 800),
+        call.watcher.kill(),
+        call.wait(watcher, 1000),
+        call.event.close(),
+    ]
 
 
 def test_cli_gui_wake_respects_setting() -> None:

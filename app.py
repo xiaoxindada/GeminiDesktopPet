@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
@@ -56,6 +57,9 @@ from views import (
 )
 
 
+_SHUTDOWN_WORKER_TIMEOUT_S = 2.5
+
+
 class _IpcSignalBridge(QObject):
     """将后台 Win32 命名事件监听线程的信号安全切回 Qt 主线程。"""
 
@@ -97,6 +101,7 @@ class PetApplicationCoordinator(QObject):
         self._args = args
         self._main_mutex = main_mutex
         self._is_exiting = False
+        self._shutdown_workers_timed_out = False
         self._ipc_stop_flag = threading.Event()
         self._ipc_stop_event = Win32Event(None, manual_reset=True, initial_state=False)
         self._ipc_thread: Optional[threading.Thread] = None
@@ -131,7 +136,7 @@ class PetApplicationCoordinator(QObject):
             self._on_external_wake, Qt.ConnectionType.QueuedConnection
         )
         self._ipc_bridge.close_requested.connect(
-            self._on_external_close, Qt.ConnectionType.QueuedConnection
+            self.gracefully_exit, Qt.ConnectionType.QueuedConnection
         )
         self._start_ipc_listener()
 
@@ -191,7 +196,7 @@ class PetApplicationCoordinator(QObject):
         self._pet.open_update_requested.connect(self.open_update_window)
         self._pet.settings_synced.connect(self._sync_all_views_from_settings)
         self._pet.visual_bounds_changed.connect(self._keep_quota_window_clear)
-        self._pet.exit_requested.connect(lambda: self.gracefully_exit(allow_respawn_watcher=True))
+        self._pet.exit_requested.connect(self.gracefully_exit)
 
         # TrayIconService signals（其余菜单项直接复用桌面右键菜单的 QAction）
         self._tray.show_and_greet_requested.connect(self._wake_from_tray_or_greet)
@@ -253,10 +258,6 @@ class PetApplicationCoordinator(QObject):
             self._pet.show_and_greet()
             self._pet.raise_()
             self._pet.activateWindow()
-
-    @Slot()
-    def _on_external_close(self) -> None:
-        self.gracefully_exit(allow_respawn_watcher=True)
 
     # ==================== Antigravity / Gemini Watcher ====================
 
@@ -416,8 +417,7 @@ class PetApplicationCoordinator(QObject):
                 update_service=self._update_service,
                 settings_service=self._settings_service,
                 settings=self._settings,
-                on_request_graceful_exit=lambda: self.gracefully_exit(allow_respawn_watcher=False),
-                before_updater_cleanup=self._before_updater_cleanup,
+                on_request_graceful_exit=self.gracefully_exit,
                 initial_result=self._latest_update_result,
             )
         self._show_and_focus(self._update_win)
@@ -490,60 +490,60 @@ class PetApplicationCoordinator(QObject):
 
     # ==================== Cleanup & Exit ====================
 
-    def _before_updater_cleanup(self) -> None:
-        # 安装覆盖更新前关闭守护进程避免占用 EXE/DLL 句柄
-        self._follow_service.signal_stop_follow_watcher()
-        self._follow_service.wait_and_stop_live_watcher(2500)
-
-    def gracefully_exit(self, allow_respawn_watcher: bool = True) -> None:
+    @Slot()
+    def gracefully_exit(self) -> None:
         if self._is_exiting:
             return
         self._is_exiting = True
-        AppLogger.info("App", f"Graceful exit started (allow_respawn_watcher={allow_respawn_watcher}).")
+        AppLogger.info("App", "Graceful exit started.")
 
-        self._ipc_stop_flag.set()
-        self._ipc_stop_event.set()
-        self._watcher.dispose()
+        try:
+            windows = (
+                self._quota_win,
+                self._profile_win,
+                self._editor_win,
+                self._settings_win,
+                self._update_win,
+                self._pet,
+            )
+            open_windows = [win for win in windows if win is not None]
+            workers = [
+                worker
+                for owner in (self, *open_windows)
+                for worker in owner.findChildren(QThread)
+                if worker.isRunning()
+            ]
+            for worker in workers:
+                worker.requestInterruption()
+            deadline = time.monotonic() + _SHUTDOWN_WORKER_TIMEOUT_S
 
-        if self._silent_update_worker is not None and self._silent_update_worker.isRunning():
-            self._silent_update_worker.wait(500)
+            self._ipc_stop_flag.set()
+            self._ipc_stop_event.set()
+            self._follow_service.stop_follow_watcher()
+            if self._ipc_thread is not None:
+                self._ipc_thread.join()
+            self._ipc_stop_event.close()
+            self._watcher.dispose()
 
-        for win in (
-            self._quota_win,
-            self._profile_win,
-            self._editor_win,
-            self._settings_win,
-            self._update_win,
-            self._pet,
-        ):
-            if win is not None:
-                try:
-                    win.close()
+            for win in open_windows:
+                win.close()
+
+            # Qt 析构仍在运行的 QThread 会中止进程，先给后台任务一段时间退出。
+            self._shutdown_workers_timed_out = not all(
+                worker.wait(max(0, int((deadline - time.monotonic()) * 1000))) for worker in workers
+            )
+            if self._shutdown_workers_timed_out:
+                AppLogger.warn("App", "后台任务等待超时，退出时释放剩余资源")
+            else:
+                for win in open_windows:
                     win.deleteLater()
-                except Exception:
-                    pass
 
-        if self._pet is not None and getattr(self._pet, "_first_shown", False):
-            self._settings.last_left = float(self._pet.x())
-            self._settings.last_top = float(self._pet.y())
-        self._settings_service.save(self._settings)
-
-        self._tray.dispose()
-        self._sound.dispose()
-        self._follow_service.clear_main_pid(os.getpid())
-        self._ipc_stop_event.close()
-
-        # 若仍启用跟随联动且非全局停止指令，则拉起无窗 --follow-watcher --from-exit 接力守护
-        if (
-            allow_respawn_watcher
-            and self._follow_service.any_follow_enabled(self._settings)
-            and not self._follow_service.is_stop_all_signaled()
-        ):
-            self._follow_service.spawn_follow_watcher(from_exit=True)
-
-        self._main_mutex.release()
-        self._app.processEvents()
-        self._app.quit()
+            self._tray.dispose()
+            self._sound.dispose()
+        finally:
+            self._follow_service.clear_main_pid(os.getpid())
+            self._main_mutex.release()
+            self._app.quit()
 
 
 def run_gui_app(args: list[str]) -> int:
@@ -579,4 +579,8 @@ def run_gui_app(args: list[str]) -> int:
     coordinator = PetApplicationCoordinator(qt_app, args, main_mutex)
     # 保持强引用避免 GC 回收 coordinator
     qt_app.setProperty("_gemini_pet_coordinator", coordinator)
-    return int(qt_app.exec())
+    exit_code = int(qt_app.exec())
+    if coordinator._shutdown_workers_timed_out:
+        # 配置、托盘和守护已清理，结束进程可释放阻塞中的网络任务和文件句柄。
+        os._exit(exit_code)
+    return exit_code
