@@ -107,6 +107,8 @@ _SYNC_MIN_INTERVAL = 0.25
 _SYNC_REPLACE_INTERVAL = 0.12
 _SYNC_QUEUE_LIMIT = 10
 _SYNC_HEARTBEAT_SEC = 60.0
+_SYNC_BUBBLE_SIZE = (420, 260)
+_SYNC_BUBBLE_IDLE_MS = 3000
 
 # 打盹 Zzz 的落点比例（相对贴图内容矩形：横向从中心右偏、纵向从顶部下移）。
 # Q 版头部约占贴图高度 1/3、宽度 2/3，0.18H 正好停在头顶右侧发际（参考图效果）；
@@ -554,12 +556,10 @@ class PetWindow(QWidget):
         self._ag_playback: deque[SyncEvent] = deque()
         self._ag_last_shown = 0.0
         self._ag_last_replace = 0.0
-        # 同步气泡的独占期：这段时间内闲聊不来抢同一个气泡。
-        self._sync_guard_until = 0.0
         self._sync_thinking_visible = False
         self._sync_thinking_pinned = False
-        # 同步播报时的固定气泡宽度：不锁宽的话每长一个字就重排一次，看着像在抖。
-        self._sync_bubble_width: Optional[int] = None
+        self._sync_bubble_active = False
+        self._sync_waiting_for_reply = False
         # 心跳：按时间写日志，确认轮询是否真的在跑。
         self._ag_dbg_ticks = 0
         self._ag_dbg_last = time.monotonic()
@@ -1205,6 +1205,7 @@ class PetWindow(QWidget):
 
         self._bubble_timer = QTimer(self)
         self._bubble_timer.setSingleShot(True)
+        self._bubble_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._bubble_timer.timeout.connect(self._on_bubble_timeout)
 
         self._monitor_timer = QTimer(self)
@@ -1294,15 +1295,20 @@ class PetWindow(QWidget):
             return super().eventFilter(watched, event)
         etype = event.type()
         if (
-            etype == QEvent.Type.MouseButtonPress
+            self._sync_bubble_active
+            and not self._is_chat_open
+            and etype in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove,
+                QEvent.Type.Wheel, QEvent.Type.KeyPress,
+            )
             and isinstance(watched, QWidget)
             and (watched is self._speech_bubble or self._speech_bubble.isAncestorOf(watched))
-            and self._sync_thinking_visible
-            and not self._is_chat_open
         ):
-            # 点击阅读后仍接收思维续写，但不让结尾气泡替换内容或重新启动关闭计时。
-            self._sync_thinking_pinned = True
-            self._bubble_timer.stop()
+            if etype == QEvent.Type.MouseButtonPress and self._sync_thinking_visible:
+                # 点击阅读后继续接收思维续写，保留正在阅读的内容直至倒计时结束。
+                self._sync_thinking_pinned = True
+            self._restart_sync_bubble_timeout()
         if watched is self._speech_bubble:
             if etype == QEvent.Type.Enter:
                 self._is_bubble_hovered = True
@@ -1311,7 +1317,7 @@ class PetWindow(QWidget):
                 self._is_bubble_hovered = False
                 if (
                     not self._is_chat_open
-                    and not self._sync_thinking_pinned
+                    and not self._sync_bubble_active
                     and self._speech_bubble.isVisible()
                     and not self._speech_bubble.is_resizing()
                 ):
@@ -1435,11 +1441,13 @@ class PetWindow(QWidget):
                 self._reanchor_docked_position()
 
         self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
+        # 停止播报后的设置刷新也要保留正在倒计时的同步气泡。
         if (
             not self._settings.show_speech_bubble
             and not self._is_chat_open
             and not self._is_forced_bubble_active
             and not self._ag_mirror_active
+            and not self._sync_bubble_active
         ):
             self._hide_speech_bubble()
 
@@ -1537,16 +1545,15 @@ class PetWindow(QWidget):
                 max(min_h, min(max_h, self._transient_bubble_size.height())),
             )
 
-        if self._sync_bubble_width is not None:
-            # 同步播报期间锁宽：文本每长一点都按最长行重算宽度，气泡会左右抽动。
-            target_w = max(min_w, min(max_w, self._sync_bubble_width))
-            target_h = self._auto_fit_bubble_height(target_w, min_h, max_h)
-            return QSize(target_w, target_h)
+        if self._sync_bubble_active:
+            # 固定同步气泡的视口，续写只扩大滚动范围，避免透明窗口反复缩放和移动。
+            sync_w, sync_h = _SYNC_BUBBLE_SIZE
+            return QSize(min(max_w, sync_w), min(max_h, sync_h))
 
         fm = QFontMetrics(self._bubble_text_lbl.font())
         text = self._bubble_text_lbl.text() or ""
         longest_line = max((fm.horizontalAdvance(ln) for ln in text.splitlines()), default=0)
-        target_w = max(240, min(330, longest_line + 52))
+        target_w = max(300, min(400, longest_line + 52))
         target_w = max(min_w, min(max_w, target_w))
         target_h = self._auto_fit_bubble_height(target_w, min_h, max_h)
         return QSize(target_w, target_h)
@@ -1629,12 +1636,14 @@ class PetWindow(QWidget):
         self._on_bubble_resized_by_user(geom)
         if self._is_chat_open:
             self._settings_service.save(self._settings)
-        elif not self._sync_thinking_pinned and not self._is_bubble_hovered and self._speech_bubble.isVisible():
+        elif self._sync_bubble_active:
+            self._restart_sync_bubble_timeout()
+        elif not self._is_bubble_hovered and self._speech_bubble.isVisible():
             self._bubble_timer.stop()
             self._bubble_timer.start(2500)
 
-    def _relayout_stage_top(self) -> None:
-        if self._speech_bubble.isVisible() and not self._speech_bubble.is_resizing():
+    def _relayout_stage_top(self, *, reveal_bubble: bool = False) -> None:
+        if (reveal_bubble or self._speech_bubble.isVisible()) and not self._speech_bubble.is_resizing():
             min_w, min_h = self._bubble_min_size()
             max_w, max_h = self._bubble_max_size(
                 self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
@@ -1655,6 +1664,8 @@ class PetWindow(QWidget):
                 target_pos = self._compute_bubble_default_pos(target_size)
             if self._speech_bubble.pos() != target_pos:
                 self._speech_bubble.move(target_pos)
+            if reveal_bubble:
+                self._speech_bubble.show()
             self._speech_bubble.raise_()
             # 重新排版气泡后，保持已打开的聊天菜单处于气泡前方。
             menu = getattr(self, "_chat_model_menu", None)
@@ -2640,11 +2651,12 @@ class PetWindow(QWidget):
     def _hide_speech_bubble(self) -> None:
         self._sync_thinking_pinned = False
         self._sync_thinking_visible = False
-        self._sync_guard_until = 0.0
+        self._sync_waiting_for_reply = False
         self._bubble_timer.stop()
         self._bubble_custom_offset = None
         self._transient_bubble_size = None
-        self._sync_bubble_width = None
+        self._sync_bubble_active = False
+        self._disable_chat_scroll_auto()
         self._speech_bubble.setVisible(False)
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
@@ -3018,7 +3030,9 @@ class PetWindow(QWidget):
         self.settings_synced.emit()
 
     def _scroll_chat_to_bottom(self) -> None:
-        # 新消息卡片与气泡窗口高度要等异步布局完成后才生效，此刻的 maximum
+        if not self._is_chat_open:
+            return
+        # 新消息布局完成前，此刻的 maximum
         # 可能还是旧值导致滚不到底：先按当前范围滚一次，再保持监听
         # rangeChanged，待滚动范围真正更新后继续贴底（用户主动滚动时解除）。
         bar = self._bubble_scroll.verticalScrollBar()
@@ -3533,6 +3547,9 @@ class PetWindow(QWidget):
         self._ag_sync_session_id = None
         self._ag_sync_events.clear()
         self._ag_pending_handoff = False
+        if self._sync_bubble_active:
+            self._sync_waiting_for_reply = False
+            self._restart_sync_bubble_timeout()
         if self._ag_viewing_sync:
             self._return_to_regular_chat()
         else:
@@ -3577,6 +3594,9 @@ class PetWindow(QWidget):
         for name, data in self._ag_sync_state.take_since(self._ag_baseline):
             if name == "status":
                 if data.get("switched"):
+                    if self._sync_bubble_active:
+                        self._sync_waiting_for_reply = False
+                        self._restart_sync_bubble_timeout()
                     self.show_bubble(f"✦ 已切换到新的 Antigravity 对话：{data.get('title', '')}", 3.0)
                 continue
             items = (data.get("items") or []) if isinstance(data, dict) else []
@@ -3630,12 +3650,9 @@ class PetWindow(QWidget):
         return text
 
     def _show_sync_event(self, event: SyncEvent) -> None:
-        if self._sync_thinking_pinned and event.kind != "thinking":
-            return
         if not event.text.strip():
             return
         message = self._sync_event_text(event)
-        self._sync_thinking_visible = event.kind == "thinking"
         if self._ag_sync_session_id is not None:
             replace_last = bool(event.replace and self._ag_sync_events and (
                 self._ag_sync_events[-1].kind == event.kind
@@ -3660,13 +3677,17 @@ class PetWindow(QWidget):
                     self._ag_pending_handoff = True
                 else:
                     self._show_sync_chat_session()
-        if self._is_chat_open:
+        if self._is_chat_open or not self.isVisible():
             return
-        duration = max(3.5, min(9.0, len(message) / 28.0))
-        # 播报期间锁一个固定宽度：文本每长一点都按最长行重算宽度，视觉上会一直抖。
-        self._sync_bubble_width = 320
-        self.show_bubble(message, duration, from_sync=True)
-        self._sync_guard_until = time.monotonic() + duration
+        # 思考、工具和用户消息仍在等回复。回复续写会重新开始关闭倒计时。
+        self._sync_waiting_for_reply = event.kind != "error" and not (
+            event.role == "assistant" and event.kind == "message"
+        )
+        if not self._sync_thinking_pinned or event.kind == "thinking":
+            self._sync_thinking_visible = event.kind == "thinking"
+            self._is_forced_bubble_active = False
+            self._show_non_chat_bubble(message, from_sync=True)
+        self._restart_sync_bubble_timeout()
 
     def _render_chat_messages(self, record: dict) -> None:
         self._clear_chat_rows()
@@ -3680,29 +3701,13 @@ class PetWindow(QWidget):
             )
         self._relayout_stage_top()
 
-    def show_bubble(
-        self, message: str, duration_sec: float, force: bool = False, from_sync: bool = False
-    ) -> None:
-        if self._sync_thinking_pinned and not from_sync:
+    def show_bubble(self, message: str, duration_sec: float, force: bool = False) -> None:
+        if self._sync_thinking_pinned or (self._sync_bubble_active and not force):
             return
-        if not from_sync:
-            # 闲聊/宠物自己的回复恢复自适应宽度，别跟着同步播报的锁宽走。
-            self._sync_bubble_width = None
-        if not from_sync and not force and time.monotonic() < self._sync_guard_until:
-            # 正在播反重力对话，闲聊别插话把内容顶掉；强制气泡（宠物自己的回复）照常显示。
-            return
-        # 实时同步播报绕过"自动弹出对话气泡"开关：同步一开，新消息始终能上气泡。
-        if (
-            not force
-            and not from_sync
-            and not self._settings.show_speech_bubble
-            and not self._is_chat_open
-        ):
+        if not force and not self._settings.show_speech_bubble and not self._is_chat_open:
             return
         if not self.isVisible():
             return
-        if not from_sync:
-            self._sync_thinking_visible = False
         if self._is_chat_open:
             if not force:
                 return
@@ -3725,47 +3730,56 @@ class PetWindow(QWidget):
             return
 
         self._is_forced_bubble_active = force
+        self._sync_thinking_visible = False
+        self._show_non_chat_bubble(message)
+        self._bubble_timer.start(max(200, int(round(duration_sec * 1000.0))))
+
+    def _show_non_chat_bubble(self, message: str, *, from_sync: bool = False) -> None:
         already_showing_sync = (
-            from_sync and time.monotonic() < self._sync_guard_until
-            and self._speech_bubble.isVisible() and self._bubble_text_lbl.isVisible()
+            from_sync and self._sync_bubble_active and self._speech_bubble.isVisible()
         )
+        self._sync_bubble_active = from_sync
         if not already_showing_sync:
+            self._disable_chat_scroll_auto()
             self._chat_messages_panel.setVisible(False)
             self._bubble_text_lbl.setStyleSheet(
                 "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
             )
             self._bubble_text_lbl.setVisible(True)
-        scroll_position = self._bubble_scroll.verticalScrollBar().value()
-        self._bubble_text_lbl.setText(message)
+        if self._bubble_text_lbl.text() != message:
+            self._bubble_text_lbl.setText(message)
+            if already_showing_sync:
+                # 刷新滚动范围，保留用户的阅读位置。
+                self._bubble_scroll.setWidgetResizable(True)
         if not already_showing_sync:
             self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-            self._speech_bubble.setVisible(True)
-            self._sync_bubble_window_styles()
-        self._relayout_stage_top()
-        self._bubble_timer.stop()
-        if self._sync_thinking_pinned:
-            # 续写时保留用户正在阅读的位置，不自动滚到新增内容末尾。
-            self._disable_chat_scroll_auto()
-            self._bubble_scroll.verticalScrollBar().setValue(scroll_position)
+            self._relayout_stage_top(reveal_bubble=True)
+            bar = self._bubble_scroll.verticalScrollBar()
+            bar.setValue(bar.minimum())
+
+    def _restart_sync_bubble_timeout(self) -> None:
+        if self._sync_waiting_for_reply or self._ag_playback or self._speech_bubble.is_resizing():
+            self._bubble_timer.stop()
         else:
-            self._bubble_timer.start(max(200, int(round(duration_sec * 1000.0))))
+            self._bubble_timer.start(_SYNC_BUBBLE_IDLE_MS)
 
     def _on_bubble_timeout(self) -> None:
-        if self._sync_thinking_pinned:
-            return
         self._is_forced_bubble_active = False
-        if (
-            not self._is_chat_open
-            and not self._is_bubble_hovered
-            and not self._speech_bubble.is_resizing()
-        ):
-            self._hide_speech_bubble()
-            self._relayout_stage_top()
+        if self._is_chat_open or self._speech_bubble.is_resizing():
+            return
+        if self._sync_bubble_active:
+            if (
+                self._sync_waiting_for_reply or self._ag_playback
+                or self._bubble_scroll.verticalScrollBar().isSliderDown()
+            ):
+                return
+        elif self._is_bubble_hovered:
+            return
+        self._hide_speech_bubble()
+        self._relayout_stage_top()
 
     def open_chat_mode(self) -> None:
         """从桌面/托盘菜单进入聊天模式：先保证桌宠可见，再展开聊天面板。"""
-        self._sync_thinking_pinned = False
-        self._sync_thinking_visible = False
         if not self.isVisible():
             self.show()
         self.open_chat_dialog()
@@ -3774,6 +3788,11 @@ class PetWindow(QWidget):
 
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True
+        self._sync_thinking_pinned = False
+        self._sync_thinking_visible = False
+        self._sync_bubble_active = False
+        self._sync_waiting_for_reply = False
+        self._disable_chat_scroll_auto()
         if self._ag_mirror_active and self._ag_sync_session_id is None:
             self._ag_sync_session_id = f"sync:{uuid.uuid4().hex}"
             self._ag_sync_events.clear()
@@ -3831,7 +3850,7 @@ class PetWindow(QWidget):
         self.apply_settings_to_window()
         if enabled:
             self.show_bubble("已开启宠物对话气泡，会自动陪你聊天喵✦", 4.0, force=True)
-        elif not self._is_chat_open and not self._ag_mirror_active:
+        elif not self._is_chat_open and not self._ag_mirror_active and not self._sync_bubble_active:
             self._sync_chat_controls()
             self._hide_speech_bubble()
             self._relayout_stage_top()
