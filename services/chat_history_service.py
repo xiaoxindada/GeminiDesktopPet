@@ -32,6 +32,14 @@ class ChatHistoryService:
             raise ValueError("任务文件夹格式无效")
         return data
 
+    def delete_session(self, session_id) -> None:
+        """删除指定会话的存档文件；删除当前会话后的界面状态由调用方重置。"""
+        path = self.session_path(session_id)
+        # 连同可能残留的 .tmp 一起清掉，避免留下孤儿临时文件。
+        for target in (path, path.with_suffix(".tmp")):
+            if target.exists():
+                target.unlink()
+
     def set_task_folder(self, folder: str) -> None:
         selected = Path(folder)
         if not selected.is_dir():

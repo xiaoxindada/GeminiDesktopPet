@@ -457,6 +457,8 @@ class PetWindow(QWidget):
         self._history_expanded = False
         self._archive_error = ""
         self._chat_readonly = False
+        # 新消息自动贴底开关：布局范围真正更新后再补滚，用户手动滚动时解除。
+        self._chat_scroll_auto = False
         self._ag_sync_service = AntigravityChatSyncService()
         self._ag_sync_state = ChatSyncState()
         self._ag_collector = AntigravityChatCollector(self._ag_sync_service, self._ag_sync_state)
@@ -816,8 +818,8 @@ class PetWindow(QWidget):
         self._history_list.setStyleSheet("""
             QListWidget { background: #19142C; color: #CEC3ED; border: 1px solid #4E3F8E;
                           border-radius: 8px; outline: none; font-size: 11px; }
-            QListWidget::item { padding: 10px 7px; border-bottom: 1px solid #302746; }
-            QListWidget::item:selected { background: #443371; color: #FFFFFF; }
+            QListWidget::item { border-bottom: 1px solid #302746; }
+            QListWidget::item:selected { background: #443371; }
             QListWidget::item:hover { background: #302448; }
         """)
         self._history_list.currentItemChanged.connect(self._select_chat_session)
@@ -857,6 +859,8 @@ class PetWindow(QWidget):
             }
             """
         )
+        # 用户拖动滑块或滚轮阅读历史时解除自动贴底，新消息到来时再重新贴底。
+        self._bubble_scroll.verticalScrollBar().actionTriggered.connect(self._on_chat_scroll_user_action)
 
         self._bubble_content = QWidget()
         self._bubble_content.setStyleSheet("background: transparent;")
@@ -955,7 +959,33 @@ class PetWindow(QWidget):
             "border-radius: 4px; padding: 3px 5px; font-size: 10px; }"
         )
         self._chat_path.setToolTip("当前会话文件；可选中复制，长路径可左右滚动查看")
-        path_layout.addWidget(self._chat_path)
+        path_row = QHBoxLayout()
+        path_row.setContentsMargins(0, 0, 0, 0)
+        path_row.setSpacing(4)
+        path_row.addWidget(self._chat_path, 1)
+        self._chat_open_file_btn = QPushButton("📂 打开")
+        self._chat_open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chat_open_file_btn.setToolTip("直接打开当前会话文件；尚未保存时打开所在文件夹")
+        self._chat_open_file_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: #16112C;
+                color: #D8CCFF;
+                border: 1px solid #4E3F8E;
+                border-radius: 5px;
+                padding: 2px 8px;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background: #1F183D;
+                border-color: #7C5CFF;
+                color: #FFFFFF;
+            }
+            """
+        )
+        self._chat_open_file_btn.clicked.connect(self._open_chat_session_file)
+        path_row.addWidget(self._chat_open_file_btn)
+        path_layout.addLayout(path_row)
         task_row = QHBoxLayout()
         task_row.setContentsMargins(0, 0, 0, 0)
         task_label = QLabel("任务文件夹")
@@ -2922,8 +2952,30 @@ class PetWindow(QWidget):
         self.settings_synced.emit()
 
     def _scroll_chat_to_bottom(self) -> None:
+        # 新消息卡片与气泡窗口高度要等异步布局完成后才生效，此刻的 maximum
+        # 可能还是旧值导致滚不到底：先按当前范围滚一次，再保持监听
+        # rangeChanged，待滚动范围真正更新后继续贴底（用户主动滚动时解除）。
         bar = self._bubble_scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
+        if not self._chat_scroll_auto:
+            self._chat_scroll_auto = True
+            bar.rangeChanged.connect(self._on_chat_scroll_range_changed)
+
+    def _on_chat_scroll_range_changed(self, _minimum: int, _maximum: int) -> None:
+        # 滚动范围真正变化后补滚一次，窗口继续调整导致范围再变时仍保持贴底。
+        bar = self._bubble_scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_chat_scroll_user_action(self, _action: int) -> None:
+        # 用户拖动滑块或滚轮阅读历史时解除自动贴底，避免新内容把视口抢走。
+        self._disable_chat_scroll_auto()
+
+    def _disable_chat_scroll_auto(self) -> None:
+        if not self._chat_scroll_auto:
+            return
+        self._chat_scroll_auto = False
+        bar = self._bubble_scroll.verticalScrollBar()
+        bar.rangeChanged.disconnect(self._on_chat_scroll_range_changed)
 
     def _append_chat_turn(
         self,
@@ -3054,6 +3106,20 @@ class PetWindow(QWidget):
                 else "当前对话保存路径 · 首条消息后保存"
             )
 
+    def _open_chat_session_file(self) -> None:
+        # 右侧按钮：用系统默认程序直接打开当前会话文件（聊天配置文件）。
+        path = self._chat_archive.session_path()
+        if path.exists():
+            target = path
+        else:
+            # 首条消息尚未保存时没有文件可开，退而打开会话所在文件夹。
+            path.parent.mkdir(parents=True, exist_ok=True)
+            target = path.parent
+        try:
+            os.startfile(str(target))
+        except OSError:
+            self._chat_save_status.setText("打开会话文件失败，请检查文件是否被占用")
+
     def _save_chat_message(self, role: str, text: str, session_id=None) -> None:
         try:
             self._chat_archive.append(role, text, session_id=session_id)
@@ -3077,10 +3143,59 @@ class PetWindow(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, record["id"])
                 item.setToolTip(title)
                 self._history_list.addItem(item)
+                # 条目右上角放 × 直接删除：置顶浮窗会盖住任何弹窗，确认框不可用。
+                row_widget = self._make_history_row_widget(
+                    record["id"], title, str(record.get("updated", "")).replace("T", " ")
+                )
+                item.setSizeHint(row_widget.sizeHint())
+                self._history_list.setItemWidget(item, row_widget)
                 if record["id"] == current:
                     self._history_list.setCurrentItem(item)
         finally:
             self._history_list.blockSignals(False)
+
+    def _make_history_row_widget(self, session_id: str, title: str, updated: str) -> QWidget:
+        """构造历史条目的自定义行：标题+时间在左，右上角 × 按钮直接删除该会话。"""
+        wrapper = QWidget(self._history_list)
+        wrapper.setStyleSheet("background: transparent;")
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(8, 6, 6, 6)
+        row.setSpacing(4)
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("color: #D8CCFF; font-size: 11px; background: transparent;")
+        time_lbl = QLabel(updated)
+        time_lbl.setStyleSheet("color: #A89FD6; font-size: 10px; background: transparent;")
+        text_col.addWidget(title_lbl)
+        text_col.addWidget(time_lbl)
+        row.addLayout(text_col, 1)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setToolTip("删除该对话")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #2A2146;
+                color: #A89FD6;
+                border: 1px solid #4E3F8E;
+                border-radius: 4px;
+                font-size: 14px;
+                line-height: 14px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background: #8B2E4E;
+                color: #FFFFFF;
+                border-color: #C05070;
+            }
+        """)
+        # QPushButton 会消费鼠标事件，不会传播到列表触发条目选中切换。
+        close_btn.clicked.connect(lambda _checked=False, sid=session_id: self._delete_session(sid))
+        row.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignTop)
+        return wrapper
 
     def _toggle_chat_history(self, checked: bool) -> None:
         self._history_expanded = checked
@@ -3161,6 +3276,45 @@ class PetWindow(QWidget):
         self._sync_chat_controls()
         self._relayout_stage_top()
         self._chat_input.setFocus()
+
+    def _delete_session(self, session_id: str) -> None:
+        """直接删除指定会话并立即刷新历史列表；无确认弹窗（置顶浮窗会挡住弹窗）。"""
+        if self._waiting_chat_workers:
+            return
+        # 尚未落盘的新对话没有文件可删。
+        if (
+            session_id == self._chat_archive.session_id
+            and not self._chat_archive.session_path().exists()
+        ):
+            return
+        try:
+            self._chat_archive.delete_session(session_id)
+        except (OSError, ValueError):
+            self._chat_save_status.setText("删除对话失败，请检查配置目录权限")
+            return
+        if session_id == self._chat_archive.session_id:
+            # 删除的就是当前会话：清空消息界面并开启全新会话。
+            self._chat_archive.new_session()
+            self._chat_readonly = False
+            self._ag_mirror_active = False
+            self._ag_collector.reset()
+            self._ag_playback.clear()
+            self._ag_baseline = {}
+            self._archive_error = ""
+            self._last_chat_api_notice = ""
+            self._clear_chat_rows()
+            self._chat.reset_conversation()
+            self._chat_input.clear()
+            self._chat_messages_panel.setVisible(False)
+            self._bubble_text_lbl.setStyleSheet(
+                "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+            )
+            self._bubble_text_lbl.setText("已删除所选对话，开始新对话喵✦")
+            self._bubble_text_lbl.setVisible(True)
+        self._update_chat_save_path()
+        self._refresh_chat_sessions()
+        self._sync_chat_controls()
+        self._relayout_stage_top()
 
     # ==================== Antigravity 对话气泡播报 ====================
 
@@ -3408,6 +3562,7 @@ class PetWindow(QWidget):
         self._bubble_timer.stop()
         if self._sync_thinking_pinned:
             # 续写时保留用户正在阅读的位置，不自动滚到新增内容末尾。
+            self._disable_chat_scroll_auto()
             self._bubble_scroll.verticalScrollBar().setValue(scroll_position)
         else:
             self._bubble_timer.start(max(200, int(round(duration_sec * 1000.0))))

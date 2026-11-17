@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from models.pet_settings import PetSettings
 from services.chat_history_service import ChatHistoryService
@@ -136,6 +136,117 @@ def test_history_uses_existing_chat_cards_path_and_new_session():
             assert pet._chat_input_panel.isEnabled()
             assert "已保存" in pet._chat_save_status.text()
             pet._cleanup_chat_worker(worker)
+        finally:
+            pet.close()
+            pet.deleteLater()
+            app.processEvents()
+
+
+def test_delete_session_removes_file_and_keeps_other_sessions():
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = ChatHistoryService(Path(tmp))
+        archive.append("user", "将被删除的会话")
+        doomed = archive.session_id
+        archive.new_session()
+        archive.append("user", "保留下来的会话")
+        kept = archive.session_id
+        (archive.folder / (doomed + ".tmp")).write_text("{}", encoding="utf-8")
+        archive.delete_session(doomed)
+        assert not archive.session_path(doomed).exists()
+        assert not (archive.folder / (doomed + ".tmp")).exists()
+        assert archive.session_path(kept).exists()
+        assert [record["id"] for record in archive.sessions()] == [kept]
+
+
+def _find_history_close_button(pet, session_id):
+    """找到历史列表中指定会话条目的 × 删除按钮。"""
+    for index in range(pet._history_list.count()):
+        item = pet._history_list.item(index)
+        if item.data(Qt.ItemDataRole.UserRole) == session_id:
+            widget = pet._history_list.itemWidget(item)
+            for button in widget.findChildren(QPushButton):
+                if button.text() == "×":
+                    return button
+    raise AssertionError(f"未找到会话 {session_id} 的关闭按钮")
+
+
+def test_delete_session_button_removes_selected_conversation():
+    app = QApplication.instance() or QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = PetSettings(auto_walk=False, chat_offline_mode=True, sound_enabled=False)
+        sound = SoundService()
+        sound.enabled = False
+        pet = PetWindow(settings, SettingsService(tmp), SpriteManager(), sound,
+                        SystemMonitorService(), GeminiChatService())
+        try:
+            pet._chat_archive.append("user", "将被删除的会话")
+            doomed = pet._chat_archive.session_id
+            pet._chat_archive.new_session()
+            pet._chat_archive.append("user", "保留的会话")
+            kept = pet._chat_archive.session_id
+            pet._show_chat_history()
+            app.processEvents()
+            assert pet._history_list.count() == 2
+
+            # 每个条目右上角都有 × 按钮，点击直接删除，无确认弹窗。
+            close_btn = _find_history_close_button(pet, doomed)
+            assert close_btn is not None
+            close_btn.click()
+            app.processEvents()
+            assert not pet._chat_archive.session_path(doomed).exists()
+            assert pet._chat_archive.session_path(kept).exists()
+            ids = {
+                pet._history_list.item(index).data(Qt.ItemDataRole.UserRole)
+                for index in range(pet._history_list.count())
+            }
+            assert doomed not in ids  # 列表立即刷新，删除项消失
+            assert kept in ids
+        finally:
+            pet.close()
+            pet.deleteLater()
+            app.processEvents()
+
+
+def test_delete_current_session_resets_and_refreshes():
+    """删除当前选中的会话后应清空消息、切换新会话并刷新列表。"""
+    app = QApplication.instance() or QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = PetSettings(auto_walk=False, chat_offline_mode=True, sound_enabled=False)
+        sound = SoundService()
+        sound.enabled = False
+        pet = PetWindow(settings, SettingsService(tmp), SpriteManager(), sound,
+                        SystemMonitorService(), GeminiChatService())
+        try:
+            pet._chat_archive.append("user", "将被删除的当前会话")
+            doomed = pet._chat_archive.session_id
+            pet._chat_archive.new_session()
+            pet._chat_archive.append("user", "保留的会话")
+            kept = pet._chat_archive.session_id
+            pet._show_chat_history()
+            app.processEvents()
+            for index in range(pet._history_list.count()):
+                item = pet._history_list.item(index)
+                if item.data(Qt.ItemDataRole.UserRole) == doomed:
+                    pet._history_list.setCurrentItem(item)
+                    break
+            app.processEvents()
+            assert pet._chat_archive.session_id == doomed
+
+            _find_history_close_button(pet, doomed).click()
+            app.processEvents()
+            assert not pet._chat_archive.session_path(doomed).exists()
+            assert pet._chat_archive.session_id != doomed
+            assert pet._chat_archive.session_path(kept).exists()
+            assert not pet._chat_message_rows
+            assert "已删除" in pet._bubble_text_lbl.text()
+            ids = {
+                pet._history_list.item(index).data(Qt.ItemDataRole.UserRole)
+                for index in range(pet._history_list.count())
+            }
+            assert doomed not in ids
+            assert kept in ids
         finally:
             pet.close()
             pet.deleteLater()
