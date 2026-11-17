@@ -147,7 +147,8 @@ class TestWindowLayoutFixes(unittest.TestCase):
                     pet.react_quota_lookup_finished(SimpleNamespace(success=True))
                     self.assertEqual(pet._override_pose, PetState.HAPPY)
                     self.assertIsNotNone(pet._active_static_pixmap)
-                    self.assertIn("查好", pet._bubble_text_lbl.text())
+                    # 额度结果只在看板展示，不再借桌宠气泡播报
+                    self.assertNotIn("查好", pet._bubble_text_lbl.text())
 
                     pet.react_quota_lookup_finished(SimpleNamespace(success=False))
                     self.assertEqual(pet._override_pose, PetState.OOPS)

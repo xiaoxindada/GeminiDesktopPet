@@ -2120,15 +2120,15 @@ class PetWindow(QWidget):
     # ==================== Quota Lookup Feedback ====================
 
     def react_quota_lookup_started(self) -> None:
-        """额度查询开始：Q 版与标准立绘统一切到查找姿势，并提示正在查询。"""
-        self._set_temporary_pose(PetState.SEARCHING, 12.0, "让我看看额度还有多少喵～")
+        """额度查询开始：Q 版与标准立绘统一切到查找姿势，查询提示交给额度窗口自身。"""
+        self._set_temporary_pose(PetState.SEARCHING, 12.0)
 
     def react_quota_lookup_finished(self, snapshot: object) -> None:
-        """额度查询结束：成功切开心姿势，失败切沮丧姿势，两种立绘共用同一状态。"""
+        """额度查询结束：成功切开心姿势，失败切沮丧姿势；额度结果只在看板展示，不弹气泡。"""
         if bool(getattr(snapshot, "success", False)):
-            self._set_temporary_pose(PetState.HAPPY, 4.0, "✦ 帮你查好最新反重力额度啦～")
+            self._set_temporary_pose(PetState.HAPPY, 4.0)
         else:
-            self._set_temporary_pose(PetState.OOPS, 4.5, "喵呜…额度没查到，等下再试试吧～")
+            self._set_temporary_pose(PetState.OOPS, 4.5)
 
     # ==================== Autonomous AI & System Monitor ====================
 
