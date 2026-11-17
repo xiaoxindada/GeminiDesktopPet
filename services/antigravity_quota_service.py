@@ -1,17 +1,23 @@
-"""通过本机 Antigravity 语言服务器的回环 RPC 查询模型剩余额度（5 小时 / 每周）。"""
+"""优先通过 Antigravity 桌面端查询额度，仅 CLI 运行时使用其内置查询命令。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
-from typing import Any, Optional
+import shutil
+import subprocess
+import time
+from typing import Any, Callable, Optional
 
 import psutil
 import requests
 
 from services.app_logger import AppLogger
+from services.followed_app_probe import FollowedAppProbe
+from services.win32_ipc import subprocess_hidden_kwargs
 
 try:
     import urllib3
@@ -582,13 +588,121 @@ class AntigravityQuotaService:
             return None, None, []
         return _parse_user_status(body)
 
-    def fetch_quota(self, cancel_check: Optional[callable] = None) -> QuotaSnapshot:  # type: ignore[valid-type]
+    @staticmethod
+    def _cli_failure(message: str) -> QuotaSnapshot:
+        return QuotaSnapshot(
+            False, message, "Antigravity CLI", None, None, None,
+            datetime.now(timezone.utc), [],
+        )
+
+    @staticmethod
+    def _find_cli_executable() -> Optional[str]:
+        # 优先复用当前运行实例的安装位置，兼容启动桌宠后才安装 CLI 的情况。
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                if (proc.info.get("name") or "").lower() in {"agy", "agy.exe"}:
+                    executable = proc.info.get("exe")
+                    if executable and Path(executable).is_file():
+                        return str(executable)
+            except (psutil.Error, OSError):
+                continue
+        return shutil.which("agy")
+
+    @staticmethod
+    def _parse_cli_usage(output: str) -> list[QuotaGroupInfo]:
+        # /usage 的 JSON response 是 TSV：分组、额度窗口、剩余百分比、重置时间。
+        grouped: dict[str, list[QuotaBucketInfo]] = {}
+        for line in output.splitlines():
+            columns = line.split("\t")
+            if len(columns) != 4:
+                continue
+            group, name, remaining, reset = (part.strip() for part in columns)
+            window = _bucket_window({"name": name})
+            if not group or not name or not window or not remaining.endswith("%"):
+                continue
+            try:
+                percent = float(remaining[:-1])
+            except ValueError:
+                continue
+            if not math.isfinite(percent) or not 0 <= percent <= 100:
+                continue
+            grouped.setdefault(_normalize_group_name(group), []).append(
+                QuotaBucketInfo(name, name, window, percent / 100.0, _parse_time(reset))
+            )
+        return [QuotaGroupInfo(name, buckets=buckets) for name, buckets in grouped.items()]
+
+    def _fetch_cli_quota(self, cancel_check: Optional[Callable[[], bool]]) -> QuotaSnapshot:
+        if cancel_check and cancel_check():
+            return self._cli_failure("额度查询已取消。")
+        try:
+            executable = self._find_cli_executable()
+        except (psutil.Error, OSError):
+            executable = None
+        if not executable:
+            return self._cli_failure("无法找到正在运行的 Antigravity CLI，请确认 CLI 安装完整后重试。")
+        process = None
+        try:
+            # 仅调用 CLI 内置的额度命令，不发起模型对话；输出不写日志以避免泄露账号信息。
+            process = subprocess.Popen(
+                [executable, "-p", "/usage", "--output-format", "json", "--print-timeout", "20s"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace", **subprocess_hidden_kwargs(),
+            )
+            deadline = time.monotonic() + 30.0
+            while True:
+                if cancel_check and cancel_check():
+                    return self._cli_failure("额度查询已取消。")
+                if time.monotonic() >= deadline:
+                    return self._cli_failure("Antigravity CLI 额度查询超时，请稍后重试。")
+                try:
+                    output, _ = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            try:
+                body = json.loads(output)
+            except ValueError:
+                return self._cli_failure("Antigravity CLI 返回了无法识别的额度数据，请更新 CLI 后重试。")
+            if process.returncode != 0 or not isinstance(body, dict) or body.get("status") != "SUCCESS":
+                return self._cli_failure("Antigravity CLI 额度查询失败，请在 CLI 中确认 /usage 可正常使用后重试。")
+            response = body.get("response")
+            groups = self._parse_cli_usage(response) if isinstance(response, str) else []
+            if not groups:
+                return self._cli_failure("Antigravity CLI 未返回可用的额度数据，请更新 CLI 后重试。")
+            return QuotaSnapshot(
+                True, None, "Antigravity CLI", None, None, None,
+                datetime.now(timezone.utc), groups,
+            )
+        except OSError:
+            return self._cli_failure("无法启动 Antigravity CLI 额度查询，请检查安装后重试。")
+        finally:
+            # 取消或超时仅回收本次查询进程，不影响用户正在使用的 CLI 会话。
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=2.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+
+    def fetch_quota(self, cancel_check: Optional[Callable[[], bool]] = None) -> QuotaSnapshot:
+        if cancel_check and cancel_check():
+            return self._cli_failure("额度查询已取消。")
+        # 桌面端优先；只有 CLI 独立运行时才委托它查询，保持原桌面端路径不变。
+        if (
+            not FollowedAppProbe.sample_antigravity_activity().is_running
+            and FollowedAppProbe.sample_antigravity_cli_activity().is_running
+        ):
+            return self._fetch_cli_quota(cancel_check)
         sources = self._discover_sources()
         if not sources:
             AppLogger.warn("Quota", "未检测到 Antigravity 语言服务器")
             return QuotaSnapshot(
                 False,
-                "未检测到 Antigravity 的额度服务。请先打开 Antigravity 桌面端或 IDE 后再查看额度。",
+                "未检测到 Antigravity 的额度服务。请先打开 Antigravity 桌面端、CLI 或 IDE 后再查看额度。",
                 None,
                 None,
                 None,
