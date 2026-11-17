@@ -10,6 +10,10 @@
 | :---: | :---: |
 | ![角色档案与设定](preview/images/preview-profile.png) | ![Q版表情动作图鉴](preview/images/preview-gallery.png) |
 
+| 聊天模式 | Antigravity 实时对话 |
+| :---: | :---: |
+| ![聊天模式预览](preview/images/preview-chat-mode.png) | ![Antigravity 实时对话预览](preview/images/preview-chat-sync.png) |
+
 | Antigravity 剩余额度看板 |
 | :---: |
 | ![Antigravity 剩余额度看板](preview/images/preview-quota.png) |
@@ -31,7 +35,7 @@
 - **Antigravity 额度查询**：一键呼出额度与重置时间，低余量提醒，可复制摘要。
 - **Antigravity 应用对话同步**：开启后 Antigravity 应用的实时对话消息会显示在桌宠气泡里。
 - **角色档案**：内置角色图鉴与档案，支持自定义角色设定。
-- **聊天模式**：桌面右键或托盘菜单一键打开聊天窗口，支持多轮对话、历史会话与窗口尺寸切换；默认离线陪伴，填入 Gemini API Key 后可接入官方 Gemini AI 模型聊天，并随时切换模型。
+- **聊天模式**：支持离线陪伴、Gemini 在线对话、历史会话、模型切换及 Antigravity 实时对话同步。
 
 ## 配置与清理
 
