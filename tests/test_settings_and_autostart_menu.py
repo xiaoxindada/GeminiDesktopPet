@@ -84,11 +84,12 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     coord._pet.show()
                     app.processEvents()
 
-                    # 桌面菜单：固定/打盹/气泡/同步/缩放/日志/角色/更新/设置/退出
+                    # 桌面菜单：聊天/固定/打盹/气泡/同步/缩放/日志/角色/更新/设置/退出
                     pet_menu_texts = [
                         act.text() for act in coord._pet._context_menu.actions() if not act.isSeparator()
                     ]
                     for expected in (
+                        "聊天模式",
                         "固定（自由漫步）",
                         "打盹模式",
                         "自动弹出对话气泡",
@@ -102,6 +103,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                         "设置",
                         "退出",
                         "查看反重力额度",
+                        "回到屏幕右下角",
                     ):
                         self.assertTrue(any(expected in text for text in pet_menu_texts), expected)
                     for removed in ("开机自动启动", "反重力悬浮", "贴靠屏幕边缘", "动作表现", "鼠标穿透"):
@@ -111,15 +113,17 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     tray_texts = [
                         act.text() for act in coord._tray._menu.actions() if not act.isSeparator()
                     ]
-                    for dedicated in ("呼唤 Gemini 娘", "聊天模式", "回到屏幕右下角"):
+                    for dedicated in ("呼唤 Gemini 娘",):
                         self.assertTrue(any(dedicated in text for text in tray_texts), dedicated)
                     for shared in (
+                        "聊天模式",
                         "固定（自由漫步）",
                         "打盹模式",
                         "自动弹出对话气泡",
                         "实时同步反重力对话",
                         "记录运行日志",
                         "查看反重力额度",
+                        "回到屏幕右下角",
                         "自定义角色设定",
                         "角色档案",
                         "检查更新",
@@ -129,6 +133,17 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                         pet_act = self._find_action(coord._pet._context_menu, shared)
                         tray_act = self._find_action(coord._tray._menu, shared)
                         self.assertIs(pet_act, tray_act, shared)
+
+                    # 共用部分的顺序必须与桌面菜单完全一致，托盘专用项只放在最前
+                    pet_order = [
+                        act.text()
+                        for act in coord._pet._context_menu.actions()
+                        if not act.isSeparator()
+                    ]
+                    tray_order = [
+                        act.text() for act in coord._tray._menu.actions() if not act.isSeparator()
+                    ]
+                    self.assertEqual(tray_order[1:], pet_order)
 
                     # 缩放子菜单的壳各自创建，但四个缩放动作是同一批 QAction
                     for owner in (coord._pet._context_menu, coord._tray._menu):

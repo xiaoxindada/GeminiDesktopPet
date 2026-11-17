@@ -194,8 +194,6 @@ class PetApplicationCoordinator(QObject):
 
         # TrayIconService signals（其余菜单项直接复用桌面右键菜单的 QAction）
         self._tray.show_and_greet_requested.connect(self._wake_from_tray_or_greet)
-        self._tray.open_chat_requested.connect(self._open_chat_from_tray)
-        self._tray.reset_position_requested.connect(self._reset_position_from_tray)
 
     # ==================== IPC Event Listener ====================
 
@@ -286,17 +284,6 @@ class PetApplicationCoordinator(QObject):
     def _wake_from_tray_or_greet(self) -> None:
         self._pet.show_and_greet()
         self._pet.raise_()
-
-    def _open_chat_from_tray(self) -> None:
-        if not self._pet.isVisible():
-            self._pet.show()
-        self._pet.open_chat_dialog()
-
-    def _reset_position_from_tray(self) -> None:
-        if not self._pet.isVisible():
-            self._pet.show()
-        self._pet.move_to_bottom_right_corner()
-        self._pet.show_and_greet("回到桌面右下角就位啦喵✦")
 
     def _set_auto_start(self, enabled: bool) -> None:
         ok = SettingsService.set_startup_enabled(bool(enabled))

@@ -984,6 +984,12 @@ class PetWindow(QWidget):
             action.triggered.connect(lambda _checked=False, m=mode: self._set_style_mode(m))
             self._style_actions[mode] = action
 
+        # 聊天模式入口：桌面右键与托盘共用同一个 QAction，避免两套菜单文案走样
+        self._act_chat = self._new_menu_action(
+            "💬 聊天模式 / 选模型对话",
+            slot=self.open_chat_mode,
+            tip="打开 AI 聊天模式（支持多轮对话与模型选择）",
+        )
         self._act_pin_on_desktop = self._new_menu_action(
             "📌 固定（自由漫步）",
             checkable=True,
@@ -1016,6 +1022,9 @@ class PetWindow(QWidget):
         )
         self._act_quota = self._new_menu_action(
             "📊 查看反重力额度", slot=self.open_quota_requested
+        )
+        self._act_reset_position = self._new_menu_action(
+            "📍 回到屏幕右下角", slot=self.reset_to_bottom_right
         )
         self._act_editor = self._new_menu_action(
             "✏️ 自定义角色设定...", slot=self.open_character_editor_requested
@@ -1053,7 +1062,9 @@ class PetWindow(QWidget):
     def shared_menu_spec(self) -> list[object]:
         """桌面菜单与托盘菜单共用的动作清单（QAction 实例由两边共享）。"""
         return [
+            self._act_chat,
             self._act_pin_on_desktop,
+            self._act_reset_position,
             self._act_doze,
             self._act_show_bubble,
             self._act_sync_chat,
@@ -1554,6 +1565,13 @@ class PetWindow(QWidget):
         self.move(int(round(new_x)), int(round(new_y)))
         self._update_dock_alignment()
         self._settings_service.save(self._settings)
+
+    def reset_to_bottom_right(self) -> None:
+        """从桌面/托盘菜单归位到右下角并打个招呼。"""
+        if not self.isVisible():
+            self.show()
+        self.move_to_bottom_right_corner()
+        self.show_and_greet("回到桌面右下角就位啦喵✦")
 
     def _reanchor_docked_position(self) -> None:
         if self._settings.docked_side == DockSide.NONE:
@@ -3334,6 +3352,13 @@ class PetWindow(QWidget):
         ):
             self._hide_speech_bubble()
             self._relayout_stage_top()
+
+    def open_chat_mode(self) -> None:
+        """从桌面/托盘菜单进入聊天模式：先保证桌宠可见，再展开聊天面板。"""
+        if not self.isVisible():
+            self.show()
+        self.open_chat_dialog()
+        self.raise_()
 
     def open_chat_dialog(self) -> None:
         self._is_chat_open = True

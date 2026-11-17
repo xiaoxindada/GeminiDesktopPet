@@ -17,8 +17,6 @@ class TrayIconService(QObject):
     """封装 QSystemTrayIcon 与 Starlight 深色托盘菜单。"""
 
     show_and_greet_requested = Signal()
-    open_chat_requested = Signal()
-    reset_position_requested = Signal()
 
     def __init__(
         self,
@@ -39,16 +37,13 @@ class TrayIconService(QObject):
         if menu_qss:
             self._menu.setStyleSheet(menu_qss)
 
-        # 托盘专用操作：唤醒、聊天、额度与归位
+        # 托盘专用操作只保留唤醒；聊天模式等其余入口复用桌面右键菜单的动作
         greet_act = QAction("✦ 呼唤 Gemini 娘", self._menu)
         bold_font = QFont(self._menu.font())
         bold_font.setBold(True)
         greet_act.setFont(bold_font)
         greet_act.triggered.connect(self.show_and_greet_requested)
         self._menu.addAction(greet_act)
-
-        self._add_action("💬 聊天模式 / 选模型对话", self.open_chat_requested.emit)
-        self._add_action("📍 回到屏幕右下角", self.reset_position_requested.emit)
 
         # 桌面右键菜单的同一批 QAction，勾选状态与文本自动同步
         if shared_menu_spec is not None:
@@ -62,12 +57,6 @@ class TrayIconService(QObject):
         self._tray.setContextMenu(self._menu)
         self._tray.activated.connect(self._on_activated)
         self._tray.show()
-
-    def _add_action(self, text: str, cb: Callable[[], None]) -> QAction:
-        act = QAction(text, self._menu)
-        act.triggered.connect(lambda _checked=False, fn=cb: fn())
-        self._menu.addAction(act)
-        return act
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
