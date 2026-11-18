@@ -391,7 +391,7 @@ class TestChatAndSettings(unittest.TestCase):
                 app.processEvents()
 
     def test_bubble_setting_belongs_to_behavior_page(self) -> None:
-        """自动弹出对话气泡属于行为互动，不应留在通用设置里。"""
+        """弹出默认气泡属于行为互动，不应留在通用设置里。"""
         app = self._ensure_app()
         with tempfile.TemporaryDirectory() as tmp:
             svc = SettingsService(tmp)
@@ -412,7 +412,7 @@ class TestChatAndSettings(unittest.TestCase):
                 bubble_row = next(
                     row
                     for row, _text, _getter in win._summary_rows
-                    if any(lbl.text() == "自动弹出对话气泡" for lbl in row.findChildren(QLabel))
+                    if any(lbl.text() == "弹出默认气泡" for lbl in row.findChildren(QLabel))
                 )
                 self.assertEqual(bubble_row._target, SettingsWindow._PAGE_BEHAVIOR)
             finally:

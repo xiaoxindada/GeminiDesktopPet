@@ -191,7 +191,7 @@ class PetSettings:
     sound_enabled: bool = True
     particles_enabled: bool = True
     system_monitor_enabled: bool = True
-    show_speech_bubble: bool = False
+    show_speech_bubble: bool = True
     follow_antigravity: bool = True
     follow_antigravity_cli: bool = True
     follow_gemini_app: bool = True

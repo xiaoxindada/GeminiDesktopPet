@@ -1106,7 +1106,7 @@ class PetWindow(QWidget):
             tip="原地睡觉待机，停止漫步与闲聊",
         )
         self._act_show_bubble = self._new_menu_action(
-            "💭 自动弹出对话气泡",
+            "💭 弹出默认气泡",
             checkable=True,
             slot=self._on_menu_show_speech_bubble,
             tip="关闭后仅在聊天或重要提示时显示气泡",
