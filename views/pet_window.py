@@ -3730,10 +3730,10 @@ class PetWindow(QWidget):
                     self._show_sync_chat_session()
         if self._is_chat_open or not self.isVisible():
             return
-        # 思考、工具和用户消息仍在等回复。回复续写会重新开始关闭倒计时。
-        self._sync_waiting_for_reply = event.kind != "error" and not (
-            event.role == "assistant" and event.kind == "message"
-        )
+        if event.role == "user":
+            self._sync_thinking_pinned = False
+        # 仅在思考或工具执行中保持常亮；新一轮用户消息、助手回复与错误提示按空闲倒计时自动关闭。
+        self._sync_waiting_for_reply = event.kind in ("thinking", "tool")
         if not self._sync_thinking_pinned or event.kind == "thinking":
             self._sync_thinking_visible = event.kind == "thinking"
             self._is_forced_bubble_active = False

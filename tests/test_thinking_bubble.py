@@ -61,6 +61,30 @@ def test_sync_bubble_stays_in_place_and_preserves_scroll_position(tmp_path):
         pet.close()
 
 
+def test_new_turn_user_sync_message_auto_closes_without_waiting_for_thinking(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    settings = PetSettings(auto_walk=False, chat_sync_enabled=False, show_speech_bubble=False)
+    service = Mock(settings_path=tmp_path / "settings.json")
+    pet = PetWindow(settings, service, SpriteManager(), SoundService(), SystemMonitorService(), GeminiChatService())
+    try:
+        pet.show()
+        pet._frame_timer.stop()
+
+        # 新一轮用户消息到达时应立刻启动 3 秒空闲关闭倒计时，无需等待思考开始或完成。
+        pet._show_sync_event(SyncEvent("user", "新一轮提问", "message"))
+        app.processEvents()
+        assert pet._speech_bubble.isVisible()
+        assert pet._bubble_text_lbl.text() == "你：新一轮提问"
+        assert not pet._sync_waiting_for_reply
+        assert pet._bubble_timer.isActive()
+        assert pet._bubble_timer.interval() == 3000
+
+        QTest.qWait(3150)
+        assert not pet._speech_bubble.isVisible()
+    finally:
+        pet.close()
+
+
 def test_long_thinking_keeps_reading_position_until_final_reply_idle_timeout(tmp_path):
     app = QApplication.instance() or QApplication([])
     settings = PetSettings(auto_walk=False, chat_sync_enabled=False)
