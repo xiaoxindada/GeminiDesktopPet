@@ -12,7 +12,6 @@ from models.app_version import AppVersion
 from services.app_follow_service import AppFollowService
 from services.app_logger import AppLogger
 from services.settings_service import SettingsService
-from services.update_service import UpdateService
 
 
 def _handle_apply_update(args: list[str]) -> int:
@@ -30,6 +29,8 @@ def _handle_apply_update(args: list[str]) -> int:
     except ValueError:
         parent_pid = 0
     target_dir = args[idx + 2]
+
+    from services.update_service import UpdateService
 
     settings = SettingsService().load()
     AppLogger.initialize(settings.enable_runtime_log)
@@ -92,8 +93,10 @@ def main(args: Optional[list[str]] = None) -> int:
         return _handle_disable_follow()
 
     if "--follow-watcher" in low:
-        from_exit = "--from-exit" in low
-        return AppFollowService.run_follow_watcher(from_exit)
+        from follow_watcher import parse_watcher_args
+
+        from_exit, target_path = parse_watcher_args(argv)
+        return AppFollowService.run_follow_watcher(from_exit, target_path=target_path)
 
     # 通过 console/gui entry point 启动时也补齐 freeze_support 与高 DPI 变量
     multiprocessing.freeze_support()

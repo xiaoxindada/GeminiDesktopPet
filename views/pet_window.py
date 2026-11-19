@@ -77,22 +77,17 @@ from models import (
     normalize_thinking_level,
     resolve_effective_thinking_level,
 )
-from services import (
-    AppLogger,
-    ChatReply,
-    GeminiChatService,
-    PetSoundEffect,
-    SettingsService,
-    SoundService,
-    SystemMetrics,
-    SystemMonitorService,
-)
 from services.antigravity_chat_collector import AntigravityChatCollector, SyncEvent
 from services.antigravity_chat_sync_service import AntigravityChatSyncService
+from services.app_logger import AppLogger
 from services.chat_history_service import ChatHistoryService
 from services.chat_sync_state import ChatSyncState
+from services.gemini_chat_service import ChatReply, GeminiChatService
+from services.settings_service import SettingsService
 from services.shared_menu import MENU_SEPARATOR, populate_shared_menu
+from services.sound_service import PetSoundEffect, SoundService
 from services.sprite_manager import SpriteManager, WalkRigAssets
+from services.system_monitor_service import SystemMetrics, SystemMonitorService
 from themes import STARLIGHT_MENU_QSS
 
 

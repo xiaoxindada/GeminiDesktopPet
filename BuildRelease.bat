@@ -42,11 +42,12 @@ set "OUTPUT_BASE=%REPO_ROOT%\out"
 set "STAGE_DIR=%OUTPUT_BASE%\GeminiDesktopPet"
 set "BUILD_WORK=%REPO_ROOT%\build\pyinstaller"
 set "PYINSTALLER_CONFIG_DIR=%BUILD_WORK%\cache"
+set "WATCHER_DIR=%BUILD_WORK%\watcher"
 set "CLEAN_DIR=%BUILD_WORK%\helper"
 set "ICON=%REPO_ROOT%\Assets\AppIcon.ico"
 set "SEVENZA=%REPO_ROOT%\tools\7za\7za.exe"
 
-echo [1/5] Preparing staging folders...
+echo [1/6] Preparing staging folders...
 if not exist "%OUTPUT_BASE%\" mkdir "%OUTPUT_BASE%"
 if not exist "%BUILD_WORK%\spec\" mkdir "%BUILD_WORK%\spec"
 
@@ -62,7 +63,7 @@ set "TEMP_ZIP=%ZIP_PATH%.tmp"
 if exist "%TEMP_ZIP%" del /q "%TEMP_ZIP%"
 if exist "%TEMP_ZIP%" goto failed
 
-echo [2/5] Building GeminiDesktopPet.exe (--onedir, --windowed)...
+echo [2/6] Building GeminiDesktopPet.exe (--onedir, --windowed)...
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --clean ^
@@ -93,8 +94,39 @@ if errorlevel 1 (
     goto finish
 )
 
+rem Lightweight standalone follow watcher copied to user config dir at runtime so the app folder is never locked.
+echo [3/6] Building FollowWatcher.exe (--onefile, --windowed)...
+"%PYTHON_EXE%" -m PyInstaller ^
+    --noconfirm ^
+    --clean ^
+    --noupx ^
+    --onefile ^
+    --windowed ^
+    --distpath "%WATCHER_DIR%" ^
+    --workpath "%BUILD_WORK%\watcher_work" ^
+    --specpath "%BUILD_WORK%\spec" ^
+    --name FollowWatcher ^
+    --icon "%ICON%" ^
+    --exclude-module tkinter ^
+    --exclude-module PySide6 ^
+    --exclude-module shiboken6 ^
+    --exclude-module google ^
+    --exclude-module PIL ^
+    --exclude-module requests ^
+    --exclude-module urllib3 ^
+    --exclude-module certifi ^
+    --exclude-module charset_normalizer ^
+    --exclude-module idna ^
+    --exclude-module unittest ^
+    "%REPO_ROOT%\follow_watcher.py"
+if errorlevel 1 (
+    echo [ERROR] FollowWatcher build failed!
+    set "EXIT_CODE=1"
+    goto finish
+)
+
 rem The helper is copied as a single executable, so it must carry its own runtime.
-echo [3/5] Building CleanConfig.exe (--onefile, console)...
+echo [4/6] Building CleanConfig.exe (--onefile, console)...
 "%PYTHON_EXE%" -m PyInstaller ^
     --noconfirm ^
     --clean ^
@@ -110,6 +142,11 @@ echo [3/5] Building CleanConfig.exe (--onefile, console)...
     --exclude-module shiboken6 ^
     --exclude-module google ^
     --exclude-module PIL ^
+    --exclude-module requests ^
+    --exclude-module urllib3 ^
+    --exclude-module certifi ^
+    --exclude-module charset_normalizer ^
+    --exclude-module idna ^
     --exclude-module unittest ^
     "%REPO_ROOT%\clean_config.py"
 if errorlevel 1 (
@@ -118,7 +155,13 @@ if errorlevel 1 (
     goto finish
 )
 
-echo [4/5] Assembling release stage...
+echo [5/6] Assembling release stage...
+copy /Y "%WATCHER_DIR%\FollowWatcher.exe" "%STAGE_DIR%\_internal\FollowWatcher.exe" >nul
+if errorlevel 1 (
+    echo [ERROR] Failed to place FollowWatcher.exe into stage!
+    set "EXIT_CODE=1"
+    goto finish
+)
 copy /Y "%CLEAN_DIR%\CleanConfig.exe" "%STAGE_DIR%\CleanConfig.exe" >nul
 if errorlevel 1 (
     echo [ERROR] Failed to place CleanConfig.exe into stage!
@@ -130,7 +173,7 @@ for %%F in (README.md CREDITS.md LICENSE) do (
     if errorlevel 1 goto failed
 )
 
-echo [5/5] Creating release ZIP via 7za...
+echo [6/6] Creating release ZIP via 7za...
 if not exist "%SEVENZA%" (
     echo [ERROR] 7za not found: %SEVENZA%
     set "EXIT_CODE=1"

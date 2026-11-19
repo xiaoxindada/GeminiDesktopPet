@@ -70,6 +70,9 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
         ):
             startup_dir = Path(tmp_startup)
             fake_settings = PetSettings()
+            main_mutex = MagicMock()
+            order: list[str] = []
+            main_mutex.release.side_effect = lambda: order.append("release_main_mutex")
             with (
                 patch.dict(os.environ, {"USERPROFILE": tmp_home, "APPDATA": tmp_appdata}),
                 patch("services.win32_ipc.get_windows_startup_dir", return_value=startup_dir),
@@ -77,10 +80,18 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                 patch("services.settings_service.SettingsService.load", return_value=fake_settings),
                 patch("services.settings_service.SettingsService.save", return_value=None),
                 patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
-                patch("services.app_follow_service.AppFollowService.stop_follow_watcher") as stop_follow,
+                patch(
+                    "services.app_follow_service.AppFollowService.stop_follow_watcher",
+                    side_effect=lambda *a, **kw: order.append("stop_follow_watcher"),
+                ) as stop_follow,
+                patch(
+                    "services.app_follow_service.AppFollowService.spawn_follow_watcher",
+                    side_effect=lambda from_exit=False: order.append(f"spawn_follow_watcher:{from_exit}") or True,
+                ) as spawn_follow,
+                patch("services.app_follow_service.AppFollowService.is_stop_all_signaled", return_value=False),
                 patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
             ):
-                coord = PetApplicationCoordinator(app, [], MagicMock())
+                coord = PetApplicationCoordinator(app, [], main_mutex)
                 try:
                     coord._pet.show()
                     app.processEvents()
@@ -241,12 +252,17 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     avail = (win.screen() or app.primaryScreen()).availableGeometry()
                     self.assertTrue(avail.intersects(win.frameGeometry()))
 
-                    self._find_action(coord._tray._menu, "退出").trigger()
+                    self._find_action(coord._pet._context_menu, "退出").trigger()
                     stop_follow.assert_called_once_with()
+                    spawn_follow.assert_called_once_with(from_exit=True)
+                    self.assertEqual(
+                        order,
+                        ["stop_follow_watcher", "release_main_mutex", "spawn_follow_watcher:True"],
+                    )
                     self.assertTrue(fake_settings.follow_antigravity)
                     self.assertFalse(coord._pet.isVisible())
                 finally:
-                    coord.gracefully_exit()
+                    coord.gracefully_exit(allow_respawn_watcher=False)
                     app.processEvents()
 
     def test_doze_mode_shared_menu_and_settings_sync(self) -> None:
@@ -314,7 +330,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     self.assertTrue(pet_doze.isChecked())
                     self.assertTrue(win._chk_doze.isChecked())
                 finally:
-                    coord.gracefully_exit()
+                    coord.gracefully_exit(allow_respawn_watcher=False)
                     app.processEvents()
 
     def test_quota_window_places_beside_head_and_auto_closes(self) -> None:
@@ -415,7 +431,7 @@ class TestSettingsAndAutostartMenu(unittest.TestCase):
                     assert coord._quota_win is not None
                     self.assertTrue(coord._quota_win._auto_close_enabled)
                 finally:
-                    coord.gracefully_exit()
+                    coord.gracefully_exit(allow_respawn_watcher=False)
                     app.processEvents()
 
 

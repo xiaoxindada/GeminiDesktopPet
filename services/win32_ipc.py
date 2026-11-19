@@ -429,13 +429,19 @@ def set_startup_entry_enabled(
     description: str = "",
     icon_path: Optional[str] = None,
     working_dir: Optional[str] = None,
+    target_override: Optional[str] = None,
 ) -> bool:
     """启用或取消用户启动目录快捷方式（.lnk）。"""
     shortcut_path = get_windows_startup_dir() / shortcut_name
     if enable:
-        cmd = get_launch_command(args, gui=True)
-        target = cmd[0]
-        arg_str = subprocess.list2cmdline(cmd[1:]) if len(cmd) > 1 else ""
+        if target_override:
+            target = str(target_override)
+            arg_list = list(args)
+            arg_str = subprocess.list2cmdline(arg_list) if arg_list else ""
+        else:
+            cmd = get_launch_command(args, gui=True)
+            target = cmd[0]
+            arg_str = subprocess.list2cmdline(cmd[1:]) if len(cmd) > 1 else ""
         wd = working_dir or str(Path(target).resolve().parent)
         return create_windows_shortcut(
             shortcut_path,

@@ -40,7 +40,7 @@ gemini-desktop-pet-cli = "cli:main"
 gemini-desktop-pet-clean = "clean_config:main"
 
 [tool.setuptools]
-py-modules = ["app", "clean_config", "cli", "main"]
+py-modules = ["app", "clean_config", "cli", "follow_watcher", "main"]
 
 [tool.setuptools.dynamic]
 version = { attr = "models.app_version.APP_VERSION" }

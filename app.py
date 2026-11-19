@@ -18,21 +18,18 @@ from models import (
     PetState,
     PetStyleMode,
 )
-from services import (
-    AppFollowService,
-    AppLogger,
-    CharacterProfileService,
-    GeminiChatService,
-    SettingsService,
-    SoundService,
-    SystemMonitorService,
-    UpdateCheckResult,
-    UpdateService,
-)
 from services.antigravity_quota_service import AntigravityQuotaService
 from services.antigravity_watcher_service import AntigravityWatcherService
+from services.app_follow_service import AppFollowService
+from services.app_logger import AppLogger
+from services.character_profile_service import CharacterProfileService
+from services.gemini_chat_service import GeminiChatService
+from services.settings_service import SettingsService
+from services.sound_service import SoundService
 from services.sprite_manager import SpriteManager
+from services.system_monitor_service import SystemMonitorService
 from services.tray_icon_service import TrayIconService
+from services.update_service import UpdateCheckResult, UpdateService
 from services.win32_ipc import (
     bring_window_to_front,
     CLOSE_EVENT_NAME,
@@ -136,7 +133,7 @@ class PetApplicationCoordinator(QObject):
             self._on_external_wake, Qt.ConnectionType.QueuedConnection
         )
         self._ipc_bridge.close_requested.connect(
-            self.gracefully_exit, Qt.ConnectionType.QueuedConnection
+            self._on_external_close, Qt.ConnectionType.QueuedConnection
         )
         self._start_ipc_listener()
 
@@ -196,7 +193,7 @@ class PetApplicationCoordinator(QObject):
         self._pet.open_update_requested.connect(self.open_update_window)
         self._pet.settings_synced.connect(self._sync_all_views_from_settings)
         self._pet.visual_bounds_changed.connect(self._keep_quota_window_clear)
-        self._pet.exit_requested.connect(self.gracefully_exit)
+        self._pet.exit_requested.connect(self._on_user_exit)
 
         # TrayIconService signals（其余菜单项直接复用桌面右键菜单的 QAction）
         self._tray.show_and_greet_requested.connect(self._wake_from_tray_or_greet)
@@ -258,6 +255,14 @@ class PetApplicationCoordinator(QObject):
             self._pet.show_and_greet()
             self._pet.raise_()
             self._pet.activateWindow()
+
+    @Slot()
+    def _on_external_close(self) -> None:
+        self.gracefully_exit(allow_respawn_watcher=True)
+
+    @Slot()
+    def _on_user_exit(self) -> None:
+        self.gracefully_exit(allow_respawn_watcher=True)
 
     # ==================== Antigravity / Gemini Watcher ====================
 
@@ -417,7 +422,8 @@ class PetApplicationCoordinator(QObject):
                 update_service=self._update_service,
                 settings_service=self._settings_service,
                 settings=self._settings,
-                on_request_graceful_exit=self.gracefully_exit,
+                on_request_graceful_exit=lambda: self.gracefully_exit(allow_respawn_watcher=False),
+                before_updater_cleanup=self._before_updater_cleanup,
                 initial_result=self._latest_update_result,
             )
         self._show_and_focus(self._update_win)
@@ -490,12 +496,15 @@ class PetApplicationCoordinator(QObject):
 
     # ==================== Cleanup & Exit ====================
 
-    @Slot()
-    def gracefully_exit(self) -> None:
+    def _before_updater_cleanup(self) -> None:
+        # 安装覆盖更新前关闭后台守护，避免占用 EXE/DLL 句柄
+        self._follow_service.stop_follow_watcher(2500)
+
+    def gracefully_exit(self, allow_respawn_watcher: bool = True) -> None:
         if self._is_exiting:
             return
         self._is_exiting = True
-        AppLogger.info("App", "Graceful exit started.")
+        AppLogger.info("App", f"Graceful exit started (allow_respawn_watcher={allow_respawn_watcher}).")
 
         try:
             windows = (
@@ -542,8 +551,17 @@ class PetApplicationCoordinator(QObject):
             self._sound.dispose()
         finally:
             self._follow_service.clear_main_pid(os.getpid())
+            # 必须先释放主实例互斥体再交接后台守护，避免新守护误判主程序仍在运行而立即退出。
             self._main_mutex.release()
-            self._app.quit()
+            try:
+                if (
+                    allow_respawn_watcher
+                    and self._follow_service.any_follow_enabled(self._settings)
+                    and not self._follow_service.is_stop_all_signaled()
+                ):
+                    self._follow_service.spawn_follow_watcher(from_exit=True)
+            finally:
+                self._app.quit()
 
 
 def run_gui_app(args: list[str]) -> int:

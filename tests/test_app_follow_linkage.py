@@ -297,3 +297,269 @@ def test_cli_wake_signal_reaches_existing_main_instance(monkeypatch) -> None:
     coord._ipc_bridge.close_requested.emit.assert_called_once_with()
     for event in events:
         event.close.assert_called_once_with()
+
+
+def test_manual_exit_releases_main_mutex_before_handoff_and_wakes_on_relaunch(tmp_path) -> None:
+    import uuid
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from app import PetApplicationCoordinator
+    from services.app_follow_service import AppFollowService, FollowWatcherOptions
+    from services.settings_service import SettingsService
+    from services.win32_ipc import Win32Event, Win32Mutex
+
+    suffix = uuid.uuid4().hex
+    main_mutex_name = f"GeminiDesktopPet_TestMain_{suffix}"
+    watcher_mutex_name = f"GeminiDesktopPet_TestWatcher_{suffix}"
+    stop_watcher_name = f"GeminiDesktopPet_TestStopWatcher_{suffix}"
+    stop_all_name = f"GeminiDesktopPet_TestStopAll_{suffix}"
+
+    settings = PetSettings(
+        follow_antigravity=True,
+        follow_antigravity_cli=True,
+        follow_gemini_app=True,
+    )
+    SettingsService(tmp_path).save(settings)
+
+    main_mutex = Win32Mutex(main_mutex_name)
+    assert main_mutex.acquire()
+
+    woken_args: list[str] = []
+    # 退出时目标应用仍在运行；随后关闭并再次启动，后台守护应只在再次启动时唤醒。
+    ag_states = iter([
+        _snapshot(True, {100}, {100}),
+        _snapshot(True, {100}, {100}),
+        _snapshot(False),
+        _snapshot(True, {200}, {200}),
+    ])
+
+    def fake_spawn_watcher(from_exit: bool) -> bool:
+        assert from_exit is True
+        # 交接时主实例互斥体必须已释放，否则新拉起的守护会立刻退出。
+        assert not AppFollowService.is_main_instance_running(main_mutex_name)
+
+        def wake_and_stop(arg_str: str) -> bool:
+            woken_args.append(arg_str)
+            Win32Event.open_and_set(stop_watcher_name)
+            return True
+
+        options = FollowWatcherOptions(
+            from_exit=from_exit,
+            custom_settings_folder=str(tmp_path),
+            main_mutex_name=main_mutex_name,
+            watcher_mutex_name=watcher_mutex_name,
+            stop_watcher_event_name=stop_watcher_name,
+            stop_all_event_name=stop_all_name,
+            poll_interval_ms=15,
+            sample_antigravity=lambda: next(ag_states, _snapshot(True, {200}, {200})),
+            sample_gemini=lambda: _snapshot(False),
+            sample_antigravity_cli=lambda: _snapshot(False),
+            custom_wake_launcher=wake_and_stop,
+        )
+        assert AppFollowService.run_follow_watcher_core(options) == 0
+        return True
+
+    follow_service = SimpleNamespace(
+        stop_follow_watcher=Mock(),
+        clear_main_pid=Mock(),
+        any_follow_enabled=AppFollowService.any_follow_enabled,
+        is_stop_all_signaled=lambda: False,
+        spawn_follow_watcher=Mock(side_effect=fake_spawn_watcher),
+    )
+    coord = SimpleNamespace(
+        _is_exiting=False,
+        _shutdown_workers_timed_out=False,
+        _quota_win=None,
+        _profile_win=None,
+        _editor_win=None,
+        _settings_win=None,
+        _update_win=None,
+        _pet=Mock(findChildren=Mock(return_value=[])),
+        findChildren=Mock(return_value=[]),
+        _ipc_stop_flag=Mock(),
+        _ipc_stop_event=Mock(),
+        _ipc_thread=None,
+        _follow_service=follow_service,
+        _watcher=Mock(),
+        _tray=Mock(),
+        _sound=Mock(),
+        _main_mutex=main_mutex,
+        _settings=settings,
+        _app=Mock(),
+    )
+    coord.gracefully_exit = lambda allow_respawn_watcher=True: PetApplicationCoordinator.gracefully_exit(
+        coord, allow_respawn_watcher=allow_respawn_watcher
+    )
+
+    try:
+        PetApplicationCoordinator._on_user_exit(coord)
+        follow_service.spawn_follow_watcher.assert_called_once_with(from_exit=True)
+        assert woken_args == ["--woken-by:antigravity"]
+        coord._app.quit.assert_called_once_with()
+    finally:
+        main_mutex.release()
+
+
+def test_exit_skips_respawn_when_follow_disabled_updating_or_stop_all() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from app import PetApplicationCoordinator
+    from services.app_follow_service import AppFollowService
+
+    cases = [
+        (PetSettings(follow_antigravity=False, follow_antigravity_cli=False, follow_gemini_app=False), True, False),
+        (PetSettings(follow_antigravity=True, follow_antigravity_cli=True, follow_gemini_app=True), False, False),
+        (PetSettings(follow_antigravity=True, follow_antigravity_cli=True, follow_gemini_app=True), True, True),
+    ]
+    for settings, allow_respawn, stop_all in cases:
+        follow_service = SimpleNamespace(
+            stop_follow_watcher=Mock(),
+            clear_main_pid=Mock(),
+            any_follow_enabled=AppFollowService.any_follow_enabled,
+            is_stop_all_signaled=Mock(return_value=stop_all),
+            spawn_follow_watcher=Mock(return_value=True),
+        )
+        coord = SimpleNamespace(
+            _is_exiting=False,
+            _shutdown_workers_timed_out=False,
+            _quota_win=None,
+            _profile_win=None,
+            _editor_win=None,
+            _settings_win=None,
+            _update_win=None,
+            _pet=Mock(findChildren=Mock(return_value=[])),
+            findChildren=Mock(return_value=[]),
+            _ipc_stop_flag=Mock(),
+            _ipc_stop_event=Mock(),
+            _ipc_thread=None,
+            _follow_service=follow_service,
+            _watcher=Mock(),
+            _tray=Mock(),
+            _sound=Mock(),
+            _main_mutex=Mock(),
+            _settings=settings,
+            _app=Mock(),
+        )
+
+        PetApplicationCoordinator.gracefully_exit(coord, allow_respawn_watcher=allow_respawn)
+        follow_service.stop_follow_watcher.assert_called_once_with()
+        follow_service.spawn_follow_watcher.assert_not_called()
+        coord._main_mutex.release.assert_called_once_with()
+        coord._app.quit.assert_called_once_with()
+
+
+def test_frozen_watcher_stages_to_user_dir_and_decouples_from_app_folder(tmp_path, monkeypatch) -> None:
+    import os
+    from pathlib import Path
+    from unittest.mock import Mock
+    from services import app_follow_service as follow
+    from follow_watcher import parse_watcher_args
+
+    app_dir = tmp_path / "app"
+    internal_dir = app_dir / "_internal"
+    internal_dir.mkdir(parents=True)
+    main_exe = app_dir / "GeminiDesktopPet.exe"
+    main_exe.write_bytes(b"main-exe")
+    bundled_watcher = internal_dir / "FollowWatcher.exe"
+    bundled_watcher.write_bytes(b"watcher-v1")
+    user_cfg = tmp_path / "user_cfg"
+
+    monkeypatch.setattr(follow.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(follow.sys, "executable", str(main_exe))
+    monkeypatch.setattr(follow, "get_app_base_dir", lambda: str(app_dir))
+    monkeypatch.setattr(follow, "get_bundled_resource_dir", lambda: str(internal_dir))
+    monkeypatch.setattr(follow, "get_user_config_dir", lambda: user_cfg)
+
+    cmd, cwd = follow.AppFollowService.get_follow_watcher_launch_spec(from_exit=True)
+    staged_exe = user_cfg / "watcher" / "GeminiDesktopPet_FollowWatcher.exe"
+    assert staged_exe.is_file()
+    assert staged_exe.read_bytes() == b"watcher-v1"
+    assert cmd == [
+        str(staged_exe),
+        "--follow-watcher",
+        "--from-exit",
+        "--target-exe",
+        os.path.abspath(str(main_exe)),
+    ]
+    assert Path(cwd) == staged_exe.parent
+    assert os.path.normcase(cwd) != os.path.normcase(str(app_dir))
+
+    from_exit, parsed_target = parse_watcher_args(cmd[1:])
+    assert from_exit is True
+    assert parsed_target == os.path.abspath(str(main_exe))
+
+    # 覆盖更新后重新同步应更新用户目录中的守护副本
+    bundled_watcher.write_bytes(b"watcher-v2-updated")
+    assert follow.AppFollowService.ensure_staged_watcher_exe() == staged_exe
+    assert staged_exe.read_bytes() == b"watcher-v2-updated"
+
+    # 开机启动快捷方式也应指向用户目录副本并解耦工作目录
+    shortcut_mock = Mock(return_value=True)
+    monkeypatch.setattr(follow, "set_startup_entry_enabled", shortcut_mock)
+    assert follow.AppFollowService.set_follow_watcher_run(True) is True
+    assert shortcut_mock.call_args.kwargs["target_override"] == str(staged_exe)
+    assert shortcut_mock.call_args.kwargs["working_dir"] == str(staged_exe.parent)
+    assert shortcut_mock.call_args.kwargs["args"] == [
+        "--follow-watcher",
+        "--target-exe",
+        os.path.abspath(str(main_exe)),
+    ]
+
+    # 停用联动清理副本
+    follow.AppFollowService.cleanup_staged_watcher_exe()
+    assert not staged_exe.exists()
+
+
+def test_decoupled_watcher_auto_exits_when_target_exe_removed(tmp_path, monkeypatch) -> None:
+    from unittest.mock import Mock
+    from services import app_follow_service as follow
+    from services.settings_service import SettingsService
+
+    settings_dir = tmp_path / "cfg"
+    SettingsService(settings_dir).save(
+        PetSettings(follow_antigravity=True, follow_antigravity_cli=False, follow_gemini_app=False)
+    )
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    target_exe = app_dir / "GeminiDesktopPet.exe"
+    target_exe.write_bytes(b"exe")
+
+    mutex = Mock()
+    monkeypatch.setattr(follow, "Win32Mutex", Mock(return_value=mutex))
+    monkeypatch.setattr(follow, "Win32Event", Mock())
+    monkeypatch.setattr(follow.AppFollowService, "is_stop_all_signaled", lambda *args: False)
+    monkeypatch.setattr(follow.AppFollowService, "is_main_instance_running", lambda *args: False)
+
+    poll_count = 0
+
+    def wait_and_delete(*args, **kwargs):
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 2 and target_exe.exists():
+            target_exe.unlink()
+            app_dir.rmdir()
+        return -1
+
+    monkeypatch.setattr(follow, "wait_any_events", wait_and_delete)
+    launch = Mock()
+    monkeypatch.setattr(follow.AppFollowService, "_launch_wake_target", launch)
+
+    options = follow.FollowWatcherOptions(
+        from_exit=True,
+        target_path=str(target_exe),
+        custom_settings_folder=str(settings_dir),
+        sample_antigravity=lambda: _snapshot(False),
+        sample_gemini=lambda: _snapshot(False),
+        sample_antigravity_cli=lambda: _snapshot(False),
+    )
+    assert follow.AppFollowService.run_follow_watcher_core(options) == 0
+    assert poll_count == 2
+    assert not app_dir.exists()
+    launch.assert_not_called()
+    mutex.release.assert_called_once_with()
+
+    # 目标文件启动时就已不存在时直接退出，不再获取守护锁
+    mutex2 = Mock()
+    monkeypatch.setattr(follow, "Win32Mutex", Mock(return_value=mutex2))
+    assert follow.AppFollowService.run_follow_watcher_core(options) == 0
+    mutex2.acquire.assert_not_called()

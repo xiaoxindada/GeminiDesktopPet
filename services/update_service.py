@@ -20,7 +20,7 @@ import requests
 from models.app_version import AppVersion, get_app_base_dir, get_user_config_dir
 from services.app_follow_service import AppFollowService
 from services.app_logger import AppLogger
-from services.win32_ipc import STOP_WATCHER_EVENT_NAME, subprocess_hidden_kwargs
+from services.win32_ipc import subprocess_hidden_kwargs
 
 DEFAULT_RELEASES_URL = "https://github.com/xiaoxindada/GeminiDesktopPet/releases"
 
@@ -426,7 +426,7 @@ class UpdateService:
             AppLogger.info("Update", f"开始原地更新替换：parentPid={parent_pid}, targetDir={clean_target}")
             stop_all = AppFollowService.acquire_stop_all_signal()
             try:
-                AppFollowService.try_signal_named_event(STOP_WATCHER_EVENT_NAME)
+                AppFollowService.stop_follow_watcher(1500)
                 cls._wait_pid_exit(parent_pid, 15.0)
 
                 norm_target = os.path.normcase(os.path.abspath(clean_target)) + os.sep
