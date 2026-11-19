@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     Property,
     QEasingCurve,
     QEvent,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRect,
@@ -39,10 +40,13 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -242,6 +246,85 @@ class ToggleSwitch(QAbstractButton):
             painter.setPen(QPen(QColor(167, 139, 250, 160), 1.2))
             painter.drawRoundedRect(QRectF(0.6, 0.6, self.width() - 1.2, self.height() - 1.2), radius, radius)
         painter.end()
+
+
+class _FlowLayout(QLayout):
+    """按可用宽度自动换行的流式布局，避免状态徽章被单行裁切或整行拉伸。"""
+
+    def __init__(self, parent: Optional[QWidget] = None, h_spacing: int = 6, v_spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self._h_spacing = h_spacing
+        self._v_spacing = v_spacing
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802 - Qt 命名
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> Optional[QLayoutItem]:  # noqa: N802 - Qt 命名
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> Optional[QLayoutItem]:  # noqa: N802 - Qt 命名
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802 - Qt 命名
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt 命名
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt 命名
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def invalidate(self) -> None:
+        super().invalidate()
+        # 徽章文本更新后需通知父级按新宽度重算换行高度，防止滚动区内的卡片高度滞后
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.updateGeometry()
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt 命名
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802 - Qt 命名
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            if item.isEmpty():
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._h_spacing
+            if next_x - self._h_spacing > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y += line_height + self._v_spacing
+                next_x = x + hint.width() + self._h_spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
 
 
 class _Card:
@@ -951,26 +1034,17 @@ class SettingsWindow(QWidget):
         card = _Card(layout, "联动状态")
         badge_host = QWidget()
         badge_host.setObjectName("CardHost")
-        badge_row = QHBoxLayout(badge_host)
+        badge_row = _FlowLayout(badge_host, h_spacing=6, v_spacing=6)
         badge_row.setContentsMargins(0, 0, 0, 0)
-        badge_row.setSpacing(6)
         self._ag_badge = self._make_status_badge("检测中...")
         self._cli_badge = self._make_status_badge("检测中...")
         self._gem_badge = self._make_status_badge("检测中...")
         self._watch_badge = self._make_status_badge("联动状态检测中...")
         badge_row.addWidget(self._ag_badge)
+        badge_row.addWidget(self._cli_badge)
         badge_row.addWidget(self._gem_badge)
         badge_row.addWidget(self._watch_badge)
-        badge_row.addStretch(1)
         card.add_widget(badge_host, top=2)
-        card.add_widget(self._cli_badge, top=2)
-
-        desc = QLabel(
-            "开启对应开关后，目标应用启动时会自动唤醒桌宠；退出桌宠后仍会在后台等待下次启动，且不占用主程序目录。"
-        )
-        desc.setObjectName("RowDesc")
-        desc.setWordWrap(True)
-        card.add_widget(desc, top=6)
 
         card = _Card(layout, "启动行为")
         self._chk_autostart = self._make_switch()
@@ -1102,6 +1176,7 @@ class SettingsWindow(QWidget):
     @staticmethod
     def _make_status_badge(text: str) -> QLabel:
         label = QLabel(text)
+        label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         label.setStyleSheet(
             "background-color: #252048; color: #C4B5FD; border-radius: 6px; padding: 3px 8px; font-size: 11px;"
         )
