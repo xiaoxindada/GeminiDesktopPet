@@ -1690,11 +1690,13 @@ class PetWindow(QWidget):
         self._settings.docked_side = DockSide.NONE
         self._is_falling = False
         self._bubble_custom_offset = None
+        self._current_state = self._resolve_resting_state()
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
         new_x = area.right() + 1 - self.width() - 28
         new_y = area.bottom() + 1 - self.height()
         self.move(int(round(new_x)), int(round(new_y)))
         self._update_dock_alignment()
+        self._refresh_sprite_visual()
         self._settings.last_left = float(self.x())
         self._settings.last_top = float(self.y())
         self._settings_service.save(self._settings)
@@ -1918,10 +1920,16 @@ class PetWindow(QWidget):
                 self._override_pose = PetState.THINKING
                 self._refresh_sprite_visual()
         elif self._override_pose is not None and now >= self._override_until_utc:
-            self._override_pose = None
-            if self._is_sulk:
-                self._is_sulk = False
-            self._refresh_sprite_visual()
+            if self._is_dragging:
+                # 拖拽中临时表情结束后保持悬浮拖拽姿态，避免退回旧贴边半身图。
+                if self._override_pose != PetState.FLOAT:
+                    self._override_pose = PetState.FLOAT
+                    self._refresh_sprite_visual()
+            else:
+                self._override_pose = None
+                if self._is_sulk:
+                    self._is_sulk = False
+                self._refresh_sprite_visual()
 
         # Gravity fall physics
         if (
@@ -1940,6 +1948,8 @@ class PetWindow(QWidget):
                 self._is_falling = False
                 self._fall_velocity_y = 0.0
                 self._landing_squash = 1.0
+                self._current_state = self._resolve_resting_state()
+                self._refresh_sprite_visual()
                 self._sound.play(PetSoundEffect.BOING)
             else:
                 self.move(self.x(), int(round(next_top)))
@@ -2203,15 +2213,27 @@ class PetWindow(QWidget):
         return self._sprites.walk_rig
 
     def _refresh_sprite_visual(self) -> None:
-        active = self._override_pose if self._override_pose is not None else self._current_state
-        if (
-            self._override_pose is None
-            and not self._is_walking
+        if self._override_pose is not None:
+            active = self._override_pose
+        elif self._is_dragging:
+            active = PetState.FLOAT
+        elif (
+            not self._is_walking
             and not self._is_sleeping
-            and not self._is_dragging
             and not self._is_sulk
         ):
             active = self._resolve_resting_state()
+        else:
+            active = self._current_state
+            if self._settings.docked_side == DockSide.NONE and active in (
+                PetState.EDGE_LEFT,
+                PetState.EDGE_LEFT_PEEK,
+                PetState.EDGE_LEFT_SLEEP,
+                PetState.EDGE_RIGHT,
+                PetState.EDGE_RIGHT_PEEK,
+                PetState.EDGE_RIGHT_SLEEP,
+            ):
+                active = self._resolve_resting_state()
 
         if self._settings.doze_mode and self._settings.docked_side != DockSide.NONE:
             active = self._resolve_resting_state()
@@ -2442,11 +2464,19 @@ class PetWindow(QWidget):
 
             if not self._is_dragging and math.hypot(dx, dy) > 5.0:
                 self._is_dragging = True
-                if self._settings.docked_side != DockSide.NONE:
-                    self._settings.docked_side = DockSide.NONE
-                    self._update_dock_alignment()
                 self._override_pose = PetState.FLOAT
-                self._refresh_sprite_visual()
+                if self._settings.docked_side != DockSide.NONE:
+                    old_local_rect = self._get_local_sprite_rect()
+                    self._settings.docked_side = DockSide.NONE
+                    self._current_state = self._resolve_resting_state()
+                    self._refresh_sprite_visual()
+                    # 从贴边半身切换到居中完整立绘时补偿窗口横向偏移，避免角色瞬移脱离鼠标。
+                    new_local_rect = self._get_local_sprite_rect()
+                    self._win_start_left += old_local_rect.center().x() - new_local_rect.center().x()
+                    self._update_dock_alignment()
+                else:
+                    self._refresh_sprite_visual()
+                self._stage_canvas.update()
 
             if self._is_dragging:
                 self.move(int(round(self._win_start_left + dx)), int(round(self._win_start_top + dy)))
@@ -2529,6 +2559,7 @@ class PetWindow(QWidget):
             QTimer.singleShot(2600, self._enter_sulk_after_dizzy)
         else:
             self._override_pose = None
+            self._current_state = self._resolve_resting_state()
             self._try_edge_dock_or_gravity_drop()
 
         self._settings.last_left = float(self.x())
@@ -2612,28 +2643,39 @@ class PetWindow(QWidget):
         snap_margin = 38.0 * self._effective_scale()
         max_y = max(area.top(), area.bottom() + 1 - self.height())
 
-        if self._settings.edge_dock_enabled and (self.x() <= area.left() + 10 or sprite_left <= area.left() + snap_margin):
+        # 按角色可见边界判定贴边，避免窗口透明留白触边导致刚拖出侧边栏就被误吸回。
+        if self._settings.edge_dock_enabled and sprite_left <= area.left() + snap_margin:
             self._settings.docked_side = DockSide.LEFT
             self.move(area.left(), max(area.top(), min(max_y, self.y())))
             self._update_dock_alignment()
-            self._current_state = PetState.EDGE_LEFT_PEEK
+            self._current_state = (
+                self._resolve_resting_state() if self._settings.doze_mode else PetState.EDGE_LEFT_PEEK
+            )
             self._refresh_sprite_visual()
+            self._stage_canvas.update()
             self.show_bubble(CharacterLore.pick_line("edge"), 3.5)
             self._sound.play(PetSoundEffect.CHIME)
             return
 
-        if self._settings.edge_dock_enabled and (
-            self.x() + self.width() >= area.right() + 1 - 10
-            or sprite_right >= area.right() + 1 - snap_margin
-        ):
+        if self._settings.edge_dock_enabled and sprite_right >= area.right() + 1 - snap_margin:
             self._settings.docked_side = DockSide.RIGHT
             self.move(area.right() + 1 - self.width(), max(area.top(), min(max_y, self.y())))
             self._update_dock_alignment()
-            self._current_state = PetState.EDGE_RIGHT_PEEK
+            self._current_state = (
+                self._resolve_resting_state() if self._settings.doze_mode else PetState.EDGE_RIGHT_PEEK
+            )
             self._refresh_sprite_visual()
+            self._stage_canvas.update()
             self.show_bubble(CharacterLore.pick_line("edge"), 3.5)
             self._sound.play(PetSoundEffect.CHIME)
             return
+
+        # 拖出侧边后先保证角色可见区域完全落在屏幕工作区内，避免松手后半身留在屏外。
+        min_x = area.left() - (self.width() - sprite_w) * 0.5
+        max_x = (area.right() + 1) - (self.width() + sprite_w) * 0.5
+        clamped_x = int(round(max(min_x, min(max_x, float(self.x())))))
+        if clamped_x != self.x():
+            self.move(clamped_x, self.y())
 
         if (
             not self._settings.anti_gravity_mode
@@ -2642,9 +2684,14 @@ class PetWindow(QWidget):
         ):
             self._fall_velocity_y = 0.0
             self._is_falling = True
+            self._current_state = self._resolve_resting_state()
+            self._refresh_sprite_visual()
+            self._stage_canvas.update()
         else:
             self._clamp_inside_nearest_work_area()
+            self._current_state = self._resolve_resting_state()
             self._refresh_sprite_visual()
+            self._stage_canvas.update()
 
     # ==================== Speech Bubble & Inline Gemini Chat ====================
 
@@ -4092,6 +4139,7 @@ class PetWindow(QWidget):
         self._settings.anti_gravity_mode = not self._settings.anti_gravity_mode
         if self._settings.anti_gravity_mode:
             self._settings.docked_side = DockSide.NONE
+            self._current_state = self._resolve_resting_state()
         else:
             self._is_falling = True
 
