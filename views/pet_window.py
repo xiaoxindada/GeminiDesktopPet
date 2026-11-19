@@ -102,7 +102,6 @@ _SYNC_MIN_INTERVAL = 0.25
 _SYNC_REPLACE_INTERVAL = 0.12
 _SYNC_QUEUE_LIMIT = 10
 _SYNC_HEARTBEAT_SEC = 60.0
-_SYNC_BUBBLE_SIZE = (420, 260)
 _SYNC_BUBBLE_IDLE_MS = 3000
 
 # 打盹 Zzz 的落点比例（相对贴图内容矩形：横向从中心右偏、纵向从顶部下移）。
@@ -1544,11 +1543,6 @@ class PetWindow(QWidget):
                 max(min_w, min(max_w, self._transient_bubble_size.width())),
                 max(min_h, min(max_h, self._transient_bubble_size.height())),
             )
-
-        if self._sync_bubble_active:
-            # 固定同步气泡的视口，续写只扩大滚动范围，避免透明窗口反复缩放和移动。
-            sync_w, sync_h = _SYNC_BUBBLE_SIZE
-            return QSize(min(max_w, sync_w), min(max_h, sync_h))
 
         fm = QFontMetrics(self._bubble_text_lbl.font())
         text = self._bubble_text_lbl.text() or ""
@@ -3798,10 +3792,15 @@ class PetWindow(QWidget):
             )
             self._bubble_text_lbl.setVisible(True)
         if self._bubble_text_lbl.text() != message:
+            bar = self._bubble_scroll.verticalScrollBar()
+            saved_scroll = bar.value() if already_showing_sync else None
             self._bubble_text_lbl.setText(message)
             if already_showing_sync:
-                # 刷新滚动范围，保留用户的阅读位置。
+                # 同步消息在非聊天模式下沿用普通气泡自适应尺寸，同时保留用户滚动位置。
                 self._bubble_scroll.setWidgetResizable(True)
+                self._relayout_stage_top()
+                if saved_scroll is not None:
+                    bar.setValue(min(saved_scroll, bar.maximum()))
         if not already_showing_sync:
             self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
             self._relayout_stage_top(reveal_bubble=True)

@@ -16,7 +16,7 @@ from services.system_monitor_service import SystemMonitorService
 from views.pet_window import PetWindow
 
 
-def test_sync_bubble_stays_in_place_and_preserves_scroll_position(tmp_path):
+def test_sync_bubble_uses_normal_bubble_style_and_preserves_scroll_position(tmp_path):
     app = QApplication.instance() or QApplication([])
     settings = PetSettings(auto_walk=False, chat_sync_enabled=False, show_speech_bubble=False)
     service = Mock(settings_path=tmp_path / "settings.json")
@@ -26,17 +26,23 @@ def test_sync_bubble_stays_in_place_and_preserves_scroll_position(tmp_path):
         pet._frame_timer.stop()
         bubble = pet._speech_bubble
         bar = pet._bubble_scroll.verticalScrollBar()
+
+        pet.show_bubble("开始思考", 3.0, force=True)
+        app.processEvents()
+        normal_short_size = bubble.size()
+
         pet._show_sync_event(SyncEvent("assistant", "开始思考", "thinking"))
         app.processEvents()
         assert bubble.isVisible()
-        initial_geometry = bubble.geometry()
-        assert initial_geometry.width() > 320
+        assert not pet._chat_messages_panel.isVisible()
+        assert bubble.size().height() <= normal_short_size.height() + 8
         assert bar.maximum() == 0
 
         text = "同步思维仍在继续。\n" * 80
         pet._show_sync_event(SyncEvent("assistant", text, "thinking", replace=True))
         app.processEvents()
-        assert bubble.geometry() == initial_geometry
+        expanded_geometry = bubble.geometry()
+        assert expanded_geometry.height() > normal_short_size.height()
         assert bar.isVisible()
         assert bar.value() == bar.minimum() < bar.maximum()
 
@@ -44,12 +50,12 @@ def test_sync_bubble_stays_in_place_and_preserves_scroll_position(tmp_path):
         position = bar.value()
         pet._show_sync_event(SyncEvent("assistant", text * 2, "thinking", replace=True))
         app.processEvents()
-        assert bubble.geometry() == initial_geometry
+        assert bubble.geometry() == expanded_geometry
         assert bar.value() == position < bar.maximum()
 
         pet._show_sync_event(SyncEvent("assistant", text * 2 + "回复末尾", "message"))
         app.processEvents()
-        assert bubble.geometry() == initial_geometry
+        assert bubble.geometry() == expanded_geometry
         assert pet._bubble_text_lbl.text().endswith("回复末尾")
         assert bar.value() == position < bar.maximum()
 
