@@ -25,7 +25,7 @@ from models.app_version import get_bundled_resource_dir
 from models.character_lore import CharacterLore
 from models.pet_settings import PetSettings, PetStyleMode
 from models.pet_state import PetState
-from services.sprite_manager import SpriteManager
+from services.sprite_manager import SpriteManager, draw_pixmap_smooth
 from services.tray_icon_service import TrayIconService
 from themes.starlight_theme import STARLIGHT_WINDOW_QSS
 
@@ -64,8 +64,8 @@ class _FitImageLabel(QLabel):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        # 保留原始像素，每次按当前逻辑尺寸绘制，缩放/DPI/切页后不复用旧缩略图。
-        painter.drawPixmap(target, self._source, QRectF(self._source.rect()))
+        # 按当前物理像素尺寸面积平均缩图，避免高分辨率标准立绘在预览页出现锯齿毛刺。
+        draw_pixmap_smooth(painter, self._source, target)
 
 
 

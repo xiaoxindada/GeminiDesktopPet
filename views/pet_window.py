@@ -86,7 +86,7 @@ from services.gemini_chat_service import ChatReply, GeminiChatService
 from services.settings_service import SettingsService
 from services.shared_menu import MENU_SEPARATOR, populate_shared_menu
 from services.sound_service import PetSoundEffect, SoundService
-from services.sprite_manager import SpriteManager, WalkRigAssets
+from services.sprite_manager import SpriteManager, WalkRigAssets, draw_pixmap_smooth
 from services.system_monitor_service import SystemMetrics, SystemMonitorService
 from themes import STARLIGHT_MENU_QSS
 
@@ -418,7 +418,7 @@ def _draw_pixmap_uniform(painter: QPainter, pixmap: Optional[QPixmap], target: Q
     dh = ph * ratio
     dx = target.x() + (target.width() - dw) * 0.5
     dy = target.y() + (target.height() - dh) * 0.5
-    painter.drawPixmap(QRectF(dx, dy, dw, dh), pixmap, QRectF(0.0, 0.0, pw, ph))
+    draw_pixmap_smooth(painter, pixmap, QRectF(dx, dy, dw, dh))
 
 
 class _ChatActionButton(QPushButton):
@@ -2135,7 +2135,7 @@ class PetWindow(QWidget):
             pixmap = self._active_static_pixmap
             if pixmap is not None and not pixmap.isNull():
                 content = self._pixmap_content_rect(pixmap)
-                painter.drawPixmap(sprite_rect, pixmap, QRectF(content))
+                draw_pixmap_smooth(painter, pixmap, sprite_rect, content)
 
         painter.restore()
 
