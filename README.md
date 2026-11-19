@@ -14,16 +14,16 @@
 | :---: | :---: |
 | ![聊天模式预览](preview/images/preview-chat-mode.png) | ![Antigravity 实时对话预览](preview/images/preview-chat-sync.png) |
 
-| Antigravity 剩余额度看板 |
-| :---: |
-| ![Antigravity 剩余额度看板](preview/images/preview-quota.png) |
+| Antigravity 剩余额度看板 | 跟随应用联动启动 |
+| :---: | :---: |
+| ![Antigravity 剩余额度看板](preview/images/preview-quota.png) | ![跟随应用联动启动](preview/images/preview-app-follow.png) |
 
 <details>
-<summary>展开查看：设置</summary>
+<summary>展开查看：自定义角色设定与设置</summary>
 
-<p align="center">
-  <img src="preview/images/preview-settings.png" alt="设置" width="520" />
-</p>
+| 自定义角色设定 | 设置 |
+| :---: | :---: |
+| ![自定义角色设定](preview/images/preview-character-editor.png) | ![设置](preview/images/preview-settings.png) |
 
 </details>
 
@@ -31,7 +31,7 @@
 
 - **双形态桌宠**：Q 版与标准立绘一键切换，自由漫步、贴边停靠。
 - **桌面互动**：摸头、拖拽、反重力悬浮等拟态反馈，附带好感度。
-- **应用联动**：跟随 Antigravity、Antigravity CLI 与 Gemini 桌面端启动。
+- **应用联动**：跟随 Antigravity、Antigravity CLI 与 Gemini 桌面端启动，自动唤醒桌宠。
 - **Antigravity 额度查询**：一键呼出额度与重置时间，低余量提醒，可复制摘要。
 - **Antigravity 应用对话同步**：开启后 Antigravity 应用的实时对话消息会显示在桌宠气泡里。
 - **角色档案**：内置角色图鉴与档案，支持自定义角色设定。
