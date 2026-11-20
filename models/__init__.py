@@ -9,14 +9,17 @@ from .app_version import (
 )
 from .character_lore import (
     AI_TONE_OPTIONS,
-    APPEARANCE_TRAITS,
+    BUBBLE_ACTIVITY_OPTIONS,
     BUILTIN_PRESETS,
+    DEFAULT_BUBBLE_ACTIVITY,
     DEFAULT_LINES,
+    IDLE_EDITOR_LINE_CATEGORIES,
     AiTonePreset,
+    BubbleActivityPreset,
     CharacterLore,
     CharacterPreset,
 )
-from .character_profile import CharacterProfile, CharacterTrait
+from .character_profile import CharacterProfile
 from .pet_settings import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_THINKING_LEVEL,
@@ -36,18 +39,20 @@ from .pet_state import PetState
 
 __all__ = [
     "AI_TONE_OPTIONS",
-    "APPEARANCE_TRAITS",
     "AiTonePreset",
     "AppVersion",
+    "BUBBLE_ACTIVITY_OPTIONS",
     "BUILTIN_PRESETS",
+    "BubbleActivityPreset",
     "CharacterLore",
     "CharacterPreset",
     "CharacterProfile",
-    "CharacterTrait",
+    "DEFAULT_BUBBLE_ACTIVITY",
     "DEFAULT_GEMINI_MODEL",
     "DEFAULT_LINES",
     "DEFAULT_THINKING_LEVEL",
     "DockSide",
+    "IDLE_EDITOR_LINE_CATEGORIES",
     "PetSettings",
     "PetState",
     "PetStyleMode",

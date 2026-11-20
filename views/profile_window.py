@@ -214,37 +214,31 @@ class ProfileWindow(QWidget):
         sl.addWidget(self._standee_caption_lbl)
         hl.addWidget(standee_card)
 
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_inner = QWidget()
-        self._traits_host_layout = QVBoxLayout(right_inner)
-        self._traits_host_layout.setContentsMargins(0, 0, 6, 0)
-        self._traits_host_layout.setSpacing(10)
-
         bio_card = QFrame()
         bio_card.setObjectName("CardPanel")
         bl = QVBoxLayout(bio_card)
         bl.setContentsMargins(14, 14, 14, 14)
+        bl.setSpacing(8)
         bio_title = QLabel("角色简介")
         bio_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #E9E4FF; background: transparent;")
         bl.addWidget(bio_title)
+
+        bio_scroll = QScrollArea()
+        bio_scroll.setWidgetResizable(True)
+        bio_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        bio_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; } "
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        bio_scroll.viewport().setStyleSheet("background: transparent;")
         self._bio_lbl = QLabel()
         self._bio_lbl.setWordWrap(True)
-        self._bio_lbl.setStyleSheet("font-size: 13px; color: #CFC8EE; background: transparent; margin-top: 4px;")
-        bl.addWidget(self._bio_lbl)
-        self._traits_host_layout.addWidget(bio_card)
+        self._bio_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._bio_lbl.setStyleSheet("font-size: 13px; color: #CFC8EE; background: transparent; padding-right: 4px;")
+        bio_scroll.setWidget(self._bio_lbl)
+        bl.addWidget(bio_scroll, 1)
 
-        traits_hdr = QLabel("外貌与设定要点")
-        traits_hdr.setStyleSheet("font-size: 15px; font-weight: bold; color: #E9E4FF; background: transparent;")
-        self._traits_host_layout.addWidget(traits_hdr)
-
-        self._traits_container = QVBoxLayout()
-        self._traits_container.setSpacing(8)
-        self._traits_host_layout.addLayout(self._traits_container)
-        self._traits_host_layout.addStretch(1)
-
-        right_scroll.setWidget(right_inner)
-        hl.addWidget(right_scroll, 1)
+        hl.addWidget(bio_card, 1)
         return w
 
     def _build_turnaround_tab(self) -> QWidget:
@@ -356,26 +350,6 @@ class ProfileWindow(QWidget):
 
         self._standee_lbl.setPixmap(QPixmap(standee_path))
         self._turnaround_lbl.setPixmap(QPixmap(turn_path))
-
-        while self._traits_container.count():
-            item = self._traits_container.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-
-        for trait in p.appearance_traits:
-            card = QFrame()
-            card.setObjectName("CardPanel")
-            tl = QVBoxLayout(card)
-            tl.setContentsMargins(12, 10, 12, 10)
-            t_lbl = QLabel(trait.title)
-            t_lbl.setStyleSheet("color: #C4B5FD; font-size: 13.5px; font-weight: bold; background: transparent;")
-            tl.addWidget(t_lbl)
-            d_lbl = QLabel(trait.detail)
-            d_lbl.setWordWrap(True)
-            d_lbl.setStyleSheet("color: #BDB6DF; font-size: 12.5px; background: transparent; margin-top: 2px;")
-            tl.addWidget(d_lbl)
-            self._traits_container.addWidget(card)
 
     def _open_source_url(self) -> None:
         url = CharacterLore.get_active_profile().source_page_url

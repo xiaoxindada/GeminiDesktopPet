@@ -9,7 +9,7 @@ from typing import Optional
 
 from models.app_version import get_user_config_dir
 from models.character_lore import CharacterLore
-from models.character_profile import CharacterProfile, CharacterTrait
+from models.character_profile import CharacterProfile
 
 
 class CharacterProfileService:
@@ -80,9 +80,7 @@ class CharacterProfileService:
             "customStandeePath": p.custom_standee_path,
             "customTurnaroundPath": p.custom_turnaround_path,
             "aiSystemPrompt": p.ai_system_prompt,
-            "appearanceTraits": [
-                {"title": t.title, "detail": t.detail} for t in p.appearance_traits
-            ],
+            "bubbleActivity": CharacterLore.normalize_bubble_activity(p.bubble_activity),
             "lines": p.lines,
         }
 
@@ -91,15 +89,6 @@ class CharacterProfileService:
         def get_str(key: str) -> str:
             val = d.get(key)
             return str(val) if val is not None else ""
-
-        traits: list[CharacterTrait] = []
-        raw_traits = d.get("appearanceTraits")
-        if isinstance(raw_traits, list):
-            for item in raw_traits:
-                if isinstance(item, dict):
-                    t = item.get("title", "")
-                    det = item.get("detail", "")
-                    traits.append(CharacterTrait(str(t or ""), str(det or "")))
 
         lines: dict[str, list[str]] = {}
         raw_lines = d.get("lines")
@@ -121,6 +110,8 @@ class CharacterProfileService:
             custom_standee_path=get_str("customStandeePath"),
             custom_turnaround_path=get_str("customTurnaroundPath"),
             ai_system_prompt=get_str("aiSystemPrompt"),
-            appearance_traits=traits,
+            bubble_activity=CharacterLore.normalize_bubble_activity(
+                get_str("bubbleActivity") or get_str("bubble_activity")
+            ),
             lines=lines,
         )

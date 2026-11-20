@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from datetime import datetime
 import random
 from typing import Callable, Optional
 
 
-from models.character_profile import CharacterProfile, CharacterTrait
+from models.character_profile import CharacterProfile
+from models.pet_settings import DockSide
 from models.pet_state import PetState
 
 CHARACTER_NAME = "Gemini 娘"
@@ -34,15 +34,6 @@ DEFAULT_AI_SYSTEM_PROMPT = (
     "（蓝紫渐变长卷发、双丸子发髻与呆毛、猫耳与猫尾、左玫红右琥珀金异色瞳、四芒星虹彩发饰）。"
     "你的特点包括：反重力悬浮模块（Antigravity）、百万上下文、极其猫化的反应（爱被摸头、会呼噜呼噜、晃久了会炸毛）。"
     "请用活泼可爱、俏皮略带猫娘口癖（「喵～」「✦」）的简体中文简短回复用户，通常 1 到 3 句话，不要太长，以便在桌面气泡里阅读。"
-)
-
-APPEARANCE_TRAITS: tuple[tuple[str, str], ...] = (
-    ("蓝紫渐变长卷发", "带有双侧小丸子发髻与灵动呆毛，发梢呈蓝紫粉梦幻渐变"),
-    ("猫耳与猫尾", "粉色内耳的猫耳 + 蓬松毛绒蓝紫渐变大猫尾"),
-    ("异色双瞳", "左眼玫红 × 右眼琥珀金，情绪激动或眩晕时会变成蚊香眼/猫爪眼"),
-    ("四芒星虹彩发饰", "头部左侧佩戴标志性大型四芒星发饰，垂坠星芒链饰"),
-    ("星辰系服装", "深蓝星夜露脐短上衣配白色分离袖、金色链条荷叶边短裙、白色泡泡袜与虹彩厚底鞋"),
-    ("专属能力梗", "反重力悬浮模块（Antigravity）、Nano Banana 香蕉画笔、百万上下文压缩、极度猫化反应"),
 )
 
 DEFAULT_LINES: dict[str, list[str]] = {
@@ -232,6 +223,45 @@ DEFAULT_LINES: dict[str, list[str]] = {
     ],
 }
 
+# 与随机台词分类 1:1 对应的全身动作（避免日常碎碎念误触贴边半身立绘）
+_IDLE_DIRECT_CATEGORIES: tuple[tuple[str, PetState], ...] = (
+    ("hum", PetState.HUM),
+    ("stretch", PetState.STRETCH),
+    ("yawn", PetState.YAWN),
+    ("thinking", PetState.THINKING),
+    ("reading", PetState.READING),
+    ("writing", PetState.WRITING),
+    ("searching", PetState.SEARCHING),
+    ("drawing", PetState.DRAWING),
+    ("delegating", PetState.DELEGATING),
+    ("happy", PetState.HAPPY),
+    ("proud", PetState.PROUD),
+    ("compact", PetState.COMPACT),
+    ("asking", PetState.ASKING),
+    ("listening", PetState.LISTENING),
+    ("float", PetState.FLOAT),
+)
+_IDLE_DIRECT_CATEGORY_MAP: dict[str, PetState] = dict(_IDLE_DIRECT_CATEGORIES)
+
+# 为 chatter / idle 等综合分类台词按语义关键词匹配对应动作
+_LINE_POSE_KEYWORDS: tuple[tuple[tuple[str, ...], PetState], ...] = (
+    (("反重力", "悬浮", "飘"), PetState.FLOAT),
+    (("炸毛", "生气", "快晃", "哼"), PetState.PUFFED),
+    (("伸懒腰", "伸展", "拉伸"), PetState.STRETCH),
+    (("哈欠", "困", "眨眨眼"), PetState.YAWN),
+    (("雷达", "天线", "电波", "听着"), PetState.LISTENING),
+    (("画", "香蕉"), PetState.DRAWING),
+    (("角色档案", "设定", "立绘", "翻翻", "看书"), PetState.READING),
+    (("异色瞳", "夸", "得意", "厉害", "不愧"), PetState.PROUD),
+    (("摸摸", "猫耳", "偷看", "边缘", "要不要", "吗"), PetState.ASKING),
+    (("星星", "开心", "好耶", "加油", "元气"), PetState.HAPPY),
+    (("♪", "唱", "歌"), PetState.HUM),
+    (("想想", "思考", "检索"), PetState.THINKING),
+    (("搜", "翻找", "灵感"), PetState.SEARCHING),
+    (("写", "键盘", "敲"), PetState.WRITING),
+    (("尾巴",), PetState.IDLE3),
+)
+
 @dataclass(frozen=True)
 class CharacterPreset:
     id: str
@@ -244,6 +274,73 @@ class AiTonePreset:
     id: str
     label: str
     system_prompt: str
+
+
+DEFAULT_BUBBLE_ACTIVITY = "normal"
+
+
+@dataclass(frozen=True)
+class BubbleActivityPreset:
+    id: str
+    label: str
+    pet_min_sec: float
+    pet_max_sec: float
+    bubble_duration_sec: float
+
+
+BUBBLE_ACTIVITY_OPTIONS: tuple[BubbleActivityPreset, ...] = (
+    BubbleActivityPreset(
+        "quiet",
+        "偏安静（空闲约 30~60 秒随机说一句，尽量少打扰）",
+        30.0,
+        60.0,
+        4.5,
+    ),
+    BubbleActivityPreset(
+        "normal",
+        "适中节奏（空闲约 10~20 秒随机说一句 · 默认）",
+        10.0,
+        20.0,
+        4.5,
+    ),
+    BubbleActivityPreset(
+        "lively",
+        "偏活跃（空闲约 5~10 秒高频随机互动）",
+        5.0,
+        10.0,
+        4.5,
+    ),
+)
+_BUBBLE_ACTIVITY_MAP: dict[str, BubbleActivityPreset] = {
+    item.id: item for item in BUBBLE_ACTIVITY_OPTIONS
+}
+
+IDLE_EDITOR_LINE_CATEGORIES: tuple[tuple[str, str], ...] = (
+    ("chatter", "随机碎碎念（按语义自动匹配动作）"),
+    ("float", "反重力悬浮 · float"),
+    ("hum", "哼歌放松 · hum"),
+    ("stretch", "伸懒腰 · stretch"),
+    ("yawn", "打哈欠 · yawn"),
+    ("thinking", "思考中 · thinking"),
+    ("reading", "翻阅阅读 · reading"),
+    ("writing", "敲字写作 · writing"),
+    ("searching", "搜寻灵感 · searching"),
+    ("drawing", "画画涂鸦 · drawing"),
+    ("delegating", "双子分身协作 · delegating"),
+    ("happy", "开心庆祝 · happy"),
+    ("proud", "得意求夸 · proud"),
+    ("compact", "上下文压缩 · compact"),
+    ("asking", "歪头询问 · asking"),
+    ("listening", "竖耳倾听 · listening"),
+    ("running", "巡逻漫步 · running"),
+    ("edge", "屏幕边缘偷看 · edge"),
+    ("greet_morning", "早安问候 · greet_morning"),
+    ("greet_noon", "午间问候 · greet_noon"),
+    ("greet_afternoon", "下午问候 · greet_afternoon"),
+    ("greet_evening", "傍晚问候 · greet_evening"),
+    ("greet_night", "深夜陪伴 · greet_night"),
+    ("greet_dawn", "凌晨陪伴 · greet_dawn"),
+)
 
 
 AI_TONE_OPTIONS: tuple[AiTonePreset, ...] = (
@@ -286,6 +383,22 @@ class CharacterLore:
     def set_active_profile(cls, profile: Optional[CharacterProfile]) -> None:
         cls._active_profile = cls.resolve_with_defaults(profile)
 
+    @classmethod
+    def normalize_bubble_activity(cls, raw: Optional[str]) -> str:
+        cleaned = (raw or "").strip().lower()
+        if cleaned in _BUBBLE_ACTIVITY_MAP:
+            return cleaned
+        return DEFAULT_BUBBLE_ACTIVITY
+
+    @classmethod
+    def get_bubble_activity_preset(
+        cls, activity: Optional[str] = None
+    ) -> BubbleActivityPreset:
+        target = cls.normalize_bubble_activity(
+            activity if activity is not None else cls.get_active_profile().bubble_activity
+        )
+        return _BUBBLE_ACTIVITY_MAP[target]
+
     @staticmethod
     def create_default_profile() -> CharacterProfile:
         lines = {k: list(v) for k, v in DEFAULT_LINES.items()}
@@ -302,7 +415,7 @@ class CharacterLore:
             custom_standee_path="",
             custom_turnaround_path="",
             ai_system_prompt="",
-            appearance_traits=[CharacterTrait(t, d) for t, d in APPEARANCE_TRAITS],
+            bubble_activity=DEFAULT_BUBBLE_ACTIVITY,
             lines=lines,
         )
 
@@ -314,16 +427,6 @@ class CharacterLore:
 
         def or_default(val: Optional[str], fallback: str) -> str:
             return fallback if not val or not val.strip() else val.strip()
-
-        resolved_traits: list[CharacterTrait] = []
-        if raw.appearance_traits:
-            for item in raw.appearance_traits:
-                if item.title.strip() or item.detail.strip():
-                    resolved_traits.append(
-                        CharacterTrait(item.title.strip(), item.detail.strip())
-                    )
-        if not resolved_traits:
-            resolved_traits = copy.deepcopy(def_profile.appearance_traits)
 
         # 不区分大小写合并默认台词与自定义覆盖台词
         resolved_lines: dict[str, list[str]] = {
@@ -355,7 +458,7 @@ class CharacterLore:
             custom_standee_path=(raw.custom_standee_path or "").strip(),
             custom_turnaround_path=(raw.custom_turnaround_path or "").strip(),
             ai_system_prompt=(raw.ai_system_prompt or "").strip(),
-            appearance_traits=resolved_traits,
+            bubble_activity=cls.normalize_bubble_activity(raw.bubble_activity),
             lines=resolved_lines,
         )
 
@@ -375,9 +478,6 @@ class CharacterLore:
         parts.append("。")
         if p.bio and p.bio.strip():
             parts.append(f"{p.bio} ")
-        if p.appearance_traits:
-            traits_text = "；".join(f"{t.title}：{t.detail}" for t in p.appearance_traits)
-            parts.append(f"主要特征：{traits_text}。")
         parts.append("请完全代入上述角色设定，用自然生动的简体中文简短回复用户（通常 1 到 3 句话，适合桌面气泡阅读）。")
         return "".join(parts)
 
@@ -413,6 +513,145 @@ class CharacterLore:
             key = state.to_sprite_key()
         return cls.pick_line(key, rng)
 
+    @classmethod
+    def match_pose_for_line(
+        cls,
+        category: str,
+        line: str,
+        *,
+        docked_side: DockSide = DockSide.NONE,
+        exclude_state: Optional[PetState] = None,
+        rng: Optional[random.Random] = None,
+    ) -> PetState:
+        """根据台词分类与文本语义匹配对应的动作姿态（贴边态固定返回探头姿态）。"""
+        if docked_side == DockSide.LEFT:
+            return PetState.EDGE_LEFT_PEEK
+        if docked_side == DockSide.RIGHT:
+            return PetState.EDGE_RIGHT_PEEK
+
+        cat = (category or "").strip().lower()
+        if cat == "running":
+            return PetState.RUNNING
+        direct = _IDLE_DIRECT_CATEGORY_MAP.get(cat)
+        if direct is not None:
+            return direct
+        if cat not in ("idle", "chatter", "edge"):
+            parsed = PetState.from_sprite_key(cat)
+            if parsed is not None and not parsed.value.startswith("edge_"):
+                return parsed
+
+        text = (line or "").strip()
+        for keywords, state in _LINE_POSE_KEYWORDS:
+            if any(kw in text for kw in keywords):
+                return state
+
+        r = rng or random
+        fallback_pool = (
+            (PetState.IDLE2, PetState.IDLE3)
+            if cat == "idle"
+            else (
+                PetState.HAPPY,
+                PetState.ASKING,
+                PetState.LISTENING,
+                PetState.PROUD,
+                PetState.HUM,
+            )
+        )
+        candidates = [state for state in fallback_pool if state != exclude_state]
+        return r.choice(candidates or fallback_pool)
+
+    @classmethod
+    def pick_idle_speech(
+        cls,
+        *,
+        docked_side: DockSide = DockSide.NONE,
+        allow_running: bool = False,
+        allow_float: bool = True,
+        exclude_line: Optional[str] = None,
+        exclude_state: Optional[PetState] = None,
+        now: Optional[datetime] = None,
+        rng: Optional[random.Random] = None,
+    ) -> tuple[str, PetState]:
+        """抽取无操作时的随机台词，并返回与之匹配的动作姿态。"""
+        r = rng or random
+        active = cls.get_active_profile()
+        lower_lines: dict[str, list[str]] = {}
+        for raw_key, vals in active.lines.items():
+            clean = [s.strip() for s in vals if isinstance(s, str) and s.strip()]
+            if clean:
+                lower_lines[raw_key.lower()] = clean
+
+        if docked_side != DockSide.NONE:
+            pose = (
+                PetState.EDGE_LEFT_PEEK
+                if docked_side == DockSide.LEFT
+                else PetState.EDGE_RIGHT_PEEK
+            )
+            edge_lines = lower_lines.get("edge") or list(DEFAULT_LINES["edge"])
+            candidates = [ln for ln in edge_lines if ln != exclude_line] or edge_lines
+            return r.choice(candidates), pose
+
+        weighted_categories: list[tuple[str, int]] = [
+            ("idle", 2),
+            ("chatter", 2),
+        ]
+        for cat, _state in _IDLE_DIRECT_CATEGORIES:
+            if cat == "float" and not allow_float:
+                continue
+            weighted_categories.append((cat, 1))
+        if allow_running:
+            weighted_categories.append(("running", 1))
+        weighted_categories.append((cls.get_time_greeting_state(now).to_sprite_key(), 1))
+
+        source_lines = lower_lines or DEFAULT_LINES
+        raw_buckets: list[tuple[str, int, list[tuple[str, PetState]]]] = []
+        for cat, weight in weighted_categories:
+            lines = source_lines.get(cat)
+            if not lines:
+                continue
+            pairs = [
+                (
+                    ln,
+                    cls.match_pose_for_line(
+                        cat,
+                        ln,
+                        docked_side=DockSide.NONE,
+                        exclude_state=exclude_state,
+                        rng=r,
+                    ),
+                )
+                for ln in lines
+            ]
+            raw_buckets.append((cat, weight, pairs))
+
+        if not raw_buckets:
+            return "喵～✦", PetState.HAPPY
+
+        # 优先同时避开上一句台词与上一个动作；候选不足时逐级放宽，避免单条自定义台词死循环
+        def _filter_buckets(
+            check_line: bool, check_pose: bool
+        ) -> list[tuple[str, int, list[tuple[str, PetState]]]]:
+            filtered: list[tuple[str, int, list[tuple[str, PetState]]]] = []
+            for cat, weight, pairs in raw_buckets:
+                sub = [
+                    (ln, st)
+                    for ln, st in pairs
+                    if (not check_line or ln != exclude_line)
+                    and (not check_pose or st != exclude_state)
+                ]
+                if sub:
+                    filtered.append((cat, weight, sub))
+            return filtered
+
+        buckets = (
+            _filter_buckets(True, True)
+            or _filter_buckets(True, False)
+            or _filter_buckets(False, True)
+            or raw_buckets
+        )
+        picked_bucket = r.choices(buckets, weights=[w for _, w, _ in buckets], k=1)[0]
+        return r.choice(picked_bucket[2])
+
     @staticmethod
     def get_time_greeting_state(now: Optional[datetime] = None) -> PetState:
         hour = (now or datetime.now()).hour
@@ -437,6 +676,7 @@ def _create_gentle_preset() -> CharacterProfile:
         subtitle="温和细腻的桌面工作伙伴 · 陪你专注敲代码与创作",
         bio="以温柔稳定的节奏陪伴在桌面一角，会在你忙碌时轻声鼓励、提醒休息，不过度打扰。",
         ai_system_prompt=AI_TONE_OPTIONS[1].system_prompt,
+        bubble_activity="quiet",
         lines={
             "greeting": ["我在桌面一角待命啦，今天也一起慢慢推进工作吧。", "欢迎回来，有什么想让我陪你一起处理的吗？"],
             "idle": ["记得偶尔眨眨眼、伸展一下肩膀。", "我就在这里静静看着你呢。", "有需要随时叫我。"],
@@ -454,6 +694,7 @@ def _create_tsundere_preset() -> CharacterProfile:
         subtitle="虽然嘴上总是嫌你麻烦，但视线其实一直在看着你的桌面猫娘",
         bio="容易害羞又死要面子的傲娇猫娘。被摸头会小声呼噜却嘴硬不承认，只有认真工作时才会偷偷夸你。",
         ai_system_prompt=AI_TONE_OPTIONS[2].system_prompt,
+        bubble_activity="normal",
         lines={
             "greeting": ["哼，可算上线了！才、才不是特意在等你呢喵！", "喂！今天打算工作到几点呀喵？"],
             "idle": ["喂，不许无视我喵……", "盯——（假装只是在发呆）", "哼，本喵的尾巴才没有为你摇呢！"],
@@ -471,6 +712,7 @@ def _create_genki_preset() -> CharacterProfile:
         subtitle="无论什么难题都充满干劲的元气桌宠，为你注入双倍行动力！",
         bio="永远干劲满满的元气少女。遇到 Bug 或瓶颈时最擅长鼓舞士气，陪你一路通关各种任务。",
         ai_system_prompt=AI_TONE_OPTIONS[3].system_prompt,
+        bubble_activity="lively",
         lines={
             "greeting": ["早安午安晚上好！今天也要元气满满地冲鸭✦", "全能量充满！准备好迎接今天的挑战了吗！"],
             "idle": ["灵感雷达全开中——哔哔！", "再难的坑也一定能踩平的，加油！", "喝一口水，继续向着目标推进✦"],

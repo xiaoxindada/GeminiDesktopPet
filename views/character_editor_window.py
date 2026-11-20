@@ -26,10 +26,13 @@ from PySide6.QtWidgets import (
 from models.app_version import get_bundled_resource_dir
 from models.character_lore import (
     AI_TONE_OPTIONS,
+    BUBBLE_ACTIVITY_OPTIONS,
     BUILTIN_PRESETS,
+    DEFAULT_LINES,
+    IDLE_EDITOR_LINE_CATEGORIES,
     CharacterLore,
 )
-from models.character_profile import CharacterProfile, CharacterTrait
+from models.character_profile import CharacterProfile
 from services.character_profile_service import CharacterProfileService
 from services.tray_icon_service import TrayIconService
 from themes.starlight_theme import STARLIGHT_WINDOW_QSS
@@ -48,9 +51,11 @@ class CharacterEditorWindow(QWidget):
         self._service = profile_service
         self._on_applied = on_profile_applied
         self._suppress_tone = False
+        self._suppress_action_line_sync = False
         self._custom_standee_path = ""
         self._working_profile: CharacterProfile = self._service.load()
-        self._trait_rows: list[tuple[QWidget, QLineEdit, QLineEdit]] = []
+        self._editable_lines: dict[str, list[str]] = {}
+        self._current_action_line_category: str = IDLE_EDITOR_LINE_CATEGORIES[0][0]
 
         self.setWindowTitle("✏️ Gemini 娘 · 自定义角色设定与台词工坊")
         self.setWindowIcon(TrayIconService.load_app_icon())
@@ -181,13 +186,13 @@ class CharacterEditorWindow(QWidget):
         c2_l.addLayout(core_col, 1)
         bl.addWidget(c2)
 
-        # ③ AI Tone & Lines
+        # ③ AI Tone, Bubble Activity & Lines
         c3 = QFrame()
         c3.setObjectName("CardPanel")
         c3_l = QVBoxLayout(c3)
         c3_l.setContentsMargins(14, 14, 14, 14)
         c3_l.setSpacing(8)
-        c3_t = QLabel("③ 说话风格与常见台词")
+        c3_t = QLabel("③ 说话风格、气泡活跃度与台词")
         c3_t.setStyleSheet("font-size: 13.5px; font-weight: bold; color: #C4B5FD; background: transparent;")
         c3_l.addWidget(c3_t)
 
@@ -203,6 +208,20 @@ class CharacterEditorWindow(QWidget):
         tone_row.addWidget(self._tone_combo, 1)
         c3_l.addLayout(tone_row)
 
+        act_row = QHBoxLayout()
+        act_lbl = QLabel("气泡活跃程度")
+        act_lbl.setFixedWidth(125)
+        act_lbl.setStyleSheet("color: #D4CEF5; background: transparent;")
+        act_row.addWidget(act_lbl)
+        self._bubble_activity_combo = QComboBox()
+        self._bubble_activity_combo.setToolTip(
+            "开启「弹出默认气泡」后，控制无操作时随机说话与切换动作的频率"
+        )
+        for opt in BUBBLE_ACTIVITY_OPTIONS:
+            self._bubble_activity_combo.addItem(opt.label, opt.id)
+        act_row.addWidget(self._bubble_activity_combo, 1)
+        c3_l.addLayout(act_row)
+
         c3_l.addWidget(self._sub_label("AI 性格人设细节（选上方预设会自动填充；留空则自动根据角色信息生成）"))
         self._ai_prompt_edit = QPlainTextEdit()
         self._ai_prompt_edit.setMinimumHeight(60)
@@ -215,6 +234,33 @@ class CharacterEditorWindow(QWidget):
         self._pat_edit = self._make_line_col(lines_row, "摸头时说的话（每行一条）", 82)
         self._idle_edit = self._make_line_col(lines_row, "平时发呆说的话（每行一条）", 82)
         c3_l.addLayout(lines_row)
+
+        action_hdr = QHBoxLayout()
+        action_hdr.setSpacing(8)
+        action_lbl = QLabel("随机气泡与动作台词")
+        action_lbl.setFixedWidth(125)
+        action_lbl.setStyleSheet("color: #D4CEF5; background: transparent;")
+        action_hdr.addWidget(action_lbl)
+        self._action_line_category_combo = QComboBox()
+        for cat_key, cat_label in IDLE_EDITOR_LINE_CATEGORIES:
+            self._action_line_category_combo.addItem(cat_label, cat_key)
+        self._action_line_category_combo.currentIndexChanged.connect(
+            self._on_action_line_category_changed
+        )
+        action_hdr.addWidget(self._action_line_category_combo, 1)
+        self._reset_action_line_btn = QPushButton("↺ 还原该类默认")
+        self._reset_action_line_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_action_line_btn.clicked.connect(self._reset_current_action_lines)
+        action_hdr.addWidget(self._reset_action_line_btn)
+        c3_l.addLayout(action_hdr)
+        action_hint = self._sub_label(
+            "格式注意：一行一句纯文本（无需引号/序号，空行忽略，留空保存恢复默认）；切换上方分类可编辑对应动作台词。"
+        )
+        action_hint.setWordWrap(True)
+        c3_l.addWidget(action_hint)
+        self._action_line_edit = QPlainTextEdit()
+        self._action_line_edit.setFixedHeight(92)
+        c3_l.addWidget(self._action_line_edit)
         bl.addWidget(c3)
 
         # ④ Collapsible Advanced
@@ -222,7 +268,7 @@ class CharacterEditorWindow(QWidget):
         c4.setObjectName("TipCard")
         c4_l = QVBoxLayout(c4)
         c4_l.setContentsMargins(12, 10, 12, 10)
-        self._adv_toggle = QPushButton("▶ ④ 展开更多设定（外貌词条卡片 / 悬浮与闲聊台词 / 自定义三视图 / JSON 文件）")
+        self._adv_toggle = QPushButton("▶ ④ 展开更多设定（自定义三视图 / JSON 文件）")
         self._adv_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._adv_toggle.setStyleSheet(
             "text-align: left; background: transparent; border: none; color: #C4B5FD; font-weight: bold; font-size: 12.5px; padding: 2px;"
@@ -235,26 +281,6 @@ class CharacterEditorWindow(QWidget):
         adv_l = QVBoxLayout(self._adv_panel)
         adv_l.setContentsMargins(4, 10, 4, 4)
         adv_l.setSpacing(8)
-
-        tr_hdr = QHBoxLayout()
-        tr_lbl = QLabel("外貌与设定要点卡片（清空将自动恢复默认列表）")
-        tr_lbl.setStyleSheet("color: #E9E4FF; font-weight: bold; background: transparent;")
-        tr_hdr.addWidget(tr_lbl, 1)
-        add_tr_btn = QPushButton("＋ 添加一条设定")
-        add_tr_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_tr_btn.clicked.connect(lambda: self._add_trait_row("", ""))
-        tr_hdr.addWidget(add_tr_btn)
-        adv_l.addLayout(tr_hdr)
-
-        self._traits_list_layout = QVBoxLayout()
-        self._traits_list_layout.setSpacing(6)
-        adv_l.addLayout(self._traits_list_layout)
-
-        more_lines = QHBoxLayout()
-        more_lines.setSpacing(10)
-        self._float_edit = self._make_line_col(more_lines, "反重力悬浮台词", 68)
-        self._chatter_edit = self._make_line_col(more_lines, "随机碎碎念台词", 68)
-        adv_l.addLayout(more_lines)
 
         adv_l.addWidget(self._sub_label("自定义角色三视图路径（留空使用内置原案图）"))
         turn_row = QHBoxLayout()
@@ -330,12 +356,51 @@ class CharacterEditorWindow(QWidget):
         self._adv_panel.setVisible(visible)
         prefix = "▼" if visible else "▶"
         self._adv_toggle.setText(
-            f"{prefix} ④ 展开更多设定（外貌词条卡片 / 悬浮与闲聊台词 / 自定义三视图 / JSON 文件）"
+            f"{prefix} ④ 展开更多设定（自定义三视图 / JSON 文件）"
         )
+
+    def _flush_current_action_lines(self) -> None:
+        cat = (self._current_action_line_category or "").strip().lower()
+        if not cat:
+            return
+        vals = self._parse_lines_box(self._action_line_edit)
+        if vals:
+            self._editable_lines[cat] = vals
+        else:
+            self._editable_lines.pop(cat, None)
+
+    def _load_action_line_category(self, category: str) -> None:
+        cat = (category or "").strip().lower()
+        if not cat:
+            return
+        self._current_action_line_category = cat
+        vals = self._editable_lines.get(cat) or DEFAULT_LINES.get(cat) or []
+        self._action_line_edit.setPlainText("\n".join(vals))
+
+    def _on_action_line_category_changed(self, idx: int) -> None:
+        if self._suppress_action_line_sync or idx < 0:
+            return
+        self._flush_current_action_lines()
+        cat = self._action_line_category_combo.itemData(idx)
+        if cat:
+            self._load_action_line_category(str(cat))
+
+    def _reset_current_action_lines(self) -> None:
+        cat = (self._current_action_line_category or "").strip().lower()
+        if not cat:
+            return
+        defaults = list(DEFAULT_LINES.get(cat) or [])
+        if defaults:
+            self._editable_lines[cat] = defaults
+        else:
+            self._editable_lines.pop(cat, None)
+        self._action_line_edit.setPlainText("\n".join(defaults))
+        self._flash_status("已还原当前分类默认台词（记得点右下角保存生效）")
 
     def _load_into_form(self, raw: CharacterProfile) -> None:
         p = CharacterLore.resolve_with_defaults(raw)
         self._working_profile = copy.deepcopy(p)
+        self._editable_lines = {k.lower(): list(v) for k, v in p.lines.items()}
         self._custom_standee_path = p.custom_standee_path
 
         self._name_edit.setText(p.name)
@@ -355,13 +420,25 @@ class CharacterEditorWindow(QWidget):
         self._tone_combo.setCurrentIndex(matched_idx)
         self._suppress_tone = False
 
+        act_id = CharacterLore.normalize_bubble_activity(p.bubble_activity)
+        act_idx = self._bubble_activity_combo.findData(act_id)
+        if act_idx >= 0:
+            self._bubble_activity_combo.setCurrentIndex(act_idx)
+
         self._set_lines_box(self._greeting_edit, p.lines, "greeting")
         self._set_lines_box(self._pat_edit, p.lines, "pat")
         self._set_lines_box(self._idle_edit, p.lines, "idle")
-        self._set_lines_box(self._float_edit, p.lines, "float")
-        self._set_lines_box(self._chatter_edit, p.lines, "chatter")
 
-        self._rebuild_traits_rows(p.appearance_traits)
+        self._suppress_action_line_sync = True
+        try:
+            cur_cat = (
+                self._action_line_category_combo.currentData()
+                or IDLE_EDITOR_LINE_CATEGORIES[0][0]
+            )
+            self._load_action_line_category(str(cur_cat))
+        finally:
+            self._suppress_action_line_sync = False
+
         self._refresh_standee_preview()
 
     @staticmethod
@@ -372,37 +449,6 @@ class CharacterEditorWindow(QWidget):
     @staticmethod
     def _parse_lines_box(box: QPlainTextEdit) -> list[str]:
         return [s.strip() for s in box.toPlainText().splitlines() if s.strip()]
-
-    def _rebuild_traits_rows(self, traits: list[CharacterTrait]) -> None:
-        for row_w, _, _ in self._trait_rows:
-            row_w.deleteLater()
-        self._trait_rows.clear()
-        for t in traits:
-            self._add_trait_row(t.title, t.detail)
-
-    def _add_trait_row(self, title: str, detail: str) -> None:
-        row = QWidget()
-        hl = QHBoxLayout(row)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setSpacing(8)
-        t_edit = QLineEdit(title)
-        t_edit.setFixedWidth(165)
-        d_edit = QLineEdit(detail)
-        del_btn = QPushButton("删除")
-        del_btn.setObjectName("DangerBtn")
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        hl.addWidget(t_edit)
-        hl.addWidget(d_edit, 1)
-        hl.addWidget(del_btn)
-        entry = (row, t_edit, d_edit)
-        self._trait_rows.append(entry)
-        del_btn.clicked.connect(lambda: self._remove_trait_row(entry))
-        self._traits_list_layout.addWidget(row)
-
-    def _remove_trait_row(self, entry: tuple[QWidget, QLineEdit, QLineEdit]) -> None:
-        if entry in self._trait_rows:
-            self._trait_rows.remove(entry)
-            entry[0].deleteLater()
 
     def _refresh_standee_preview(self) -> None:
         default_img = os.path.join(
@@ -458,7 +504,8 @@ class CharacterEditorWindow(QWidget):
             self._turnaround_edit.setText(path)
 
     def _collect_profile(self) -> CharacterProfile:
-        lines = {k: list(v) for k, v in self._working_profile.lines.items()}
+        self._flush_current_action_lines()
+        lines = {k: list(v) for k, v in self._editable_lines.items()}
 
         def apply_category(cat: str, box: QPlainTextEdit) -> None:
             vals = self._parse_lines_box(box)
@@ -470,14 +517,6 @@ class CharacterEditorWindow(QWidget):
         apply_category("greeting", self._greeting_edit)
         apply_category("pat", self._pat_edit)
         apply_category("idle", self._idle_edit)
-        apply_category("float", self._float_edit)
-        apply_category("chatter", self._chatter_edit)
-
-        traits = [
-            CharacterTrait(t_e.text().strip(), d_e.text().strip())
-            for _, t_e, d_e in self._trait_rows
-            if t_e.text().strip() or d_e.text().strip()
-        ]
 
         return CharacterProfile(
             name=self._name_edit.text().strip(),
@@ -492,7 +531,9 @@ class CharacterEditorWindow(QWidget):
             custom_standee_path=self._custom_standee_path.strip(),
             custom_turnaround_path=self._turnaround_edit.text().strip(),
             ai_system_prompt=self._ai_prompt_edit.toPlainText().strip(),
-            appearance_traits=traits,
+            bubble_activity=CharacterLore.normalize_bubble_activity(
+                self._bubble_activity_combo.currentData()
+            ),
             lines=lines,
         )
 
@@ -500,6 +541,9 @@ class CharacterEditorWindow(QWidget):
         profile = self._collect_profile()
         self._service.save(profile)
         resolved = CharacterLore.get_active_profile()
+        self._working_profile = copy.deepcopy(resolved)
+        self._editable_lines = {k.lower(): list(v) for k, v in resolved.lines.items()}
+        self._load_action_line_category(self._current_action_line_category)
         self._on_applied(resolved)
         self._flash_status("✓ 已保存并在桌面实时生效！")
 

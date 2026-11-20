@@ -6,12 +6,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class CharacterTrait:
-    title: str = ""
-    detail: str = ""
-
-
-@dataclass
 class CharacterProfile:
     """User-configurable character profile & persona lines persisted to ~/.GeminiDesktopPet/character.json."""
 
@@ -27,5 +21,5 @@ class CharacterProfile:
     custom_standee_path: str = ""
     custom_turnaround_path: str = ""
     ai_system_prompt: str = ""
-    appearance_traits: list[CharacterTrait] = field(default_factory=list)
+    bubble_activity: str = "normal"
     lines: dict[str, list[str]] = field(default_factory=dict)
