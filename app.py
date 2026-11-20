@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import threading
@@ -391,7 +392,20 @@ class PetApplicationCoordinator(QObject):
         self._pet.sync_character_profile(profile)
         if self._profile_win is not None and self._profile_win.isVisible():
             self._profile_win.refresh_profile(self._settings)
+        if self._settings_win is not None:
+            self._settings_win.sync_from_settings(force=False)
         self._pet.show_bubble(f"已应用新角色设定「{profile.name}」喵✦", 4.0, force=True)
+
+    def _set_bubble_activity(self, activity: str) -> None:
+        """从设置中心更新活跃度并持久化到 character.json，同时同步桌宠与角色设定工坊。"""
+        norm = CharacterLore.normalize_bubble_activity(activity)
+        profile = copy.deepcopy(CharacterLore.get_active_profile())
+        profile.bubble_activity = norm
+        self._profile_service.save(profile)
+        resolved = CharacterLore.get_active_profile()
+        self._pet.sync_character_profile(resolved)
+        if self._editor_win is not None:
+            self._editor_win.sync_bubble_activity(norm)
 
     def _preview_appearance_from_settings(
         self, scale: Optional[float], opacity: Optional[float]
@@ -413,6 +427,7 @@ class PetApplicationCoordinator(QObject):
                     on_preview_appearance=self._preview_appearance_from_settings,
                     on_antigravity_sync_changed=self._pet.apply_antigravity_sync_preference,
                     on_auto_start_changed=self._set_auto_start,
+                    on_bubble_activity_changed=self._set_bubble_activity,
                 )
             self._settings_win.sync_from_settings()
             self._show_and_focus(self._settings_win)

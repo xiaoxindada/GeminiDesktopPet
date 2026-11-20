@@ -1218,7 +1218,7 @@ class PetWindow(QWidget):
         self._frame_timer.timeout.connect(self._frame_timer_tick)
 
         self._ai_timer = QTimer(self)
-        self._ai_timer.setInterval(4500)
+        self._ai_timer.setInterval(self._effective_ai_interval_ms())
         self._ai_timer.timeout.connect(self._ai_timer_tick)
 
         self._bubble_timer = QTimer(self)
@@ -2382,8 +2382,21 @@ class PetWindow(QWidget):
 
         return PetState.IDLE
 
+    def _effective_ai_interval_ms(self) -> int:
+        prof = self._idle_speech_profile()
+        if self._is_walking:
+            # 偏安静模式下单次漫步不超过 4.5 秒，避免长距离来回走动显得躁动
+            return min(prof.ai_interval_ms, 4500)
+        return prof.ai_interval_ms
+
+    def _sync_ai_timer_interval(self) -> None:
+        interval = self._effective_ai_interval_ms()
+        if self._ai_timer.interval() != interval:
+            self._ai_timer.setInterval(interval)
+
     def _restart_ai_timer(self) -> None:
         """回到常态待机后重新计时，避免刚恢复默认动作就立刻切到下一个自动动作。"""
+        self._sync_ai_timer_interval()
         if self._ai_timer.isActive():
             self._ai_timer.start()
 
@@ -2458,8 +2471,7 @@ class PetWindow(QWidget):
 
     def _can_trigger_idle_speech(self) -> bool:
         if (
-            not self._settings.show_speech_bubble
-            or not self.isVisible()
+            not self.isVisible()
             or self._settings.doze_mode
             or self._mouse_down
             or self._is_dragging
@@ -2490,7 +2502,7 @@ class PetWindow(QWidget):
         self._trigger_idle_speech()
 
     def _trigger_idle_speech(self) -> bool:
-        """抽取随机台词并切换到匹配动作，同时在气泡内展示。"""
+        """抽取随机台词并切换到匹配动作；仅开启默认气泡时弹出台词气泡。"""
         prof = self._idle_speech_profile()
         docked = self._settings.docked_side
         allow_running = (
@@ -2512,9 +2524,10 @@ class PetWindow(QWidget):
         self._idle_speech_next_delay_sec = random.uniform(
             prof.pet_min_sec, prof.pet_max_sec
         )
+        bubble_msg = line if self._settings.show_speech_bubble else None
 
         if docked != DockSide.NONE:
-            self._set_temporary_pose(pose, prof.bubble_duration_sec, line)
+            self._set_temporary_pose(pose, prof.bubble_duration_sec, bubble_msg)
         elif pose == PetState.RUNNING:
             self._override_pose = None
             self._override_is_autonomous = False
@@ -2526,21 +2539,23 @@ class PetWindow(QWidget):
             self._refresh_sprite_visual()
             self._update_sprite_transforms()
             self._stage_canvas.update()
-            self.show_bubble(line, prof.bubble_duration_sec)
+            if bubble_msg:
+                self.show_bubble(bubble_msg, prof.bubble_duration_sec)
         else:
-            self._set_autonomous_pose(pose, line, duration_sec=prof.bubble_duration_sec)
+            self._set_autonomous_pose(pose, bubble_msg, duration_sec=prof.bubble_duration_sec)
 
-        if (
-            self._speech_bubble.isVisible()
+        bubble_shown = (
+            bool(bubble_msg)
+            and self._speech_bubble.isVisible()
             and not self._is_chat_open
             and not self._sync_bubble_active
-        ):
-            self._idle_speech_bubble_active = True
-            self._restart_ai_timer()
-            return True
-        return False
+        )
+        self._idle_speech_bubble_active = bubble_shown
+        self._restart_ai_timer()
+        return True
 
     def _ai_timer_tick(self) -> None:
+        self._sync_ai_timer_interval()
         if (
             self._mouse_down
             or self._is_dragging
@@ -2563,6 +2578,7 @@ class PetWindow(QWidget):
             self._stage_canvas.update()
             return
 
+        prof = self._idle_speech_profile()
         if self._settings.docked_side != DockSide.NONE:
             if self._override_is_autonomous:
                 self._override_pose = None
@@ -2570,7 +2586,7 @@ class PetWindow(QWidget):
                 self._refresh_sprite_visual()
                 self._update_sprite_transforms()
                 self._stage_canvas.update()
-            if not self._is_hovering and random.random() < 0.35:
+            if not self._is_hovering and random.random() < prof.edge_peek_prob:
                 peek = (
                     PetState.EDGE_LEFT_PEEK
                     if self._settings.docked_side == DockSide.LEFT
@@ -2587,14 +2603,18 @@ class PetWindow(QWidget):
             self._refresh_sprite_visual()
             self._update_sprite_transforms()
             self._stage_canvas.update()
+            self._sync_ai_timer_interval()
             return
 
         # 仅在打盹模式下入睡，关闭时不再随机打盹
         self._is_sleeping = False
         prev_pose = self._override_pose if self._override_is_autonomous else None
         roll = random.random()
+        walk_cutoff = prof.ai_walk_prob
+        quirk_cutoff = walk_cutoff + prof.ai_quirk_prob
+        float_cutoff = quirk_cutoff + prof.ai_float_prob
 
-        if self._settings.auto_walk and not self._settings.anti_gravity_mode and roll < 0.36:
+        if self._settings.auto_walk and not self._settings.anti_gravity_mode and roll < walk_cutoff:
             self._override_pose = None
             self._override_is_autonomous = False
             self._is_walking = True
@@ -2603,7 +2623,8 @@ class PetWindow(QWidget):
             self._refresh_sprite_visual()
             self._update_sprite_transforms()
             self._stage_canvas.update()
-        elif roll < 0.62:
+            self._sync_ai_timer_interval()
+        elif roll < quirk_cutoff:
             quirks = [
                 PetState.IDLE2,
                 PetState.IDLE3,
@@ -2616,7 +2637,7 @@ class PetWindow(QWidget):
             candidates = [state for state in quirks if state != prev_pose] or quirks
             pick = random.choice(candidates)
             self._set_autonomous_pose(pick)
-        elif roll < 0.72 and not self._settings.anti_gravity_mode:
+        elif roll < float_cutoff and not self._settings.anti_gravity_mode:
             self._set_autonomous_pose(PetState.FLOAT)
         else:
             self._override_pose = None
@@ -4603,6 +4624,7 @@ class PetWindow(QWidget):
         self.setWindowTitle(profile.name)
         self._bubble_char_name_lbl.setText(profile.name)
         self._mark_pet_user_activity()
+        self._restart_ai_timer()
 
     def toggle_style_mode(self) -> None:
         next_mode = (

@@ -215,13 +215,13 @@ class CharacterEditorWindow(QWidget):
         c3_l.addLayout(tone_row)
 
         act_row = QHBoxLayout()
-        act_lbl = QLabel("气泡活跃程度")
+        act_lbl = QLabel("互动活跃度")
         act_lbl.setFixedWidth(125)
         act_lbl.setStyleSheet("color: #D4CEF5; background: transparent;")
         act_row.addWidget(act_lbl)
         self._bubble_activity_combo = QComboBox()
         self._bubble_activity_combo.setToolTip(
-            "开启「弹出默认气泡」后，控制无操作时随机说话与切换动作的频率"
+            "控制待机无操作时动作切换与随机气泡的频率（关闭默认气泡时同样生效）"
         )
         for opt in BUBBLE_ACTIVITY_OPTIONS:
             self._bubble_activity_combo.addItem(opt.label, opt.id)
@@ -581,6 +581,14 @@ class CharacterEditorWindow(QWidget):
         self._load_into_form(loaded)
         self._on_applied(loaded)
         self._flash_status("✓ 已从 character.json 重新加载并生效！")
+
+    def sync_bubble_activity(self, activity: str) -> None:
+        """外部（如设置中心）更新活跃度后同步表单下拉框与工作副本。"""
+        norm = CharacterLore.normalize_bubble_activity(activity)
+        self._working_profile.bubble_activity = norm
+        idx = self._bubble_activity_combo.findData(norm)
+        if idx >= 0:
+            self._bubble_activity_combo.setCurrentIndex(idx)
 
     def focus_bubble_section(self) -> None:
         """打开后自动滚动并聚焦到气泡活跃度与台词定义区域。"""

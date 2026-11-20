@@ -286,29 +286,53 @@ class BubbleActivityPreset:
     pet_min_sec: float
     pet_max_sec: float
     bubble_duration_sec: float
+    short_label: str = "适中节奏"
+    ai_interval_ms: int = 4500
+    ai_walk_prob: float = 0.36
+    ai_quirk_prob: float = 0.26
+    ai_float_prob: float = 0.10
+    edge_peek_prob: float = 0.35
 
 
 BUBBLE_ACTIVITY_OPTIONS: tuple[BubbleActivityPreset, ...] = (
     BubbleActivityPreset(
         "quiet",
-        "偏安静（空闲约 30~60 秒随机说一句，尽量少打扰）",
+        "偏安静（30~60 秒 · 舒缓少打扰）",
         30.0,
         60.0,
         4.5,
+        short_label="偏安静",
+        ai_interval_ms=9000,
+        ai_walk_prob=0.14,
+        ai_quirk_prob=0.18,
+        ai_float_prob=0.06,
+        edge_peek_prob=0.15,
     ),
     BubbleActivityPreset(
         "normal",
-        "适中节奏（空闲约 10~20 秒随机说一句 · 默认）",
+        "适中节奏（10~20 秒 · 默认）",
         10.0,
         20.0,
         4.5,
+        short_label="适中节奏",
+        ai_interval_ms=4500,
+        ai_walk_prob=0.36,
+        ai_quirk_prob=0.26,
+        ai_float_prob=0.10,
+        edge_peek_prob=0.35,
     ),
     BubbleActivityPreset(
         "lively",
-        "偏活跃（空闲约 5~10 秒高频随机互动）",
+        "偏活跃（5~10 秒 · 高频互动）",
         5.0,
         10.0,
         4.5,
+        short_label="偏活跃",
+        ai_interval_ms=2600,
+        ai_walk_prob=0.42,
+        ai_quirk_prob=0.34,
+        ai_float_prob=0.12,
+        edge_peek_prob=0.55,
     ),
 )
 _BUBBLE_ACTIVITY_MAP: dict[str, BubbleActivityPreset] = {

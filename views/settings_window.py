@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from typing import Callable, Optional
 
@@ -54,6 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.app_version import AppVersion
+from models.character_lore import BUBBLE_ACTIVITY_OPTIONS, CharacterLore
 from models.pet_settings import (
     DEFAULT_GEMINI_MODEL,
     THINKING_LEVEL_OPTIONS,
@@ -66,6 +68,7 @@ from models.pet_settings import (
 )
 from services.app_follow_service import AppFollowService
 from services.app_logger import AppLogger
+from services.character_profile_service import CharacterProfileService
 from services.followed_app_probe import FollowedAppProbe
 from services.gemini_chat_service import GeminiChatService
 from services.settings_service import SettingsService
@@ -491,6 +494,7 @@ class SettingsWindow(QWidget):
         on_preview_appearance: Optional[Callable[[Optional[float], Optional[float]], None]] = None,
         on_antigravity_sync_changed: Optional[Callable[[bool], None]] = None,
         on_auto_start_changed: Optional[Callable[[bool], None]] = None,
+        on_bubble_activity_changed: Optional[Callable[[str], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -505,12 +509,13 @@ class SettingsWindow(QWidget):
         self._preview_active = False
         self._on_antigravity_sync_changed = on_antigravity_sync_changed
         self._on_auto_start_changed = on_auto_start_changed
+        self._on_bubble_activity_changed = on_bubble_activity_changed
         self._models_refresh_worker: Optional[_ModelsRefreshWorker] = None
         self._draft_gemini_model: str = DEFAULT_GEMINI_MODEL
         self._loading = True
         self._self_updating = False
         self._dirty = False
-        self._saved_menu_values: dict[str, int | bool] = {}
+        self._saved_menu_values: dict[str, int | bool | str] = {}
         self._drag_offset = None
         self._positioned = False
         self._summary_rows: list[tuple[_SummaryRow, str, Callable[[], str]]] = []
@@ -748,6 +753,13 @@ class SettingsWindow(QWidget):
         specs = [
             (self._PAGE_BEHAVIOR, "弹出默认气泡", "按需主动说话", "行为互动",
              lambda: self._on_off(self._settings.show_speech_bubble)),
+            (
+                self._PAGE_BEHAVIOR,
+                "互动活跃度",
+                "控制待机动作切换与随机气泡频率",
+                "行为互动",
+                self._activity_summary_label,
+            ),
             (self._PAGE_GENERAL, "互动音效", "摸摸头与提示音", "通用设置",
              lambda: self._on_off(self._settings.sound_enabled)),
             (self._PAGE_GENERAL, "电脑状态感知", "低电量打盹与高负载提醒", "通用设置",
@@ -949,7 +961,17 @@ class SettingsWindow(QWidget):
         card.add_row(
             self._chk_bubble,
             "弹出默认气泡",
-            "开启后会在待机无操作时随机说台词并切换动作，关闭时仅在聊天或重要提示时显示",
+            "开启后待机无操作时会随机说台词并配合动作；关闭后仍按活跃度切换动作，仅在聊天或重要提示时显示气泡",
+        )
+        self._activity_combo = QComboBox()
+        self._activity_combo.setFixedWidth(260)
+        for opt in BUBBLE_ACTIVITY_OPTIONS:
+            self._activity_combo.addItem(opt.label, opt.id)
+        self._activity_combo.currentIndexChanged.connect(self._on_any_changed)
+        card.add_row(
+            self._activity_combo,
+            "互动活跃度",
+            "控制待机动作切换与随机气泡的频率（关闭气泡时同样生效）",
         )
 
         card = _Card(layout, "物理与特效")
@@ -1226,6 +1248,23 @@ class SettingsWindow(QWidget):
         finally:
             self._model_combo.blockSignals(False)
 
+    @staticmethod
+    def _current_bubble_activity() -> str:
+        return CharacterLore.normalize_bubble_activity(
+            CharacterLore.get_active_profile().bubble_activity
+        )
+
+    def _activity_summary_label(self) -> str:
+        return CharacterLore.get_bubble_activity_preset(
+            self._current_bubble_activity()
+        ).short_label
+
+    def _set_activity_combo(self, activity: str) -> None:
+        norm = CharacterLore.normalize_bubble_activity(activity)
+        idx = self._activity_combo.findData(norm)
+        if idx >= 0:
+            self._activity_combo.setCurrentIndex(idx)
+
     def _sync_menu_controls(self, preserve_drafts: bool) -> None:
         s = self._settings
         controls = (
@@ -1236,6 +1275,7 @@ class SettingsWindow(QWidget):
             ),
             ("scale", self._scale_slider.setValue, int(round(s.scale * 100))),
             ("show_speech_bubble", self._chk_bubble.setChecked, s.show_speech_bubble),
+            ("bubble_activity", self._set_activity_combo, self._current_bubble_activity()),
             ("auto_walk", self._chk_pin.setChecked, not s.auto_walk),
             ("doze_mode", self._chk_doze.setChecked, s.doze_mode),
             ("chat_sync_enabled", self._chk_ag_sync.setChecked, s.chat_sync_enabled),
@@ -1385,6 +1425,8 @@ class SettingsWindow(QWidget):
         sync_before = bool(self._settings.chat_sync_enabled)
         want_autostart = self._chk_autostart.isChecked()
         autostart_before = self._startup_enabled()
+        want_activity = CharacterLore.normalize_bubble_activity(self._activity_combo.currentData())
+        activity_before = self._current_bubble_activity()
 
         self._commit_ui_to_settings()
         try:
@@ -1392,6 +1434,14 @@ class SettingsWindow(QWidget):
             if follow_changed:
                 self._follow_service.sync_and_apply(self._settings)
             AppLogger.set_enabled(self._settings.enable_runtime_log)
+            if want_activity != activity_before:
+                if self._on_bubble_activity_changed is not None:
+                    self._on_bubble_activity_changed(want_activity)
+                else:
+                    profile_svc = CharacterProfileService(self._settings_service.settings_folder)
+                    profile = copy.deepcopy(CharacterLore.get_active_profile())
+                    profile.bubble_activity = want_activity
+                    profile_svc.save(profile)
         except Exception as exc:
             vars(self._settings).update(snapshot)
             self._cancel_appearance_preview()
