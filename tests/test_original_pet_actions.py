@@ -194,7 +194,30 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
                 pet._on_stage_mouse_move(
                     make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
                 )
-            assert pet._override_pose == PetState.FLOAT
+                pet._frame_timer_tick()
+            assert pet._visual_state == PetState.FLOAT
+            assert pet._shake_stage == 0
+            pet._on_stage_mouse_release(
+                make_mouse(QEvent.Type.MouseButtonRelease, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+            )
+
+            # 单向快速拖动立即跟手；按住停下后仍能悬浮。
+            pet.move(start_x, start_y)
+            pet._on_stage_mouse_press(
+                make_mouse(QEvent.Type.MouseButtonPress, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+            )
+            clock[0] += 0.02
+            gx += 24.0
+            pet._on_stage_mouse_move(
+                make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+            )
+            assert pet.x() == start_x + 24
+            clock[0] += 0.15
+            pet._frame_timer_tick()
+            assert pet._visual_state != PetState.FLOAT
+            clock[0] += 0.35
+            pet._frame_timer_tick()
+            assert pet._visual_state == PetState.FLOAT
             assert pet._shake_stage == 0
             pet._on_stage_mouse_release(
                 make_mouse(QEvent.Type.MouseButtonRelease, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
@@ -217,6 +240,8 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
                 (5.0, 5.0, 5.0, 5.0, 5.0, 2.0, 0.0),
                 (-5.0, -5.0, -5.0, -5.0, -5.0, -2.0, 0.0),
             ]
+            # 长按后才开始快速移动，识别窗口应从实际拖动起算。
+            clock[0] += 0.8
             for cycle in half_cycles:
                 for step in cycle:
                     clock[0] += 0.015
@@ -224,6 +249,9 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
                     pet._on_stage_mouse_move(
                         make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
                     )
+                    assert pet._visual_state != PetState.FLOAT
+                    pet._frame_timer_tick()
+                    assert pet._visual_state != PetState.FLOAT
                     if pet._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
                         if not seen_stages or seen_stages[-1] != pet._override_pose:
                             seen_stages.append(pet._override_pose)
@@ -257,6 +285,8 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
                     pet._on_stage_mouse_move(
                         make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
                     )
+                    pet._frame_timer_tick()
+                    assert pet._visual_state != PetState.FLOAT
             assert pet._override_pose == PetState.REDHOT
             assert any(pt.glyph == "💢" for pt in pet._particles)
 
@@ -391,6 +421,8 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
             pet._on_stage_mouse_move(
                 make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
             )
+            clock[0] += 0.15
+            pet._frame_timer_tick()
             assert pet._is_shaking is False
             assert pet._override_pose == PetState.FLOAT
             pet._on_stage_mouse_release(

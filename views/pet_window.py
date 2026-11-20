@@ -117,6 +117,7 @@ _DOZE_ZZZ_ANCHOR: dict[PetStyleMode, tuple[float, float]] = {
 }
 
 # 拖拽晃动检测：按单轴位移行程识别快速折返，兼容高回报率鼠标与垂直/斜向晃动
+_DRAG_FLOAT_DELAY_S = 0.12
 _SHAKE_STROKE_MIN_PX = 10.0
 _SHAKE_MIN_SPEED_PX_S = 240.0
 _SHAKE_STROKE_MAX_AGE_S = 0.45
@@ -652,6 +653,7 @@ class PetWindow(QWidget):
         self._is_dragging = False
         self._is_shaking = False
         self._drag_start_global = QPointF()
+        self._drag_started_mono = 0.0
         self._win_start_left = 0.0
         self._win_start_top = 0.0
         self._last_move_global = QPointF()
@@ -2042,17 +2044,13 @@ class PetWindow(QWidget):
             and now >= self._override_until_utc
         ):
             if self._is_dragging:
-                # 高频晃动活跃期禁止切回反重力悬浮动作；仅在真正停止晃动后才恢复普通拖拽悬浮。
-                if not self._is_drag_float_allowed(time.monotonic()):
-                    self._override_until_utc = now + timedelta(seconds=1.2)
-                else:
+                # 初段动作由每帧判定，鼠标停住后也能进入悬浮。
+                if self._is_drag_float_allowed(time.monotonic()):
                     self._is_shaking = False
                     self._shake_stage = 0
+                    self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                     if self._override_pose != PetState.FLOAT:
                         self._override_pose = PetState.FLOAT
-                        self._override_is_autonomous = False
-                        self._pending_sulk_after_dizzy = False
-                        self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                         self._refresh_sprite_visual()
             elif self._pending_sulk_after_dizzy and self._is_sulk and self.isVisible():
                 # 头晕结束后在同一帧直接衔接闹脾气，避免定时竞态闪回默认待机。
@@ -2774,6 +2772,12 @@ class PetWindow(QWidget):
     def _is_drag_float_allowed(self, now_mono: Optional[float] = None) -> bool:
         """判断当前拖拽是否应展示正常反重力悬浮反馈（高频晃动或炸毛锁定期间禁止切回反重力动作）。"""
         now = time.monotonic() if now_mono is None else now_mono
+        if self._is_dragging:
+            # 首个快速行程可能是摇晃的去程，给反向行程留出识别时间。
+            fast_stroke = self._shake_axis_x[0] != 0 or self._shake_axis_y[0] != 0
+            delay = _SHAKE_STROKE_MAX_AGE_S if fast_stroke else _DRAG_FLOAT_DELAY_S
+            if now - self._drag_started_mono < delay:
+                return False
         if self._shake_energy >= _SHAKE_ANNOYED_THRESHOLD:
             return False
         if (
@@ -2976,13 +2980,19 @@ class PetWindow(QWidget):
 
             if not self._is_dragging and math.hypot(dx, dy) > 5.0:
                 now_mono = time.monotonic()
+                if self._is_drag_float_allowed(now_mono):
+                    # 先保持当前立绘；行走和贴边姿势在离开原位置时切回完整待机立绘。
+                    self._override_pose = (
+                        self._visual_state
+                        if not self._is_walking and self._settings.docked_side == DockSide.NONE
+                        else PetState.IDLE
+                    )
+                    self._override_until_utc = datetime.now(timezone.utc)
+                self._drag_started_mono = now_mono
                 self._is_walking = False
                 self._is_dragging = True
                 self._override_is_autonomous = False
                 self._pending_sulk_after_dizzy = False
-                if self._is_drag_float_allowed(now_mono):
-                    self._override_pose = PetState.FLOAT
-                    self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                 if self._settings.docked_side != DockSide.NONE:
                     old_local_rect = self._get_local_sprite_rect()
                     self._settings.docked_side = DockSide.NONE
