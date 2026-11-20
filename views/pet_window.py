@@ -104,6 +104,9 @@ _SYNC_QUEUE_LIMIT = 10
 _SYNC_HEARTBEAT_SEC = 60.0
 _SYNC_BUBBLE_IDLE_MS = 3000
 
+# 无操作随机台词：定时器检测周期（毫秒），具体间隔由当前角色档案的气泡活跃程度决定
+_IDLE_SPEECH_CHECK_MS = 1000
+
 # 打盹 Zzz 的落点比例（相对贴图内容矩形：横向从中心右偏、纵向从顶部下移）。
 # Q 版头部约占贴图高度 1/3、宽度 2/3，0.18H 正好停在头顶右侧发际（参考图效果）；
 # 标准立绘头高只有约 1/9（实测 1603px 图高约 175px），沿用 0.18H 会掉到肩颈，
@@ -654,6 +657,16 @@ class PetWindow(QWidget):
         self._transient_bubble_size: Optional[QSize] = None
         self._bubble_custom_offset: Optional[QPoint] = None
         self._last_monitor_bubble_utc = datetime.min.replace(tzinfo=timezone.utc)
+        self._speech_bubble_enabled_applied = bool(settings.show_speech_bubble)
+        self._idle_speech_bubble_active = False
+        self._last_pet_activity_monotonic = time.monotonic()
+        self._last_idle_speech_monotonic = self._last_pet_activity_monotonic
+        idle_prof = self._idle_speech_profile()
+        self._idle_speech_next_delay_sec = random.uniform(
+            idle_prof.pet_min_sec, idle_prof.pet_max_sec
+        )
+        self._last_idle_speech_line: Optional[str] = None
+        self._last_idle_speech_state: Optional[PetState] = None
         self._first_shown = False
         self._closing_handled = False
         self._active_chat_workers: list[_ChatWorker] = []
@@ -1215,6 +1228,10 @@ class PetWindow(QWidget):
         self._hover_grace_timer.setInterval(380)
         self._hover_grace_timer.timeout.connect(self._on_hover_grace_timeout)
 
+        self._idle_speech_timer = QTimer(self)
+        self._idle_speech_timer.setInterval(_IDLE_SPEECH_CHECK_MS)
+        self._idle_speech_timer.timeout.connect(self._idle_speech_timer_tick)
+
     # ==================== Lifecycle Events ====================
 
     def showEvent(self, event) -> None:
@@ -1240,9 +1257,11 @@ class PetWindow(QWidget):
                 self._spawn_star_burst(self.width() * 0.5, self.height() * 0.65, 8)
 
             self._last_tick_utc = datetime.now(timezone.utc)
+            self._mark_pet_user_activity()
             self._frame_timer.start()
             self._ai_timer.start()
             self._monitor_timer.start()
+            self._idle_speech_timer.start()
             if self._settings.chat_sync_enabled:
                 # 等窗口真正可见再启动播报，避免气泡被吞。
                 QTimer.singleShot(0, self._auto_resume_antigravity_sync)
@@ -1265,6 +1284,7 @@ class PetWindow(QWidget):
         self._bubble_timer.stop()
         self._monitor_timer.stop()
         self._hover_grace_timer.stop()
+        self._idle_speech_timer.stop()
         self._ag_sync_timer.stop()
         for worker in list(self._active_chat_workers):
             if worker.isRunning():
@@ -1308,6 +1328,7 @@ class PetWindow(QWidget):
             and isinstance(watched, QWidget)
             and (watched is self._speech_bubble or self._speech_bubble.isAncestorOf(watched))
         ):
+            self._mark_pet_user_activity()
             if etype == QEvent.Type.MouseButtonPress and self._sync_thinking_visible:
                 # 点击阅读后继续接收思维续写，保留正在阅读的内容直至倒计时结束。
                 self._sync_thinking_pinned = True
@@ -1344,6 +1365,7 @@ class PetWindow(QWidget):
     def _on_hover_entered(self) -> None:
         self._hover_grace_timer.stop()
         self._is_hovering = True
+        self._mark_pet_user_activity()
         if self._settings.docked_side != DockSide.NONE and self._override_pose is None:
             self._refresh_sprite_visual()
 
@@ -1446,6 +1468,11 @@ class PetWindow(QWidget):
                 self._reanchor_docked_position()
 
         self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
+        bubble_enabled_now = bool(self._settings.show_speech_bubble)
+        if bubble_enabled_now != self._speech_bubble_enabled_applied:
+            self._speech_bubble_enabled_applied = bubble_enabled_now
+            if bubble_enabled_now:
+                self._mark_pet_user_activity()
         # 停止播报后的设置刷新也要保留正在倒计时的同步气泡。
         if (
             not self._settings.show_speech_bubble
@@ -1819,6 +1846,7 @@ class PetWindow(QWidget):
     # ==================== Public Greeting / Preview ====================
 
     def show_and_greet(self, custom_message: Optional[str] = None) -> None:
+        self._mark_pet_user_activity()
         if not self._first_shown:
             self._suppress_loaded_default_greeting = True
             self._restore_or_init_position()
@@ -1855,6 +1883,7 @@ class PetWindow(QWidget):
 
     def preview_state(self, state: PetState, style: Optional[PetStyleMode] = None) -> None:
         """从动作图鉴演示指定动作，若同时切换形象则先锁定目标动作，避免闪回默认立绘。"""
+        self._mark_pet_user_activity()
         self._is_walking = False
         self._is_sleeping = state in (
             PetState.SLEEPING,
@@ -1887,6 +1916,7 @@ class PetWindow(QWidget):
         self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.5, 5)
 
     def trigger_external_sprite_preview(self, sprite_key: str) -> None:
+        self._mark_pet_user_activity()
         parsed = PetState.from_sprite_key(sprite_key)
         if parsed is not None:
             self._set_temporary_pose(parsed, 4.5, CharacterLore.pick_line_for_state(parsed))
@@ -2374,6 +2404,8 @@ class PetWindow(QWidget):
         self,
         state: PetState,
         bubble_message: Optional[str] = None,
+        *,
+        duration_sec: float = 4.2,
     ) -> None:
         """设置持续到下一次自动决策的闲置动作，避免动作切换间隙闪回默认待机。"""
         self._is_walking = False
@@ -2387,22 +2419,119 @@ class PetWindow(QWidget):
         self._stage_canvas.update()
 
         if bubble_message and bubble_message.strip():
-            self.show_bubble(bubble_message, 4.2)
+            self.show_bubble(bubble_message, duration_sec)
 
     # ==================== Quota Lookup Feedback ====================
 
     def react_quota_lookup_started(self) -> None:
         """额度查询开始：Q 版与标准立绘统一切到查找姿势，查询提示交给额度窗口自身。"""
+        self._mark_pet_user_activity()
         self._set_temporary_pose(PetState.SEARCHING, 12.0)
 
     def react_quota_lookup_finished(self, snapshot: object) -> None:
         """额度查询结束：成功切开心姿势，失败切沮丧姿势；额度结果只在看板展示，不弹气泡。"""
+        self._mark_pet_user_activity()
         if bool(getattr(snapshot, "success", False)):
             self._set_temporary_pose(PetState.HAPPY, 4.0)
         else:
             self._set_temporary_pose(PetState.OOPS, 4.5)
 
     # ==================== Autonomous AI & System Monitor ====================
+
+    @staticmethod
+    def _idle_speech_profile():
+        return CharacterLore.get_bubble_activity_preset()
+
+    def _mark_pet_user_activity(self) -> None:
+        prof = self._idle_speech_profile()
+        self._last_pet_activity_monotonic = time.monotonic()
+        self._idle_speech_next_delay_sec = random.uniform(
+            prof.pet_min_sec, prof.pet_max_sec
+        )
+
+    def _can_trigger_idle_speech(self) -> bool:
+        if (
+            not self._settings.show_speech_bubble
+            or not self.isVisible()
+            or self._settings.doze_mode
+            or self._mouse_down
+            or self._is_dragging
+            or self._is_falling
+            or self._is_sulk
+            or self._is_chat_open
+            or bool(self._waiting_chat_workers)
+            or (self._override_pose is not None and not self._override_is_autonomous)
+            or self._sync_bubble_active
+            or self._sync_thinking_pinned
+            or self._sync_waiting_for_reply
+            or bool(self._ag_playback)
+            or self._is_forced_bubble_active
+            or self._speech_bubble.isVisible()
+            or self._context_menu.isVisible()
+            or (self._settings.docked_side != DockSide.NONE and self._is_hovering)
+        ):
+            return False
+        return True
+
+    def _idle_speech_timer_tick(self) -> None:
+        if not self._can_trigger_idle_speech():
+            return
+        now_mono = time.monotonic()
+        idle_since = max(self._last_pet_activity_monotonic, self._last_idle_speech_monotonic)
+        if now_mono - idle_since < self._idle_speech_next_delay_sec:
+            return
+        self._trigger_idle_speech()
+
+    def _trigger_idle_speech(self) -> bool:
+        """抽取随机台词并切换到匹配动作，同时在气泡内展示。"""
+        prof = self._idle_speech_profile()
+        docked = self._settings.docked_side
+        allow_running = (
+            self._settings.auto_walk
+            and not self._settings.anti_gravity_mode
+            and docked == DockSide.NONE
+        )
+        line, pose = CharacterLore.pick_idle_speech(
+            docked_side=docked,
+            allow_running=allow_running,
+            allow_float=True,
+            exclude_line=self._last_idle_speech_line,
+            exclude_state=self._last_idle_speech_state,
+        )
+        now_mono = time.monotonic()
+        self._last_idle_speech_line = line
+        self._last_idle_speech_state = pose
+        self._last_idle_speech_monotonic = now_mono
+        self._idle_speech_next_delay_sec = random.uniform(
+            prof.pet_min_sec, prof.pet_max_sec
+        )
+
+        if docked != DockSide.NONE:
+            self._set_temporary_pose(pose, prof.bubble_duration_sec, line)
+        elif pose == PetState.RUNNING:
+            self._override_pose = None
+            self._override_is_autonomous = False
+            self._pending_sulk_after_dizzy = False
+            self._is_sleeping = False
+            self._is_walking = True
+            self._walk_dir = 1 if random.randint(0, 1) == 0 else -1
+            self._current_state = PetState.RUNNING
+            self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
+            self.show_bubble(line, prof.bubble_duration_sec)
+        else:
+            self._set_autonomous_pose(pose, line, duration_sec=prof.bubble_duration_sec)
+
+        if (
+            self._speech_bubble.isVisible()
+            and not self._is_chat_open
+            and not self._sync_bubble_active
+        ):
+            self._idle_speech_bubble_active = True
+            self._restart_ai_timer()
+            return True
+        return False
 
     def _ai_timer_tick(self) -> None:
         if (
@@ -2412,6 +2541,7 @@ class PetWindow(QWidget):
             or (self._override_pose is not None and not self._override_is_autonomous)
             or self._is_sulk
             or self._is_chat_open
+            or (self._idle_speech_bubble_active and self._speech_bubble.isVisible())
         ):
             return
 
@@ -2439,8 +2569,7 @@ class PetWindow(QWidget):
                     if self._settings.docked_side == DockSide.LEFT
                     else PetState.EDGE_RIGHT_PEEK
                 )
-                msg = CharacterLore.pick_line("edge") if random.random() < 0.4 else None
-                self._set_temporary_pose(peek, 3.2, msg)
+                self._set_temporary_pose(peek, 3.2)
             return
 
         if self._is_walking:
@@ -2467,8 +2596,6 @@ class PetWindow(QWidget):
             self._refresh_sprite_visual()
             self._update_sprite_transforms()
             self._stage_canvas.update()
-            if random.random() < 0.25:
-                self.show_bubble(CharacterLore.pick_line("running"), 2.5)
         elif roll < 0.62:
             quirks = [
                 PetState.IDLE2,
@@ -2481,11 +2608,9 @@ class PetWindow(QWidget):
             ]
             candidates = [state for state in quirks if state != prev_pose] or quirks
             pick = random.choice(candidates)
-            msg = CharacterLore.pick_line_for_state(pick) if random.random() < 0.3 else None
-            self._set_autonomous_pose(pick, msg)
+            self._set_autonomous_pose(pick)
         elif roll < 0.72 and not self._settings.anti_gravity_mode:
-            msg = None if prev_pose == PetState.FLOAT else CharacterLore.pick_line("float")
-            self._set_autonomous_pose(PetState.FLOAT, msg)
+            self._set_autonomous_pose(PetState.FLOAT)
         else:
             self._override_pose = None
             self._override_is_autonomous = False
@@ -2493,8 +2618,6 @@ class PetWindow(QWidget):
             self._refresh_sprite_visual()
             self._update_sprite_transforms()
             self._stage_canvas.update()
-            if random.random() < 0.12:
-                self.show_bubble(CharacterLore.pick_line("chatter"), 5.0)
 
     def _monitor_timer_tick(self) -> None:
         if (
@@ -2529,6 +2652,7 @@ class PetWindow(QWidget):
     # ==================== Mouse Drag, Shake & Headpat ====================
 
     def _on_stage_mouse_press(self, event: QMouseEvent) -> None:
+        self._mark_pet_user_activity()
         if event.button() == Qt.MouseButton.RightButton:
             self._context_menu.popup(event.globalPosition().toPoint())
             event.accept()
@@ -2556,6 +2680,7 @@ class PetWindow(QWidget):
     def _on_stage_mouse_double_click(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        self._mark_pet_user_activity()
         self._mouse_down = False
         self._is_dragging = False
         self._is_walking = False
@@ -2637,6 +2762,7 @@ class PetWindow(QWidget):
     def _on_stage_mouse_release(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton or not self._mouse_down:
             return
+        self._mark_pet_user_activity()
         self._mouse_down = False
         if self._stage_canvas.mouseGrabber() is self._stage_canvas:
             self._stage_canvas.releaseMouse()
@@ -2664,9 +2790,9 @@ class PetWindow(QWidget):
             elif self._is_sulk:
                 self.show_bubble("……哼！（摸摸头才原谅你喵）", 3.5)
             else:
-                pose = random.choice([PetState.HAPPY, PetState.ASKING, PetState.SURPRISED])
-                self.show_bubble(CharacterLore.pick_line("chatter"), 4.5)
-                self._set_temporary_pose(pose, 2.4)
+                line = CharacterLore.pick_line("chatter")
+                pose = CharacterLore.match_pose_for_line("chatter", line)
+                self._set_temporary_pose(pose, 4.5, line)
                 self._sound.play(PetSoundEffect.CHIME)
             if was_walking and (self._use_std_walk_rig or self._use_chibi_walk_rig):
                 self._refresh_sprite_visual()
@@ -2718,6 +2844,7 @@ class PetWindow(QWidget):
             self._set_temporary_pose(PetState.ANNOYED, 1.8, CharacterLore.pick_line("annoyed"))
 
     def trigger_pat(self) -> None:
+        self._mark_pet_user_activity()
         self._settings.total_pats += 1
         self._settings.favorability = min(9999, self._settings.favorability + 1)
         self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
@@ -2824,6 +2951,15 @@ class PetWindow(QWidget):
     # ==================== Speech Bubble & Inline Gemini Chat ====================
 
     def _hide_speech_bubble(self) -> None:
+        was_idle_speech = self._idle_speech_bubble_active
+        self._idle_speech_bubble_active = False
+        if was_idle_speech:
+            prof = self._idle_speech_profile()
+            now_mono = time.monotonic()
+            self._last_idle_speech_monotonic = now_mono
+            self._idle_speech_next_delay_sec = random.uniform(
+                prof.pet_min_sec, prof.pet_max_sec
+            )
         self._sync_thinking_pinned = False
         self._sync_thinking_visible = False
         self._sync_waiting_for_reply = False
@@ -3831,6 +3967,7 @@ class PetWindow(QWidget):
     def _show_sync_event(self, event: SyncEvent) -> None:
         if not event.text.strip():
             return
+        self._mark_pet_user_activity()
         message = self._sync_event_text(event)
         if self._ag_sync_session_id is not None:
             replace_last = bool(event.replace and self._ag_sync_events and (
@@ -3914,6 +4051,7 @@ class PetWindow(QWidget):
         self._bubble_timer.start(max(200, int(round(duration_sec * 1000.0))))
 
     def _show_non_chat_bubble(self, message: str, *, from_sync: bool = False) -> None:
+        self._idle_speech_bubble_active = False
         already_showing_sync = (
             from_sync and self._sync_bubble_active and self._speech_bubble.isVisible()
         )
@@ -3971,6 +4109,8 @@ class PetWindow(QWidget):
         self._speech_bubble.raise_()
 
     def open_chat_dialog(self) -> None:
+        self._mark_pet_user_activity()
+        self._idle_speech_bubble_active = False
         self._is_chat_open = True
         self._sync_thinking_pinned = False
         self._sync_thinking_visible = False
@@ -4030,6 +4170,7 @@ class PetWindow(QWidget):
         self._set_temporary_pose(PetState.LISTENING, 10.0)
 
     def set_speech_bubble_enabled(self, enabled: bool) -> None:
+        self._mark_pet_user_activity()
         self._settings.show_speech_bubble = enabled
         self.apply_settings_to_window()
         if enabled:
@@ -4045,6 +4186,7 @@ class PetWindow(QWidget):
         self.settings_synced.emit()
 
     def _toggle_chat(self) -> None:
+        self._mark_pet_user_activity()
         if not self._is_chat_open:
             self.open_chat_dialog()
             return
@@ -4061,6 +4203,7 @@ class PetWindow(QWidget):
             self._restart_ai_timer()
 
     def _close_bubble_click(self) -> None:
+        self._mark_pet_user_activity()
         was_chat_open = self._is_chat_open
         self._is_chat_open = False
         self._is_forced_bubble_active = False
@@ -4071,6 +4214,7 @@ class PetWindow(QWidget):
             self._restart_ai_timer()
 
     def _submit_chat(self) -> None:
+        self._mark_pet_user_activity()
         if self._chat_readonly:
             self._chat_save_status.setText("Antigravity 实时同步中，输入已禁用喵")
             return
@@ -4451,6 +4595,7 @@ class PetWindow(QWidget):
     def sync_character_profile(self, profile: CharacterProfile) -> None:
         self.setWindowTitle(profile.name)
         self._bubble_char_name_lbl.setText(profile.name)
+        self._mark_pet_user_activity()
 
     def toggle_style_mode(self) -> None:
         next_mode = (

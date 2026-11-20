@@ -946,7 +946,11 @@ class SettingsWindow(QWidget):
         self._chk_antigrav = self._make_switch()
         card.add_row(self._chk_antigrav, "反重力悬浮模式", "脱离地面常驻漂浮")
         self._chk_bubble = self._make_switch()
-        card.add_row(self._chk_bubble, "弹出默认气泡", "关闭时仅在聊天或重要提示时显示气泡")
+        card.add_row(
+            self._chk_bubble,
+            "弹出默认气泡",
+            "开启后会在待机无操作时随机说台词并切换动作，关闭时仅在聊天或重要提示时显示",
+        )
 
         card = _Card(layout, "物理与特效")
         self._chk_gravity = self._make_switch()
