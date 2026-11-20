@@ -186,6 +186,10 @@ class SpriteManager:
         painter.end()
         return result
 
+    def display_height_ratio(self, pixmap: QPixmap) -> float:
+        # 标准抱膝立绘按头部比例与站姿对齐，避免短姿势被放大到站立高度。
+        return 0.60 if pixmap is self._standard_cache.get(PetState.SULK.value) else 1.0
+
     def get(self, state: PetState, style_mode: PetStyleMode = PetStyleMode.CHIBI) -> Optional[QPixmap]:
         if style_mode == PetStyleMode.STANDARD:
             std_pix = self._get_standard_for_state(state)

@@ -1840,7 +1840,7 @@ class PetWindow(QWidget):
             content = self._pixmap_content_rect(self._active_static_pixmap)
             cw = float(content.width())
             ch = float(content.height())
-            rh = sprite_h
+            rh = sprite_h * self._sprites.display_height_ratio(self._active_static_pixmap)
             rw = rh * (cw / ch) if ch > 0 else rh * 0.85
         else:
             rh = sprite_h
