@@ -586,6 +586,9 @@ class PetWindow(QWidget):
         # Sprite & behavioral state
         self._current_state = PetState.IDLE
         self._override_pose: Optional[PetState] = None
+        # 区分自动闲置动作与交互临时动作：自动动作持续到下次决策直接衔接，不提前回落默认待机
+        self._override_is_autonomous = False
+        self._pending_sulk_after_dizzy = False
         self._override_until_utc = datetime.min.replace(tzinfo=timezone.utc)
         self._active_static_pixmap: Optional[QPixmap] = None
         self._use_chibi_walk_rig = False
@@ -1277,6 +1280,7 @@ class PetWindow(QWidget):
         super().closeEvent(event)
 
     def hideEvent(self, event) -> None:
+        self._mouse_down = False
         if getattr(self, "_ui_ready", False):
             self._is_chat_open = False
             self._is_forced_bubble_active = False
@@ -1369,6 +1373,7 @@ class PetWindow(QWidget):
             self._is_hovering = False
             if self._settings.docked_side != DockSide.NONE and self._override_pose is None:
                 self._refresh_sprite_visual()
+                self._restart_ai_timer()
 
     # ==================== Settings & Layout Sync ====================
 
@@ -1422,6 +1427,7 @@ class PetWindow(QWidget):
         pinned = not self._settings.auto_walk
         if pinned and self._is_walking:
             self._is_walking = False
+            self._restart_ai_timer()
 
         # 同步右键菜单勾选状态与气泡展示
         self._apply_doze_transition()
@@ -1684,6 +1690,9 @@ class PetWindow(QWidget):
         self._settings.docked_side = DockSide.NONE
         self._is_falling = False
         self._bubble_custom_offset = None
+        if self._override_is_autonomous:
+            self._override_pose = None
+            self._override_is_autonomous = False
         self._current_state = self._resolve_resting_state()
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
         new_x = area.right() + 1 - self.width() - 28
@@ -1691,6 +1700,7 @@ class PetWindow(QWidget):
         self.move(int(round(new_x)), int(round(new_y)))
         self._update_dock_alignment()
         self._refresh_sprite_visual()
+        self._restart_ai_timer()
         self._settings.last_left = float(self.x())
         self._settings.last_top = float(self.y())
         self._settings_service.save(self._settings)
@@ -1843,12 +1853,47 @@ class PetWindow(QWidget):
         self._sound.play(PetSoundEffect.SPARKLE)
         self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.55, 7)
 
+    def preview_state(self, state: PetState, style: Optional[PetStyleMode] = None) -> None:
+        """从动作图鉴演示指定动作，若同时切换形象则先锁定目标动作，避免闪回默认立绘。"""
+        self._is_walking = False
+        self._is_sleeping = state in (
+            PetState.SLEEPING,
+            PetState.EDGE_LEFT_SLEEP,
+            PetState.EDGE_RIGHT_SLEEP,
+        )
+        self._override_pose = state
+        self._override_is_autonomous = False
+        self._pending_sulk_after_dizzy = False
+        self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=4.5)
+
+        if style is not None and self._settings.style_mode != style:
+            self._settings.style_mode = style
+            self._settings_service.save(self._settings)
+            self.apply_settings_to_window()
+            self.settings_synced.emit()
+            if self._settings.docked_side != DockSide.NONE:
+                self._reanchor_docked_position()
+
+        if not self.isVisible():
+            if not self._first_shown:
+                self._suppress_loaded_default_greeting = True
+            self.show()
+
+        self._refresh_sprite_visual()
+        self._update_sprite_transforms()
+        self._stage_canvas.update()
+        self.show_bubble(CharacterLore.pick_line_for_state(state), 4.5)
+        self._sound.play(PetSoundEffect.CHIME)
+        self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.5, 5)
+
     def trigger_external_sprite_preview(self, sprite_key: str) -> None:
         parsed = PetState.from_sprite_key(sprite_key)
         if parsed is not None:
             self._set_temporary_pose(parsed, 4.5, CharacterLore.pick_line_for_state(parsed))
         else:
             self._override_pose = None
+            self._override_is_autonomous = False
+            self._pending_sulk_after_dizzy = False
             self._use_chibi_walk_rig = False
             self._use_std_walk_rig = False
             self._active_static_pixmap = self._sprites.get_by_key(sprite_key, self._settings.style_mode)
@@ -1865,6 +1910,8 @@ class PetWindow(QWidget):
         dock_side: DockSide,
     ) -> None:
         self._override_pose = None
+        self._override_is_autonomous = False
+        self._pending_sulk_after_dizzy = False
         self._is_dragging = False
         self._is_falling = False
         self._is_sleeping = False
@@ -1912,18 +1959,33 @@ class PetWindow(QWidget):
                 self._is_walking = False
                 self._is_sleeping = False
                 self._override_pose = PetState.THINKING
+                self._override_is_autonomous = False
+                self._pending_sulk_after_dizzy = False
                 self._refresh_sprite_visual()
-        elif self._override_pose is not None and now >= self._override_until_utc:
+        elif (
+            self._override_pose is not None
+            and not self._override_is_autonomous
+            and now >= self._override_until_utc
+        ):
             if self._is_dragging:
                 # 拖拽中临时表情结束后保持悬浮拖拽姿态，避免退回旧贴边半身图。
                 if self._override_pose != PetState.FLOAT:
                     self._override_pose = PetState.FLOAT
+                    self._override_is_autonomous = False
+                    self._pending_sulk_after_dizzy = False
                     self._refresh_sprite_visual()
+            elif self._pending_sulk_after_dizzy and self._is_sulk and self.isVisible():
+                # 头晕结束后在同一帧直接衔接闹脾气，避免定时竞态闪回默认待机。
+                self._pending_sulk_after_dizzy = False
+                self._enter_sulk_after_dizzy()
             else:
+                self._pending_sulk_after_dizzy = False
                 self._override_pose = None
+                self._override_is_autonomous = False
                 if self._is_sulk:
                     self._is_sulk = False
                 self._refresh_sprite_visual()
+                self._restart_ai_timer()
 
         # Gravity fall physics
         if (
@@ -1944,6 +2006,7 @@ class PetWindow(QWidget):
                 self._landing_squash = 1.0
                 self._current_state = self._resolve_resting_state()
                 self._refresh_sprite_visual()
+                self._restart_ai_timer()
                 self._sound.play(PetSoundEffect.BOING)
             else:
                 self.move(self.x(), int(round(next_top)))
@@ -1951,6 +2014,7 @@ class PetWindow(QWidget):
         # Autonomous horizontal walk along taskbar
         if (
             self._is_walking
+            and not self._mouse_down
             and not self._is_dragging
             and not self._is_falling
             and self._settings.docked_side == DockSide.NONE
@@ -1998,16 +2062,17 @@ class PetWindow(QWidget):
                 tx = math.sin(self._anim_time * 48.0) * 4.0
         elif self._is_walking:
             sx = -1.0 if self._walk_dir > 0 else 1.0
-            rig = self._active_walk_rig()
-            if self._settings.style_mode == PetStyleMode.STANDARD and rig.standard_complete:
-                p = self._anim_time * 6.8
-                self._update_std_walk_rig(p, s)
-            elif self._settings.style_mode == PetStyleMode.CHIBI and rig.chibi_complete:
-                p = self._anim_time * 7.6
-                self._update_chibi_walk_rig(p, s)
-            else:
-                ty = -abs(math.sin(self._anim_time * 11.0)) * 7.0
-                angle = math.sin(self._anim_time * 11.0) * 2.8 * self._walk_dir
+            if not self._mouse_down:
+                rig = self._active_walk_rig()
+                if self._settings.style_mode == PetStyleMode.STANDARD and rig.standard_complete:
+                    p = self._anim_time * 6.8
+                    self._update_std_walk_rig(p, s)
+                elif self._settings.style_mode == PetStyleMode.CHIBI and rig.chibi_complete:
+                    p = self._anim_time * 7.6
+                    self._update_chibi_walk_rig(p, s)
+                else:
+                    ty = -abs(math.sin(self._anim_time * 11.0)) * 7.0
+                    angle = math.sin(self._anim_time * 11.0) * 2.8 * self._walk_dir
         elif self._override_pose == PetState.THINKING:
             sy = 1.0 + 0.016 * math.sin(self._anim_time * 3.0)
             angle = 1.8 * math.sin(self._anim_time * 1.8)
@@ -2021,7 +2086,11 @@ class PetWindow(QWidget):
                     -20.0,
                     1.3,
                 )
-        elif self._settings.anti_gravity_mode or self._current_state == PetState.FLOAT:
+        elif (
+            self._settings.anti_gravity_mode
+            or self._current_state == PetState.FLOAT
+            or self._override_pose == PetState.FLOAT
+        ):
             ty = -16.0 + 8.5 * math.sin(self._anim_time * 2.1)
             angle = 3.2 * math.sin(self._anim_time * 1.4)
             sy = 1.0 + 0.015 * math.sin(self._anim_time * 2.1 + 0.8)
@@ -2276,6 +2345,11 @@ class PetWindow(QWidget):
 
         return PetState.IDLE
 
+    def _restart_ai_timer(self) -> None:
+        """回到常态待机后重新计时，避免刚恢复默认动作就立刻切到下一个自动动作。"""
+        if self._ai_timer.isActive():
+            self._ai_timer.start()
+
     def _set_temporary_pose(
         self,
         state: PetState,
@@ -2286,12 +2360,34 @@ class PetWindow(QWidget):
         self._is_walking = False
         self._is_sleeping = state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP)
         self._override_pose = state
+        self._override_is_autonomous = False
+        self._pending_sulk_after_dizzy = False
         self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=duration_sec)
         self._refresh_sprite_visual()
+        self._update_sprite_transforms()
         self._stage_canvas.update()
 
         if bubble_message and bubble_message.strip():
             self.show_bubble(bubble_message, duration_sec, force=force_bubble)
+
+    def _set_autonomous_pose(
+        self,
+        state: PetState,
+        bubble_message: Optional[str] = None,
+    ) -> None:
+        """设置持续到下一次自动决策的闲置动作，避免动作切换间隙闪回默认待机。"""
+        self._is_walking = False
+        self._is_sleeping = False
+        self._override_pose = state
+        self._override_is_autonomous = True
+        self._pending_sulk_after_dizzy = False
+        self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
+        self._refresh_sprite_visual()
+        self._update_sprite_transforms()
+        self._stage_canvas.update()
+
+        if bubble_message and bubble_message.strip():
+            self.show_bubble(bubble_message, 4.2)
 
     # ==================== Quota Lookup Feedback ====================
 
@@ -2313,7 +2409,7 @@ class PetWindow(QWidget):
             self._mouse_down
             or self._is_dragging
             or self._is_falling
-            or self._override_pose is not None
+            or (self._override_pose is not None and not self._override_is_autonomous)
             or self._is_sulk
             or self._is_chat_open
         ):
@@ -2322,11 +2418,21 @@ class PetWindow(QWidget):
         # 打盹模式：保持原地睡觉待机，不漫步、不做随机动作也不闲聊
         if self._settings.doze_mode:
             self._is_walking = False
+            self._override_pose = None
+            self._override_is_autonomous = False
             self._current_state = self._resolve_resting_state()
             self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
             return
 
         if self._settings.docked_side != DockSide.NONE:
+            if self._override_is_autonomous:
+                self._override_pose = None
+                self._override_is_autonomous = False
+                self._refresh_sprite_visual()
+                self._update_sprite_transforms()
+                self._stage_canvas.update()
             if not self._is_hovering and random.random() < 0.35:
                 peek = (
                     PetState.EDGE_LEFT_PEEK
@@ -2339,19 +2445,28 @@ class PetWindow(QWidget):
 
         if self._is_walking:
             self._is_walking = False
+            self._override_pose = None
+            self._override_is_autonomous = False
             self._current_state = self._resolve_resting_state()
             self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
             return
 
         # 仅在打盹模式下入睡，关闭时不再随机打盹
         self._is_sleeping = False
+        prev_pose = self._override_pose if self._override_is_autonomous else None
         roll = random.random()
 
         if self._settings.auto_walk and not self._settings.anti_gravity_mode and roll < 0.36:
+            self._override_pose = None
+            self._override_is_autonomous = False
             self._is_walking = True
             self._walk_dir = 1 if random.randint(0, 1) == 0 else -1
             self._current_state = PetState.RUNNING
             self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
             if random.random() < 0.25:
                 self.show_bubble(CharacterLore.pick_line("running"), 2.5)
         elif roll < 0.62:
@@ -2364,14 +2479,20 @@ class PetWindow(QWidget):
                 PetState.THINKING,
                 PetState.DRAWING,
             ]
-            pick = random.choice(quirks)
+            candidates = [state for state in quirks if state != prev_pose] or quirks
+            pick = random.choice(candidates)
             msg = CharacterLore.pick_line_for_state(pick) if random.random() < 0.3 else None
-            self._set_temporary_pose(pick, 4.2, msg)
+            self._set_autonomous_pose(pick, msg)
         elif roll < 0.72 and not self._settings.anti_gravity_mode:
-            self._set_temporary_pose(PetState.FLOAT, 4.5, CharacterLore.pick_line("float"))
+            msg = None if prev_pose == PetState.FLOAT else CharacterLore.pick_line("float")
+            self._set_autonomous_pose(PetState.FLOAT, msg)
         else:
+            self._override_pose = None
+            self._override_is_autonomous = False
             self._current_state = self._resolve_resting_state()
             self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
             if random.random() < 0.12:
                 self.show_bubble(CharacterLore.pick_line("chatter"), 5.0)
 
@@ -2416,16 +2537,12 @@ class PetWindow(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
-        was_walking = self._is_walking
         self._mouse_down = True
         self._is_dragging = False
         self._is_falling = False
-        self._is_walking = False
         self._is_sleeping = False
         self._shake_energy = 0.0
         self._prev_vx = 0.0
-        if was_walking:
-            self._refresh_sprite_visual()
 
         gpos = event.globalPosition()
         self._drag_start_global = QPointF(gpos.x(), gpos.y())
@@ -2445,6 +2562,10 @@ class PetWindow(QWidget):
         if self._stage_canvas.mouseGrabber() is self._stage_canvas:
             self._stage_canvas.releaseMouse()
         self.open_quota_requested.emit()
+        if self._use_std_walk_rig or self._use_chibi_walk_rig:
+            self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
         event.accept()
 
     def _on_stage_mouse_move(self, event: QMouseEvent) -> None:
@@ -2457,8 +2578,11 @@ class PetWindow(QWidget):
             dy = cur_g.y() - self._drag_start_global.y()
 
             if not self._is_dragging and math.hypot(dx, dy) > 5.0:
+                self._is_walking = False
                 self._is_dragging = True
                 self._override_pose = PetState.FLOAT
+                self._override_is_autonomous = False
+                self._pending_sulk_after_dizzy = False
                 if self._settings.docked_side != DockSide.NONE:
                     old_local_rect = self._get_local_sprite_rect()
                     self._settings.docked_side = DockSide.NONE
@@ -2470,6 +2594,7 @@ class PetWindow(QWidget):
                     self._update_dock_alignment()
                 else:
                     self._refresh_sprite_visual()
+                self._update_sprite_transforms()
                 self._stage_canvas.update()
 
             if self._is_dragging:
@@ -2517,6 +2642,8 @@ class PetWindow(QWidget):
             self._stage_canvas.releaseMouse()
 
         if not self._is_dragging:
+            was_walking = self._is_walking
+            self._is_walking = False
             local_pos = event.position()
             sprite_rect = self._get_local_sprite_rect()
             rel_y = (
@@ -2541,20 +2668,27 @@ class PetWindow(QWidget):
                 self.show_bubble(CharacterLore.pick_line("chatter"), 4.5)
                 self._set_temporary_pose(pose, 2.4)
                 self._sound.play(PetSoundEffect.CHIME)
+            if was_walking and (self._use_std_walk_rig or self._use_chibi_walk_rig):
+                self._refresh_sprite_visual()
+                self._update_sprite_transforms()
+                self._stage_canvas.update()
             return
 
         self._is_dragging = False
 
-        # 剧烈摇晃触发头晕 -> 闹脾气序列
+        # 剧烈摇晃触发头晕 -> 闹脾气序列（由主循环在头晕到期时直接衔接，避免闪回待机）
         if self._shake_energy >= 2.2:
             self._is_sulk = True
             self._sulk_pats_needed = 2
             self._set_temporary_pose(PetState.DIZZY, 2.6, CharacterLore.pick_line("dizzy"))
-            QTimer.singleShot(2600, self._enter_sulk_after_dizzy)
+            self._pending_sulk_after_dizzy = True
         else:
             self._override_pose = None
+            self._override_is_autonomous = False
+            self._pending_sulk_after_dizzy = False
             self._current_state = self._resolve_resting_state()
             self._try_edge_dock_or_gravity_drop()
+            self._restart_ai_timer()
 
         self._settings.last_left = float(self.x())
         self._settings.last_top = float(self.y())
@@ -3923,13 +4057,18 @@ class PetWindow(QWidget):
         else:
             self._hide_speech_bubble()
         self._relayout_stage_top()
+        if self._override_pose is None:
+            self._restart_ai_timer()
 
     def _close_bubble_click(self) -> None:
+        was_chat_open = self._is_chat_open
         self._is_chat_open = False
         self._is_forced_bubble_active = False
         self._sync_chat_controls()
         self._hide_speech_bubble()
         self._relayout_stage_top()
+        if was_chat_open and self._override_pose is None:
+            self._restart_ai_timer()
 
     def _submit_chat(self) -> None:
         if self._chat_readonly:
@@ -4140,6 +4279,9 @@ class PetWindow(QWidget):
             self._settings.docked_side = DockSide.NONE
             self._current_state = self._resolve_resting_state()
         else:
+            if self._override_is_autonomous:
+                self._override_pose = None
+                self._override_is_autonomous = False
             self._is_falling = True
 
         self._settings_service.save(self._settings)
@@ -4196,9 +4338,14 @@ class PetWindow(QWidget):
         self._current_state = self._resolve_resting_state()
         if self._settings.docked_side != DockSide.NONE:
             self._override_pose = None
+            self._override_is_autonomous = False
+            self._pending_sulk_after_dizzy = False
             self._refresh_sprite_visual()
             return
         if not self._first_shown or not self.isVisible():
+            if self._override_is_autonomous:
+                self._override_pose = None
+                self._override_is_autonomous = False
             return
         if doze:
             # 先打个哈欠，临时动作结束后自动回落到睡姿

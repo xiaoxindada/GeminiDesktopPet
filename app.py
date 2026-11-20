@@ -368,12 +368,8 @@ class PetApplicationCoordinator(QObject):
         self._show_and_focus(self._profile_win)
 
     def _on_profile_preview_state(self, state: PetState, style: PetStyleMode) -> None:
-        # 图鉴演示明确携带形象版本，沿用正常切换入口保存用户选择。
-        if self._settings.style_mode != style:
-            self._pet._set_style_mode(style)
-        if not self._pet.isVisible():
-            self._pet.show()
-        self._pet.trigger_external_sprite_preview(state.to_sprite_key())
+        # 图鉴演示明确携带形象版本，先锁定目标动作再切换形象，避免切换瞬间闪回默认立绘。
+        self._pet.preview_state(state, style)
 
     def open_character_editor_window(self) -> None:
         if self._editor_win is None:
