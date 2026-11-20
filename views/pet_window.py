@@ -501,6 +501,7 @@ class PetWindow(QWidget):
 
     open_profile_requested = Signal()
     open_character_editor_requested = Signal()
+    open_bubble_editor_requested = Signal()
     open_settings_requested = Signal()
     open_quota_requested = Signal()
     open_update_requested = Signal()
@@ -1121,6 +1122,11 @@ class PetWindow(QWidget):
             slot=self._on_menu_show_speech_bubble,
             tip="关闭后仅在聊天或重要提示时显示气泡",
         )
+        self._act_bubble_editor = self._new_menu_action(
+            "📜 气泡台词与活跃度...",
+            slot=self.open_bubble_editor_requested,
+            tip="打开角色设定工坊并直接定位到气泡活跃度与随机台词定义",
+        )
         self._act_sync_chat = self._new_menu_action(
             "💬 实时同步 Antigravity 对话",
             checkable=True,
@@ -1181,6 +1187,7 @@ class PetWindow(QWidget):
             self._act_reset_position,
             self._act_doze,
             self._act_show_bubble,
+            self._act_bubble_editor,
             self._act_sync_chat,
             MENU_SEPARATOR,
             ("🎀 形象切换", list(self._style_actions.values())),

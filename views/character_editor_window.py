@@ -6,7 +6,7 @@ import copy
 import os
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -56,6 +56,9 @@ class CharacterEditorWindow(QWidget):
         self._working_profile: CharacterProfile = self._service.load()
         self._editable_lines: dict[str, list[str]] = {}
         self._current_action_line_category: str = IDLE_EDITOR_LINE_CATEGORIES[0][0]
+        self._focus_scroll_timer = QTimer(self)
+        self._focus_scroll_timer.setSingleShot(True)
+        self._focus_scroll_timer.timeout.connect(self._scroll_to_bubble_section)
 
         self.setWindowTitle("✏️ Gemini 娘 · 自定义角色设定与台词工坊")
         self.setWindowIcon(TrayIconService.load_app_icon())
@@ -96,7 +99,9 @@ class CharacterEditorWindow(QWidget):
         # Scroll body
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        self._scroll_area = scroll
         body = QWidget()
+        self._body_widget = body
         bl = QVBoxLayout(body)
         bl.setContentsMargins(0, 0, 6, 0)
         bl.setSpacing(12)
@@ -189,6 +194,7 @@ class CharacterEditorWindow(QWidget):
         # ③ AI Tone, Bubble Activity & Lines
         c3 = QFrame()
         c3.setObjectName("CardPanel")
+        self._bubble_section_card = c3
         c3_l = QVBoxLayout(c3)
         c3_l.setContentsMargins(14, 14, 14, 14)
         c3_l.setSpacing(8)
@@ -575,6 +581,39 @@ class CharacterEditorWindow(QWidget):
         self._load_into_form(loaded)
         self._on_applied(loaded)
         self._flash_status("✓ 已从 character.json 重新加载并生效！")
+
+    def focus_bubble_section(self) -> None:
+        """打开后自动滚动并聚焦到气泡活跃度与台词定义区域。"""
+        self._bubble_activity_combo.setFocus()
+        self._scroll_to_bubble_section()
+        # 首次 show() 后延迟一帧待布局计算完成再精确定位滚动位置
+        self._focus_scroll_timer.start(0)
+        self._flash_status("✦ 已定位到气泡活跃度与台词设定")
+
+    def _scroll_to_bubble_section(self) -> None:
+        layout = self._body_widget.layout()
+        if layout is not None:
+            layout.activate()
+            self._body_widget.adjustSize()
+
+        vbar = self._scroll_area.verticalScrollBar()
+        vp_h = self._scroll_area.viewport().height()
+        if vp_h <= 0:
+            return
+
+        card_top = self._bubble_section_card.mapTo(self._body_widget, QPoint(0, 0)).y()
+        bubble_top = max(
+            card_top,
+            self._bubble_activity_combo.mapTo(self._body_widget, QPoint(0, 0)).y() - 10,
+        )
+        action_bottom = (
+            self._action_line_edit.mapTo(self._body_widget, QPoint(0, 0)).y()
+            + self._action_line_edit.height()
+            + 12
+        )
+        # 在默认高度下尽量保留卡片 ③ 标题；窗口较矮时优先保证气泡活跃度与动作台词处于视口内
+        target = max(card_top, min(bubble_top, action_bottom - vp_h))
+        vbar.setValue(max(vbar.minimum(), min(target, vbar.maximum())))
 
     def _flash_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)

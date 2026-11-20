@@ -188,6 +188,7 @@ class PetApplicationCoordinator(QObject):
         # PetWindow signals
         self._pet.open_profile_requested.connect(self.open_profile_window)
         self._pet.open_character_editor_requested.connect(self.open_character_editor_window)
+        self._pet.open_bubble_editor_requested.connect(self.open_bubble_editor_window)
         self._pet.open_settings_requested.connect(self.open_settings_window)
         self._pet.open_quota_requested.connect(self.toggle_quota_window)
         self._pet.open_update_requested.connect(self.open_update_window)
@@ -378,6 +379,12 @@ class PetApplicationCoordinator(QObject):
                 on_profile_applied=self._on_character_profile_applied,
             )
         self._show_and_focus(self._editor_win)
+
+    def open_bubble_editor_window(self) -> None:
+        """打开角色设定工坊并直接定位到气泡活跃度与台词定义区域。"""
+        self.open_character_editor_window()
+        if self._editor_win is not None:
+            self._editor_win.focus_bubble_section()
 
     def _on_character_profile_applied(self, profile: CharacterProfile) -> None:
         CharacterLore.set_active_profile(profile)
