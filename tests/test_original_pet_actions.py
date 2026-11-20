@@ -188,7 +188,16 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
             pet._on_stage_mouse_press(
                 make_mouse(QEvent.Type.MouseButtonPress, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
             )
-            for step in (6.0,) * 8 + (-6.0,) * 8:
+            # 普通拖动刚越过启动距离即可很快悬浮。
+            gx += 6.0
+            clock[0] += 0.06
+            pet._on_stage_mouse_move(
+                make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+            )
+            clock[0] += 0.07
+            pet._frame_timer_tick()
+            assert pet._visual_state == PetState.FLOAT
+            for step in (6.0,) * 7 + (-6.0,) * 8:
                 clock[0] += 0.06
                 gx += step
                 pet._on_stage_mouse_move(
@@ -215,7 +224,7 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
             clock[0] += 0.15
             pet._frame_timer_tick()
             assert pet._visual_state != PetState.FLOAT
-            clock[0] += 0.35
+            clock[0] += 0.05
             pet._frame_timer_tick()
             assert pet._visual_state == PetState.FLOAT
             assert pet._shake_stage == 0
@@ -266,7 +275,23 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
                 make_mouse(QEvent.Type.MouseButtonRelease, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
             )
 
-            # 3. 启用粒子后，垂直晃动同样触发炸毛并产生怒气粒子；半空松手进入 DIZZY 且触发重力下落
+            assert pet._visual_state == PetState.DIZZY
+            assert pet._pending_sulk_after_dizzy and pet._is_sulk
+            assert pet._is_falling
+            for _ in range(60):
+                pet._last_tick_utc = datetime.now(timezone.utc) - timedelta(seconds=0.05)
+                pet._frame_timer_tick()
+                assert pet._visual_state == PetState.DIZZY
+                if not pet._is_falling:
+                    break
+            assert not pet._is_falling
+            sound.play.assert_any_call(PetSoundEffect.BOING)
+            assert sound.play.call_args_list.count(angry_calls[0]) == 1
+            pet._override_until_utc = datetime.now(timezone.utc) - timedelta(seconds=0.1)
+            pet._frame_timer_tick()
+            assert pet._visual_state == PetState.SULK
+
+            # 3. 持续普通频率的垂直摇晃产生怒气粒子，松手进入眩晕和重力下落。
             settings.particles_enabled = True
             pet._is_sulk = False
             pet._is_falling = False
@@ -278,16 +303,16 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
             pet._on_stage_mouse_press(
                 make_mouse(QEvent.Type.MouseButtonPress, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
             )
-            for sign in (1, -1, 1, -1, 1):
+            for sign in (1, -1) * 5:
                 for _ in range(6):
-                    clock[0] += 0.015
-                    gy += sign * 5.0
+                    clock[0] += 0.035
+                    gy += sign * 10.0
                     pet._on_stage_mouse_move(
                         make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
                     )
                     pet._frame_timer_tick()
-                    assert pet._visual_state != PetState.FLOAT
-            assert pet._override_pose == PetState.REDHOT
+                    assert pet._visual_state not in (PetState.FLOAT, PetState.REDHOT)
+            assert pet._override_pose == PetState.PUFFED
             assert any(pt.glyph == "💢" for pt in pet._particles)
 
             pet._on_stage_mouse_release(
@@ -356,36 +381,110 @@ def test_drag_shake_puffed_dizzy_sulk_and_coax(app, sprites, tmp_path):
             pet._on_stage_mouse_press(
                 make_mouse(QEvent.Type.MouseButtonPress, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
             )
-            hf_stages: list[PetState] = []
-            for sign in (1, -1, 1, -1, 1, -1, 1, -1):
-                for _ in range(3):
-                    clock[0] += 0.011
-                    gx += sign * 4.0
+
+            def shake_to_redhot(*, from_float=False):
+                nonlocal gx
+                hf_stages: list[PetState] = []
+                for sign in (1, -1) * 4:
+                    for _ in range(3):
+                        clock[0] += 0.011
+                        gx += sign * 4.0
+                        pet._on_stage_mouse_move(
+                            make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+                        )
+                        if not from_float or hf_stages:
+                            assert pet._visual_state != PetState.FLOAT
+                        pet._frame_timer_tick()
+                        if not from_float or hf_stages:
+                            assert pet._visual_state != PetState.FLOAT
+                        if pet._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
+                            if not hf_stages or hf_stages[-1] != pet._override_pose:
+                                hf_stages.append(pet._override_pose)
+                assert hf_stages == [PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT]
+                assert pet._is_shaking is True
+
+            shake_to_redhot()
+
+            # 短暂停顿容许继续换向；停稳后无需新的鼠标事件即可结束立绘与抖动。
+            clock[0] += 0.08
+            pet._frame_timer_tick()
+            assert pet._visual_state == PetState.REDHOT
+            clock[0] += 0.12
+            pet._frame_timer_tick()
+            assert not pet._is_shaking
+            assert pet._visual_state == PetState.IDLE
+            assert pet._sprite_trans_x == 0.0
+
+            # 保持按住，反复停顿和续晃；暂停时的细微鼠标抖动不应播放悬浮。
+            for pause in (0.24, 0.72):
+                shake_to_redhot()
+                clock[0] += pause
+                pet._frame_timer_tick()
+                assert pet._visual_state == PetState.IDLE
+                for delta in (1.0, -1.0) * 4:
+                    gx += delta
+                    clock[0] += 0.025
                     pet._on_stage_mouse_move(
                         make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
                     )
-                    if pet._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
-                        if not hf_stages or hf_stages[-1] != pet._override_pose:
-                            hf_stages.append(pet._override_pose)
-            assert hf_stages == [PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT]
-            assert pet._is_shaking is True
+                    pet._frame_timer_tick()
+                    assert pet._visual_state == PetState.IDLE
 
-            # 持续高频晃动期间即使计时阈值到达，主循环也绝不回退到反重力动作 FLOAT
-            pet._override_until_utc = datetime.now(timezone.utc) - timedelta(seconds=0.1)
-            pet._frame_timer_tick()
-            assert pet._override_pose == PetState.REDHOT
-            assert pet._override_pose != PetState.FLOAT
+            # 停晃后轻轻移开即可悬浮，不必重新拖满一个摇晃行程。
+            for _ in range(3):
+                clock[0] += 0.035
+                gx += 2.0
+                pet._on_stage_mouse_move(
+                    make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+                )
+                pet._frame_timer_tick()
+            assert pet._visual_state == PetState.FLOAT
 
-            # 真正停止晃动超过保持窗口且能量消退后，恢复正常拖拽悬浮 FLOAT
-            clock[0] += 1.0
-            pet._shake_energy = 0.0
-            pet._override_until_utc = datetime.now(timezone.utc) - timedelta(seconds=0.1)
+            # 单向加速和一次快速修正都属于正常拖动，立绘应稳定。
+            for delta in (16.0, 16.0, 16.0, -12.0):
+                clock[0] += 0.025
+                gx += delta
+                pet._on_stage_mouse_move(
+                    make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+                )
+                pet._frame_timer_tick()
+                assert pet._visual_state == PetState.FLOAT
+            clock[0] += 0.22
             pet._frame_timer_tick()
-            assert pet._is_shaking is False
-            assert pet._override_pose == PetState.FLOAT
+            assert pet._visual_state == PetState.FLOAT
+
+            # 晃动直接改为平移，保持鼠标按下时从炸毛直接衔接悬浮。
+            shake_to_redhot(from_float=True)
+            for _ in range(12):
+                clock[0] += 0.035
+                gx -= 3.0
+                pet._on_stage_mouse_move(
+                    make_mouse(QEvent.Type.MouseMove, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
+                )
+                pet._frame_timer_tick()
+                assert pet._visual_state in (PetState.REDHOT, PetState.FLOAT)
+            assert pet._visual_state == PetState.FLOAT
+
+            # 若停稳后的松手先于下一帧，也应安静落地。
+            shake_to_redhot(from_float=True)
+            clock[0] += 0.20
+            sound.reset_mock()
             pet._on_stage_mouse_release(
                 make_mouse(QEvent.Type.MouseButtonRelease, local_center, QPointF(gx, gy), Qt.MouseButton.LeftButton)
             )
+
+            assert pet._is_falling
+            for _ in range(60):
+                pet._last_tick_utc = datetime.now(timezone.utc) - timedelta(seconds=0.05)
+                pet._frame_timer_tick()
+                assert pet._visual_state not in (PetState.DIZZY, PetState.SULK)
+                assert not pet._pending_sulk_after_dizzy
+                assert pet._landing_squash == 0.0
+                if not pet._is_falling:
+                    break
+            assert not pet._is_falling
+            assert pet.y() + pet.height() == screen_area.bottom() + 1
+            sound.play.assert_not_called()
 
             # 8. 处于未过期 ANNOYED 时立即再次点按并拖动，起步不闪回 FLOAT；普通反重力模式拖拽与松手悬浮正常
             pet._is_sulk = False

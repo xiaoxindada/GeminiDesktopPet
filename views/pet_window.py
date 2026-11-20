@@ -117,11 +117,14 @@ _DOZE_ZZZ_ANCHOR: dict[PetStyleMode, tuple[float, float]] = {
 }
 
 # 拖拽晃动检测：按单轴位移行程识别快速折返，兼容高回报率鼠标与垂直/斜向晃动
-_DRAG_FLOAT_DELAY_S = 0.12
+_DRAG_FLOAT_DELAY_S = 0.06
+_FAST_DRAG_FLOAT_DELAY_S = 0.18
+_DRAG_FLOAT_MIN_TRAVEL_PX = 4.0
 _SHAKE_STROKE_MIN_PX = 10.0
 _SHAKE_MIN_SPEED_PX_S = 240.0
 _SHAKE_STROKE_MAX_AGE_S = 0.45
 _SHAKE_REVERSAL_COOLDOWN_S = 0.045
+_SHAKE_RAPID_REVERSAL_S = 0.18
 _SHAKE_STROKE_IDLE_RESET_S = 0.30
 _SHAKE_ENERGY_GAIN = 0.85
 _SHAKE_DECAY_PER_SEC = 0.65
@@ -129,7 +132,8 @@ _SHAKE_ENERGY_MAX = 5.0
 _SHAKE_ANNOYED_THRESHOLD = 1.0
 _SHAKE_PUFFED_THRESHOLD = 2.0
 _SHAKE_REDHOT_THRESHOLD = 3.1
-_SHAKE_HOLD_ACTIVE_S = 0.65
+_SHAKE_STOP_DELAY_S = 0.18
+_SHAKE_HOLD_ACTIVE_S = 0.36
 _SHAKE_RELEASE_GRACE_S = 1.0
 _POST_SHAKE_PAT_GRACE_S = 0.75
 _HOVER_PAT_COOLDOWN_S = 0.40
@@ -652,8 +656,10 @@ class PetWindow(QWidget):
         self._mouse_down = False
         self._is_dragging = False
         self._is_shaking = False
+        self._quiet_shake_drop = False
         self._drag_start_global = QPointF()
-        self._drag_started_mono = 0.0
+        self._drag_started_mono: Optional[float] = None
+        self._drag_float_origin = QPointF()
         self._win_start_left = 0.0
         self._win_start_top = 0.0
         self._last_move_global = QPointF()
@@ -664,6 +670,7 @@ class PetWindow(QWidget):
         self._shake_peak_energy = 0.0
         self._shake_stage = 0
         self._shake_last_reversal_mono = 0.0
+        self._rapid_shake_intervals = 0
         self._shake_last_active_mono = 0.0
         self._shake_last_particle_mono = 0.0
         self._shake_last_sound_mono = 0.0
@@ -2022,6 +2029,8 @@ class PetWindow(QWidget):
         dt = max(0.001, min(0.05, (now - self._last_tick_utc).total_seconds()))
         self._last_tick_utc = now
         self._anim_time += dt
+        if self._is_dragging:
+            self._settle_stopped_shake(time.monotonic())
         if self._shake_energy > 0:
             self._shake_energy = max(0.0, self._shake_energy - dt * _SHAKE_DECAY_PER_SEC)
         if self._drag_tilt_vx != 0.0:
@@ -2048,6 +2057,7 @@ class PetWindow(QWidget):
                 if self._is_drag_float_allowed(time.monotonic()):
                     self._is_shaking = False
                     self._shake_stage = 0
+                    self._quiet_shake_drop = False
                     self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                     if self._override_pose != PetState.FLOAT:
                         self._override_pose = PetState.FLOAT
@@ -2091,11 +2101,13 @@ class PetWindow(QWidget):
                 self.move(self.x(), int(round(floor_top)))
                 self._is_falling = False
                 self._fall_velocity_y = 0.0
-                self._landing_squash = 1.0
+                if not self._quiet_shake_drop:
+                    self._landing_squash = 1.0
+                    self._sound.play(PetSoundEffect.BOING)
+                self._quiet_shake_drop = False
                 self._current_state = self._resolve_resting_state()
                 self._refresh_sprite_visual()
                 self._restart_ai_timer()
-                self._sound.play(PetSoundEffect.BOING)
             else:
                 self.move(self.x(), int(round(next_top)))
 
@@ -2153,7 +2165,6 @@ class PetWindow(QWidget):
                 amp = (
                     6.5
                     if self._override_pose == PetState.REDHOT
-                    or self._shake_energy >= _SHAKE_REDHOT_THRESHOLD
                     else (
                         4.8
                         if self._override_pose == PetState.PUFFED
@@ -2393,7 +2404,7 @@ class PetWindow(QWidget):
         if self._override_pose is not None:
             active = self._override_pose
         elif self._is_dragging:
-            active = PetState.FLOAT
+            active = PetState.FLOAT if self._is_drag_float_allowed() else PetState.IDLE
         elif (
             not self._is_walking
             and not self._is_sleeping
@@ -2764,19 +2775,46 @@ class PetWindow(QWidget):
         self._shake_peak_energy = 0.0
         self._shake_stage = 0
         self._shake_last_reversal_mono = 0.0
+        self._rapid_shake_intervals = 0
         self._shake_last_active_mono = 0.0
         self._shake_last_particle_mono = 0.0
         self._shake_axis_x = [0, 0.0, 0.0, 0.0]
         self._shake_axis_y = [0, 0.0, 0.0, 0.0]
 
+    def _settle_stopped_shake(self, now_mono: float) -> None:
+        if self._shake_last_active_mono <= 0.0:
+            return
+        # 换向间允许短暂停顿；彻底停住或已转为单向拖动时，立即结束本轮晃动。
+        stopped = now_mono - self._last_move_mono >= _SHAKE_STOP_DELAY_S
+        if not stopped and now_mono - self._shake_last_active_mono < _SHAKE_HOLD_ACTIVE_S:
+            return
+
+        was_shaking = self._is_shaking
+        self._reset_shake_tracking()
+        self._last_move_mono = 0.0
+        # 一次快速修正也可能产生折返。只有已展示摇晃反馈才需要从该动作还原。
+        if not was_shaking and (not self._quiet_shake_drop or self._override_pose == PetState.FLOAT):
+            return
+        drift = self._last_move_global - self._drag_float_origin
+        dragging_on = not stopped and math.hypot(drift.x(), drift.y()) >= _DRAG_FLOAT_MIN_TRAVEL_PX
+        self._quiet_shake_drop = not dragging_on
+        self._drag_float_origin = QPointF(self._last_move_global)
+        self._drag_started_mono = now_mono if dragging_on else None
+        if self._override_pose in (None, PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT, PetState.FLOAT):
+            self._override_pose = PetState.FLOAT if dragging_on else PetState.IDLE
+            self._override_until_utc = (
+                datetime.max.replace(tzinfo=timezone.utc) if dragging_on else datetime.now(timezone.utc)
+            )
+            self._refresh_sprite_visual()
+
     def _is_drag_float_allowed(self, now_mono: Optional[float] = None) -> bool:
         """判断当前拖拽是否应展示正常反重力悬浮反馈（高频晃动或炸毛锁定期间禁止切回反重力动作）。"""
         now = time.monotonic() if now_mono is None else now_mono
         if self._is_dragging:
-            # 首个快速行程可能是摇晃的去程，给反向行程留出识别时间。
+            # 起拖和停晃后的续拖共用判定。快速起步多留一次换向的时间。
             fast_stroke = self._shake_axis_x[0] != 0 or self._shake_axis_y[0] != 0
-            delay = _SHAKE_STROKE_MAX_AGE_S if fast_stroke else _DRAG_FLOAT_DELAY_S
-            if now - self._drag_started_mono < delay:
+            delay = _FAST_DRAG_FLOAT_DELAY_S if fast_stroke else _DRAG_FLOAT_DELAY_S
+            if self._drag_started_mono is None or now - self._drag_started_mono < delay:
                 return False
         if self._shake_energy >= _SHAKE_ANNOYED_THRESHOLD:
             return False
@@ -2881,9 +2919,15 @@ class PetWindow(QWidget):
                 self._override_until_utc,
                 datetime.now(timezone.utc) + timedelta(seconds=1.6),
             )
-        if (now_mono - self._shake_last_reversal_mono) < _SHAKE_REVERSAL_COOLDOWN_S:
+        interval = now_mono - self._shake_last_reversal_mono
+        if interval < _SHAKE_REVERSAL_COOLDOWN_S:
             return False
 
+        # 单次加速不足以炸毛，连续快速换向才与长时间的普通摇晃区分开。
+        if self._shake_last_reversal_mono and interval <= _SHAKE_RAPID_REVERSAL_S:
+            self._rapid_shake_intervals += 1
+        else:
+            self._rapid_shake_intervals = 0
         self._shake_last_reversal_mono = now_mono
         self._shake_energy = min(_SHAKE_ENERGY_MAX, self._shake_energy + _SHAKE_ENERGY_GAIN)
         self._shake_peak_energy = max(self._shake_peak_energy, self._shake_energy)
@@ -2929,7 +2973,9 @@ class PetWindow(QWidget):
 
         self._mouse_down = True
         self._is_dragging = False
+        self._quiet_shake_drop = False
         self._is_falling = False
+        self._landing_squash = 0.0
         self._is_sleeping = False
         self._pat_travel = 0.0
         if not continuing_shake:
@@ -2944,6 +2990,7 @@ class PetWindow(QWidget):
 
         gpos = event.globalPosition()
         self._drag_start_global = QPointF(gpos.x(), gpos.y())
+        self._drag_float_origin = self._drag_start_global
         self._last_move_global = QPointF(gpos.x(), gpos.y())
         self._last_move_mono = now_mono
         self._last_move_utc = datetime.now(timezone.utc)
@@ -3014,12 +3061,27 @@ class PetWindow(QWidget):
                     return
 
                 now_mono = time.monotonic()
+                self._settle_stopped_shake(now_mono)
                 prev_move_mono = self._last_move_mono
                 dt = (
                     max(0.004, now_mono - prev_move_mono)
                     if prev_move_mono > 0.0
                     else 0.016
                 )
+                if self._is_shaking:
+                    # 换向附近跟随鼠标更新参考点，通过后续净位移区分平移和原地抖动。
+                    if now_mono - self._shake_last_active_mono < _SHAKE_STOP_DELAY_S:
+                        self._drag_float_origin = QPointF(cur_g)
+                elif self._override_pose != PetState.FLOAT:
+                    travel = cur_g - self._drag_float_origin
+                    if math.hypot(travel.x(), travel.y()) < _DRAG_FLOAT_MIN_TRAVEL_PX:
+                        self._drag_started_mono = None
+                    elif self._drag_started_mono is None:
+                        # 从越过微抖范围的这一步计时，不把静止时间算作拖动。
+                        self._drag_started_mono = (
+                            prev_move_mono if 0 < now_mono - prev_move_mono <= _DRAG_FLOAT_DELAY_S
+                            else now_mono
+                        )
                 self._last_move_global = QPointF(cur_g.x(), cur_g.y())
                 self._last_move_mono = now_mono
                 self._last_move_utc = datetime.now(timezone.utc)
@@ -3110,8 +3172,9 @@ class PetWindow(QWidget):
                 self._stage_canvas.update()
             return
 
-        self._is_dragging = False
         now_mono = time.monotonic()
+        self._settle_stopped_shake(now_mono)
+        self._is_dragging = False
         last_shake_mono = max(
             self._shake_last_reversal_mono, self._shake_last_active_mono
         )
@@ -3125,8 +3188,8 @@ class PetWindow(QWidget):
             and self._shake_peak_energy >= _SHAKE_PUFFED_THRESHOLD
         )
 
-        # 剧烈摇晃触发头晕 -> 闹脾气序列（同步落回地面并延迟屏蔽悬停抚摸防误抵消）
         if heavy_shaken:
+            # 炸毛只在拖动期间展示，两种强度松手后都进入眩晕、落地和抱膝流程。
             self._is_sulk = True
             self._sulk_pats_needed = 2
             self._set_temporary_pose(PetState.DIZZY, 2.6, CharacterLore.pick_line("dizzy"))
@@ -3172,7 +3235,7 @@ class PetWindow(QWidget):
 
     def _react_to_shake(self, now_mono: Optional[float] = None) -> None:
         now = time.monotonic() if now_mono is None else now_mono
-        if self._shake_energy >= _SHAKE_REDHOT_THRESHOLD:
+        if self._shake_energy >= _SHAKE_REDHOT_THRESHOLD and self._rapid_shake_intervals >= 2:
             stage = 3
         elif self._shake_energy >= _SHAKE_PUFFED_THRESHOLD:
             stage = 2
@@ -3182,6 +3245,7 @@ class PetWindow(QWidget):
             return
 
         self._is_shaking = True
+        self._quiet_shake_drop = False
         self._shake_last_active_mono = now
         if stage > self._shake_stage:
             self._shake_stage = stage
@@ -4805,6 +4869,7 @@ class PetWindow(QWidget):
             if self._override_is_autonomous:
                 self._override_pose = None
                 self._override_is_autonomous = False
+            self._quiet_shake_drop = False
             self._is_falling = True
 
         self._settings_service.save(self._settings)
