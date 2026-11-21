@@ -32,10 +32,8 @@ _GWL_EXSTYLE = -20
 
 _HWND_TOPMOST = -1
 _HWND_NOTOPMOST = -2
-_HWND_BOTTOM = 1
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
-_SWP_NOACTIVATE = 0x0010
 _SWP_SHOWWINDOW = 0x0040
 _SW_SHOW = 5
 _SW_RESTORE = 9
@@ -70,8 +68,6 @@ _kernel32.WaitForMultipleObjects.restype = wintypes.DWORD
 
 _user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 _user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
-_user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
-_user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
 _user32.SetWindowPos.argtypes = [
     wintypes.HWND,
     wintypes.HWND,
@@ -242,17 +238,6 @@ def bring_window_to_front(hwnd: int) -> None:
         finally:
             if attached:
                 _user32.AttachThreadInput(cur_tid, fg_tid, False)
-    except Exception:
-        pass
-
-
-def send_window_to_bottom(hwnd: int) -> None:
-    if not hwnd:
-        return
-    try:
-        _user32.SetWindowPos(
-            hwnd, _HWND_BOTTOM, 0, 0, 0, 0, _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE
-        )
     except Exception:
         pass
 

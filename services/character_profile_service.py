@@ -13,7 +13,7 @@ from models.character_profile import CharacterProfile
 
 
 class CharacterProfileService:
-    """加载、保存、重置及导入导出 character.json。"""
+    """加载、保存与重置 character.json。"""
 
     def __init__(self, settings_folder: Optional[str | os.PathLike[str]] = None) -> None:
         folder = Path(settings_folder) if settings_folder else get_user_config_dir()
@@ -49,21 +49,6 @@ class CharacterProfileService:
         def_profile = CharacterLore.create_default_profile()
         CharacterLore.set_active_profile(def_profile)
         return def_profile
-
-    def export_to_file(self, file_path: str | os.PathLike[str], profile: CharacterProfile) -> None:
-        resolved = CharacterLore.resolve_with_defaults(profile)
-        target = Path(file_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(self._to_dict(resolved), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def import_from_file(self, file_path: str | os.PathLike[str]) -> CharacterProfile:
-        data = json.loads(Path(file_path).read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("Invalid character JSON")
-        return CharacterLore.resolve_with_defaults(self._from_dict(data))
 
     @staticmethod
     def _to_dict(p: CharacterProfile) -> dict:

@@ -485,7 +485,6 @@ class GeminiChatService:
         if code is None:
             code = getattr(exc, "status_code", None)
         msg = str(exc).strip()
-        low = msg.lower()
         if code == 401 or code == 403:
             return "API Key 无效或权限不足"
         if code == 429:

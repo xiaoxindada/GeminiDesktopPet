@@ -162,7 +162,7 @@ def test_cli_gui_watcher_start_exit_and_restart(monkeypatch) -> None:
     from PySide6.QtWidgets import QApplication
     from services.antigravity_watcher_service import AntigravityWatcherService
 
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     monkeypatch.setattr(FollowedAppProbe, "sample_antigravity_activity", lambda: _snapshot(False))
     monkeypatch.setattr(FollowedAppProbe, "sample_gemini_activity", lambda: _snapshot(False))
     snapshots = iter([

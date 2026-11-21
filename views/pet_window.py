@@ -6,7 +6,6 @@ import ctypes
 import math
 import os
 from collections import deque
-from pathlib import Path
 import random
 import time
 import uuid
@@ -127,14 +126,11 @@ _POKE_STAGE_MEMORY_S = 4.5
 _POKE_ANNOYED_COUNT = 3
 _POKE_PUFFED_COUNT = 4
 _POKE_REDHOT_COUNT = 5
-_POKE_SULK_REFLARE_COUNT = 3
 _BODY_DOUBLE_CLICK_QUOTA_DELAY_MS = 360
 _ANNOYED_POSE_DURATION_S = 1.8
 _PUFFED_POSE_DURATION_S = 2.0
 _REDHOT_POSE_DURATION_S = 2.6
 _SULK_POSE_DURATION_S = 5.0
-_COAXED_POSE_DURATION_S = 2.2
-_FORGIVEN_POSE_DURATION_S = 2.6
 
 # 拖拽摇晃/画圈炸毛检测：融合双轴快速折返甩动与连续同向画圈角位移，
 # 完整流程：摇晃 -> 烦恼(ANNOYED) -> 鼓嘴(PUFFED) -> 炸毛(REDHOT) -> 松手下落眩晕(DIZZY) -> 生气(SULK)
@@ -639,9 +635,9 @@ class PetWindow(QWidget):
         self._override_pose: Optional[PetState] = None
         # 区分自动闲置动作与交互临时动作：自动动作持续到下次决策直接衔接，不提前回落默认待机
         self._override_is_autonomous = False
-        # 仅烦恼/鼓嘴/炸毛/眩晕/生气(5秒)/安抚/原谅播放期锁定，避免随机闲聊命中 PUFFED 误锁交互
+        # 仅烦恼/鼓嘴/炸毛/眩晕/生气(5秒)播放期锁定，避免随机闲聊命中 PUFFED 误锁交互
         self._override_locked = False
-        # 炸毛（REDHOT）或首次安抚（COAXED）结束后衔接闹脾气（SULK）的待续标志
+        # 炸毛（REDHOT）或眩晕（DIZZY）结束后衔接闹脾气（SULK）的待续标志
         self._pending_sulk_after_pose = False
         self._override_until_utc = datetime.min.replace(tzinfo=timezone.utc)
         self._active_static_pixmap: Optional[QPixmap] = None
@@ -653,7 +649,6 @@ class PetWindow(QWidget):
         # 已生效的打盹模式状态，用于检测开关变化并播放入睡/睡醒过渡
         self._doze_applied = bool(settings.doze_mode)
         self._is_sulk = False
-        self._sulk_pats_needed = 0
 
         # Transform state updated every frame
         self._sprite_scale_x = 1.0
@@ -685,7 +680,6 @@ class PetWindow(QWidget):
         self._poke_stage = 0
         self._poke_last_mono = 0.0
         self._poke_stage_until_mono = 0.0
-        self._sulk_poke_count = 0
         self._poke_recoil = 0.0
         self._poke_recoil_dir = 1.0
         self._bristle_burst = 0.0
@@ -704,8 +698,6 @@ class PetWindow(QWidget):
         self._win_start_left = 0.0
         self._win_start_top = 0.0
         self._last_move_global = QPointF()
-        self._last_move_utc = datetime.now(timezone.utc)
-        self._prev_vx = 0.0
         self._drag_tilt_vx = 0.0
         self._whip_energy = 0.0
         self._spin_energy = 0.0
@@ -1950,14 +1942,6 @@ class PetWindow(QWidget):
             )
         return rects
 
-    def get_visual_ui_bounds(self) -> QRect:
-        """返回包含角色精灵及当前可见气泡的全局可视区域包围盒。"""
-        rects = self.get_visual_obstacle_rects()
-        bounds = rects[0]
-        for rect in rects[1:]:
-            bounds = bounds.united(rect)
-        return bounds
-
     # ==================== Public Greeting / Preview ====================
 
     def show_and_greet(self, custom_message: Optional[str] = None) -> None:
@@ -2035,67 +2019,6 @@ class PetWindow(QWidget):
         self._sound.play(PetSoundEffect.CHIME)
         self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.5, 5)
 
-    def trigger_external_sprite_preview(self, sprite_key: str) -> None:
-        self._mark_pet_user_activity()
-        parsed = PetState.from_sprite_key(sprite_key)
-        if parsed is not None:
-            self._set_temporary_pose(parsed, 4.5, CharacterLore.pick_line_for_state(parsed))
-        else:
-            self._override_pose = None
-            self._override_is_autonomous = False
-            self._pending_sulk_after_pose = False
-            self._use_chibi_walk_rig = False
-            self._use_std_walk_rig = False
-            self._active_static_pixmap = self._sprites.get_by_key(sprite_key, self._settings.style_mode)
-            self.show_bubble(f"动作预览：{sprite_key} ✦", 4.0)
-            self._stage_canvas.update()
-        self._sound.play(PetSoundEffect.CHIME)
-        self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.5, 5)
-
-    def configure_smoke_preview(
-        self,
-        style_mode: PetStyleMode,
-        walking: bool,
-        anim_time_sec: float,
-        dock_side: DockSide,
-    ) -> None:
-        self._override_pose = None
-        self._override_is_autonomous = False
-        self._override_locked = False
-        self._pending_sulk_after_pose = False
-        self._is_dragging = False
-        self._is_falling = False
-        self._is_sleeping = False
-        self._is_sulk = False
-        self._landing_squash = 0.0
-        self._poke_recoil = 0.0
-        self._bristle_burst = 0.0
-
-        self._settings.style_mode = style_mode
-        self._settings.docked_side = dock_side
-        if dock_side != DockSide.NONE:
-            self._settings.anti_gravity_mode = False
-
-        self._is_walking = walking and dock_side == DockSide.NONE
-        self._walk_dir = -1
-        self._anim_time = anim_time_sec
-        if dock_side == DockSide.LEFT:
-            self._current_state = PetState.EDGE_LEFT_PEEK
-        elif dock_side == DockSide.RIGHT:
-            self._current_state = PetState.EDGE_RIGHT_PEEK
-        elif self._is_walking:
-            self._current_state = PetState.RUNNING
-        else:
-            self._current_state = PetState.IDLE
-
-        self.apply_settings_to_window()
-        if dock_side != DockSide.NONE:
-            self._reanchor_docked_position()
-
-        self._relayout_stage_top()
-        self._update_sprite_transforms()
-        self._stage_canvas.update()
-
     # ==================== 60fps Loop & Kinematics ====================
 
     def _frame_timer_tick(self) -> None:
@@ -2165,19 +2088,18 @@ class PetWindow(QWidget):
                         self._override_locked = False
                         if finished_pose == PetState.SULK and self._is_sulk:
                             self._is_sulk = False
-                            self._sulk_poke_count = 0
                         if not self._is_sulk:
                             self._pending_sulk_after_pose = False
                         self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                         self._refresh_sprite_visual()
             elif self._pending_sulk_after_pose and self._is_sulk and self.isVisible():
-                # 炸毛或首次安抚播完后在同一帧衔接闹脾气，避免定时竞态闪回默认待机。
+                # 炸毛或眩晕播完后在同一帧衔接闹脾气，避免定时竞态闪回默认待机。
                 self._pending_sulk_after_pose = False
                 self._override_locked = False
                 self._poke_count = 0
                 self._poke_stage = 0
                 self._poke_stage_until_mono = 0.0
-                self._enter_sulk_state(show_bubble=(finished_pose != PetState.COAXED))
+                self._enter_sulk_state()
             else:
                 self._pending_sulk_after_pose = False
                 self._override_pose = None
@@ -2197,7 +2119,6 @@ class PetWindow(QWidget):
                     self._poke_stage_until_mono = 0.0
                 if self._is_sulk:
                     self._is_sulk = False
-                    self._sulk_poke_count = 0
                 self._refresh_sprite_visual()
                 self._restart_ai_timer()
 
@@ -2210,7 +2131,6 @@ class PetWindow(QWidget):
         ):
             # 兜底清除无对应闹脾气姿态的残留标记，避免状态卡死
             self._is_sulk = False
-            self._sulk_poke_count = 0
 
         # Gravity fall physics
         if (
@@ -2798,8 +2718,6 @@ class PetWindow(QWidget):
             return PetState.EDGE_LEFT_PEEK if self._is_hovering else PetState.EDGE_LEFT
         if self._settings.docked_side == DockSide.RIGHT:
             return PetState.EDGE_RIGHT_PEEK if self._is_hovering else PetState.EDGE_RIGHT
-        if self._settings.doze_mode:
-            return PetState.SLEEPING
         if self._settings.anti_gravity_mode:
             return PetState.FLOAT
 
@@ -3115,7 +3033,6 @@ class PetWindow(QWidget):
         self._is_shaking = False
         self._shake_stage = 0
         self._shake_peak_energy = 0.0
-        self._prev_vx = 0.0
         self._drag_tilt_vx = 0.0
         self._whip_energy = 0.0
         self._spin_energy = 0.0
@@ -3136,7 +3053,7 @@ class PetWindow(QWidget):
         self._spin_curve_rad = 0.0
 
     def _is_action_playback_locked(self) -> bool:
-        """判断当前是否处于不可中断的交互动作播放期（烦恼/鼓嘴/炸毛/眩晕/生气/安抚/原谅）。"""
+        """判断当前是否处于不可中断的交互动作播放期（烦恼/鼓嘴/炸毛/眩晕/生气）。"""
         return (
             self._override_locked
             and self._override_pose is not None
@@ -3370,7 +3287,7 @@ class PetWindow(QWidget):
         now_mono: float,
         prev_move_mono: float,
     ) -> bool:
-        # 正在播放眩晕/安抚/原谅等非摇晃锁定动作期间，不被拖拽摇晃中途打断
+        # 正在播放眩晕/生气等非摇晃锁定动作期间，不被拖拽摇晃中途打断
         if self._is_action_playback_locked() and self._override_pose not in (
             PetState.ANNOYED,
             PetState.PUFFED,
@@ -3440,8 +3357,6 @@ class PetWindow(QWidget):
     ) -> None:
         """炸毛松手后进入下落眩晕 -> 生气序列（眩晕与生气期间均锁定播完，播完自动回常态）。"""
         self._is_sulk = True
-        self._sulk_pats_needed = 2
-        self._sulk_poke_count = 0
         self._poke_count = 0
         self._poke_stage = 0
         self._poke_stage_until_mono = 0.0
@@ -3572,7 +3487,6 @@ class PetWindow(QWidget):
         else:
             # 刚处于摇晃生气/炸毛状态又立即点按续晃时保留阶段，避免起步闪回反重力动作
             self._is_shaking = True
-            self._prev_vx = 0.0
             self._drag_tilt_vx = 0.0
             self._shake_axis_x = [0, 0.0, 0.0, 0.0]
             self._shake_axis_y = [0, 0.0, 0.0, 0.0]
@@ -3582,7 +3496,6 @@ class PetWindow(QWidget):
         self._drag_start_global = QPointF(gpos.x(), gpos.y())
         self._last_move_global = QPointF(gpos.x(), gpos.y())
         self._last_move_mono = now_mono
-        self._last_move_utc = datetime.now(timezone.utc)
         self._win_start_left = float(self.x())
         self._win_start_top = float(self.y())
         self._stage_canvas.grabMouse()
@@ -3706,7 +3619,6 @@ class PetWindow(QWidget):
                 )
                 self._last_move_global = QPointF(cur_g.x(), cur_g.y())
                 self._last_move_mono = now_mono
-                self._last_move_utc = datetime.now(timezone.utc)
 
                 self.move(
                     int(round(self._win_start_left + dx)),
@@ -3714,7 +3626,6 @@ class PetWindow(QWidget):
                 )
 
                 vx = step_x / dt
-                self._prev_vx = vx
                 self._drag_tilt_vx = self._drag_tilt_vx * 0.65 + vx * 0.35
                 self._process_drag_shake_step(step_x, step_y, now_mono, prev_move_mono)
             return
@@ -3751,9 +3662,7 @@ class PetWindow(QWidget):
         """进入炸毛爆发态：瞬间弹跳膨胀、火花怒气爆发，播完后衔接生气（5 秒）并锁定至播完回常态。"""
         self._poke_stage = 3
         self._poke_stage_until_mono = 0.0
-        self._sulk_poke_count = 0
         self._is_sulk = True
-        self._sulk_pats_needed = 2
         self._poke_recoil = 0.85
         self._bristle_burst = 1.0
         self._set_temporary_pose(
@@ -3782,20 +3691,6 @@ class PetWindow(QWidget):
             return
 
         self._poke_recoil_dir = -1.0 if local_pos.x() >= sprite_rect.center().x() else 1.0
-
-        # 闹脾气期间继续戳身体：轻戳提示摸头安抚，连续快戳 3 下再次气炸毛
-        if self._is_sulk:
-            if self._poke_last_mono > 0.0 and (now_mono - self._poke_last_mono) <= _POKE_COMBO_WINDOW_S:
-                self._sulk_poke_count += 1
-            else:
-                self._sulk_poke_count = 1
-            self._poke_last_mono = now_mono
-            if self._sulk_poke_count >= _POKE_SULK_REFLARE_COUNT:
-                self._enter_bristle_redhot(now_mono)
-            else:
-                self._poke_recoil = 0.55
-                self._set_temporary_pose(PetState.SULK, 10.0, "……哼！（摸摸头才原谅你喵）")
-            return
 
         # 烦恼或鼓嘴完整播完后的短暂怒气记忆期内再次戳身体，顺阶进入下一阶段动作
         if self._poke_stage > 0 and now_mono <= self._poke_stage_until_mono:
@@ -3948,25 +3843,8 @@ class PetWindow(QWidget):
         elif not stopped_recovered and self._is_action_playback_locked():
             # 未到炸毛的烦恼/鼓嘴或其他未播完锁定动作：松手保持播完不中断并正常落地
             self._clamp_and_apply_gravity_after_release(refresh_resting=False)
-        elif self._is_sulk:
-            # 闹脾气期间轻拖松手：贴边时恢复贴边态，否则保持可见且锁定的生气动作，避免隐形卡死
-            self._try_edge_dock_or_gravity_drop()
-            if self._settings.docked_side != DockSide.NONE:
-                self._is_sulk = False
-                self._sulk_poke_count = 0
-                self._override_pose = None
-                self._override_is_autonomous = False
-                self._override_locked = False
-                self._pending_sulk_after_pose = False
-                self._refresh_sprite_visual()
-                self._restart_ai_timer()
-            else:
-                self._set_temporary_pose(
-                    PetState.SULK,
-                    _SULK_POSE_DURATION_S,
-                    locked=True,
-                )
         else:
+            self._is_sulk = False
             self._override_pose = None
             self._override_is_autonomous = False
             self._override_locked = False
@@ -3984,14 +3862,17 @@ class PetWindow(QWidget):
         self._settings_service.save(self._settings)
         self.visual_bounds_changed.emit()
 
-    def _enter_sulk_state(self, *, show_bubble: bool = True) -> None:
+    def _enter_sulk_state(self) -> None:
         if self.isVisible() and self._is_sulk and not self._is_dragging:
-            self._sulk_poke_count = 0
-            msg = CharacterLore.pick_line("sulk") if show_bubble else None
-            self._set_temporary_pose(PetState.SULK, _SULK_POSE_DURATION_S, msg, locked=True)
+            self._set_temporary_pose(
+                PetState.SULK,
+                _SULK_POSE_DURATION_S,
+                CharacterLore.pick_line("sulk"),
+                locked=True,
+            )
 
     def trigger_pat(self) -> None:
-        # 烦恼/鼓嘴/炸毛/眩晕/生气(5秒)/安抚/原谅播放期间禁止被摸头中途打断
+        # 烦恼/鼓嘴/炸毛/眩晕/生气(5秒)播放期间禁止被摸头中途打断
         if self._is_action_playback_locked():
             return
         self._mark_pet_user_activity()
@@ -3999,33 +3880,12 @@ class PetWindow(QWidget):
         self._poke_count = 0
         self._poke_stage = 0
         self._poke_stage_until_mono = 0.0
-        self._sulk_poke_count = 0
         self._settings.total_pats += 1
         self._settings.favorability = min(9999, self._settings.favorability + 1)
         self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
 
-        if self._waiting_chat_workers:
+        if not self._waiting_chat_workers:
             # 正在等待模型回复时保持思考动作不被鼠标划过头顶打断
-            pass
-        elif self._is_sulk:
-            self._sulk_pats_needed -= 1
-            if self._sulk_pats_needed > 0:
-                self._set_temporary_pose(
-                    PetState.COAXED,
-                    _COAXED_POSE_DURATION_S,
-                    CharacterLore.pick_line("coaxed"),
-                    pending_sulk=True,
-                    locked=True,
-                )
-            else:
-                self._is_sulk = False
-                self._set_temporary_pose(
-                    PetState.FORGIVEN,
-                    _FORGIVEN_POSE_DURATION_S,
-                    CharacterLore.pick_line("forgiven"),
-                    locked=True,
-                )
-        else:
             self._set_temporary_pose(PetState.PAT, 2.8, CharacterLore.pick_line("pat"))
 
         now = datetime.now(timezone.utc)
@@ -4144,7 +4004,7 @@ class PetWindow(QWidget):
         self._speech_bubble.setVisible(False)
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
-    def _resolve_active_chat_channel_and_models(self) -> tuple[str, str, list[str], str]:
+    def _resolve_active_chat_channel_and_models(self) -> tuple[str, list[str], str]:
         """返回 API Key 连接状态、官方模型缓存及已选模型。"""
         current = normalize_gemini_model(self._settings.gemini_model)
         cached = GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
@@ -4155,7 +4015,7 @@ class PetWindow(QWidget):
             badge = "在线 · API Key"
         else:
             badge = "离线模式"
-        return "api_key", badge, models, current
+        return badge, models, current
 
     _CHAT_WINDOW_SIZE_PRESETS: tuple[tuple[str, int, int], ...] = (
         # 各挡均容纳展开的历史列表，避免小、中挡被最小尺寸压成同一大小。
@@ -4223,7 +4083,7 @@ class PetWindow(QWidget):
         if not in_chat:
             return
 
-        _channel, badge_text, _models, current = self._resolve_active_chat_channel_and_models()
+        badge_text, _models, current = self._resolve_active_chat_channel_and_models()
         error = self._chat.get_api_error(self._settings)
         self._chat_channel_badge.setText(badge_text)
         if error:
@@ -4355,7 +4215,7 @@ class PetWindow(QWidget):
         return menu
 
     def _populate_chat_model_menu(self, menu: QMenu) -> None:
-        _channel, _badge_text, models, current = self._resolve_active_chat_channel_and_models()
+        _badge_text, models, current = self._resolve_active_chat_channel_and_models()
         current_thinking = normalize_thinking_level(self._settings.thinking_level)
         menu.clear()
         # QWidgetAction 内的按钮不会触发 QMenu 的自动关闭行为。
@@ -4769,12 +4629,6 @@ class PetWindow(QWidget):
         if checked:
             self._chat_splitter.setSizes([175, 360])
 
-    def _show_chat_history(self) -> None:
-        if not self.isVisible():
-            self.show()
-        self.open_chat_dialog()
-        self._toggle_chat_history(True)
-
     def _clear_chat_rows(self) -> None:
         for row in self._chat_message_rows:
             self._chat_messages_layout.removeWidget(row)
@@ -4931,14 +4785,6 @@ class PetWindow(QWidget):
         self._refresh_chat_sessions()
 
     # ==================== Antigravity 对话气泡播报 ====================
-
-    def toggle_antigravity_sync(self, _checked: bool = False) -> None:
-        AppLogger.info(
-            "ChatSync",
-            f"点击播报：active={self._ag_mirror_active}, "
-            f"bubble={self._speech_bubble.isVisible() if self._speech_bubble else 'n/a'}",
-        )
-        self.set_antigravity_sync_enabled(not self._settings.chat_sync_enabled)
 
     def set_antigravity_sync_enabled(self, enabled: bool, *, silent: bool = False) -> None:
         """保存用户的同步意图；会话暂不可用时由轮询稍后重试。"""
@@ -5358,23 +5204,6 @@ class PetWindow(QWidget):
         self._settings_service.save(self._settings)
         self.settings_synced.emit()
 
-    def _toggle_chat(self) -> None:
-        self._mark_pet_user_activity()
-        if not self._is_chat_open:
-            self.open_chat_dialog()
-            return
-        self._is_chat_open = False
-        self._sync_chat_controls()
-        self._sync_bubble_window_styles()
-        if self._settings.show_speech_bubble and not self._chat_message_rows:
-            self._bubble_timer.stop()
-            self._bubble_timer.start(3000)
-        else:
-            self._hide_speech_bubble()
-        self._relayout_stage_top()
-        if self._override_pose is None:
-            self._restart_ai_timer()
-
     def _close_bubble_click(self) -> None:
         self._mark_pet_user_activity()
         was_chat_open = self._is_chat_open
@@ -5401,7 +5230,7 @@ class PetWindow(QWidget):
         now_str = datetime.now().strftime("%H:%M")
         char_name = (self._bubble_char_name_lbl.text() or "").strip() or "Gemini 娘"
         provider = self._chat.resolve_chat_provider(self._settings)
-        _, _, _, active_model = self._resolve_active_chat_channel_and_models()
+        _, _, active_model = self._resolve_active_chat_channel_and_models()
         thinking_lvl = resolve_effective_thinking_level(active_model, self._settings.thinking_level)
         if provider:
             shown_model = active_model
@@ -5505,7 +5334,7 @@ class PetWindow(QWidget):
         if self._is_chat_open:
             char_name = (self._bubble_char_name_lbl.text() or "").strip() or "Gemini 娘"
             provider = self._chat.resolve_chat_provider(self._settings)
-            _, _, _, active_model = self._resolve_active_chat_channel_and_models()
+            _, _, active_model = self._resolve_active_chat_channel_and_models()
             thinking_lvl = normalize_thinking_level(self._settings.thinking_level)
             if provider:
                 shown_model = active_model
@@ -5589,28 +5418,6 @@ class PetWindow(QWidget):
         self._particles = alive
 
     # ==================== Menu & Quick Action Slots ====================
-
-    def _toggle_anti_gravity(self) -> None:
-        self._settings.anti_gravity_mode = not self._settings.anti_gravity_mode
-        if self._settings.anti_gravity_mode:
-            self._settings.docked_side = DockSide.NONE
-            self._current_state = self._resolve_resting_state()
-        else:
-            if self._override_is_autonomous:
-                self._override_pose = None
-                self._override_is_autonomous = False
-            self._is_falling = True
-
-        self._settings_service.save(self._settings)
-        self.apply_settings_to_window()
-        self.settings_synced.emit()
-
-        if self._settings.anti_gravity_mode:
-            self._set_temporary_pose(PetState.FLOAT, 4.0, CharacterLore.pick_line("float"))
-            self._sound.play(PetSoundEffect.SPARKLE)
-            self._spawn_star_burst(self.width() * 0.5, self.height() - self._sprite_height_px() * 0.5, 9)
-        else:
-            self.show_bubble("反重力模块关闭，安全降落喵～", 3.0)
 
     def _set_pin_on_desktop_enabled(self, pinned: bool) -> None:
         self._settings.auto_walk = not pinned
@@ -5759,9 +5566,6 @@ class PetWindow(QWidget):
             force=True,
         )
 
-    def _toggle_runtime_log(self) -> None:
-        self._set_runtime_log_enabled(not self._settings.enable_runtime_log)
-
     def _on_menu_runtime_log(self, checked: bool) -> None:
         self._set_runtime_log_enabled(checked)
 
@@ -5770,14 +5574,6 @@ class PetWindow(QWidget):
         self._bubble_char_name_lbl.setText(profile.name)
         self._mark_pet_user_activity()
         self._restart_ai_timer()
-
-    def toggle_style_mode(self) -> None:
-        next_mode = (
-            PetStyleMode.STANDARD
-            if self._settings.style_mode == PetStyleMode.CHIBI
-            else PetStyleMode.CHIBI
-        )
-        self._set_style_mode(next_mode)
 
     def _set_style_mode(self, mode: PetStyleMode) -> None:
         self._settings.style_mode = mode

@@ -10,15 +10,6 @@
       "console": "integratedTerminal"
     },
     {
-      "name": "联动跟随启动 (--follow-antigravity)",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/main.py",
-      "args": ["--follow-antigravity"],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal"
-    },
-    {
       "name": "配置清理工具 (clean_config.py)",
       "type": "debugpy",
       "request": "launch",

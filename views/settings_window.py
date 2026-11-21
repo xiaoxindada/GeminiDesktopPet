@@ -1210,9 +1210,6 @@ class SettingsWindow(QWidget):
 
     # ==================== 状态同步 ====================
 
-    def has_unsaved_changes(self) -> bool:
-        return bool(self._dirty)
-
     def _set_feedback(self, text: str, *, kind: str = "neutral") -> None:
         color_map = {
             "neutral": "#A59EC9",

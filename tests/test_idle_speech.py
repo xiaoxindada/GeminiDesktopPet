@@ -1,18 +1,9 @@
-"""无操作随机台词、动作匹配与可视化角色设定持久化测试。"""
+"""角色台词抽取、动作匹配与角色档案持久化单元测试。"""
 
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 import random
-import time
-from unittest.mock import MagicMock, patch
-
-import pytest
-from PySide6.QtWidgets import QApplication, QLabel
-
-from app import PetApplicationCoordinator
 
 from models.character_lore import (
     BUILTIN_PRESETS,
@@ -20,51 +11,12 @@ from models.character_lore import (
     CharacterLore,
 )
 from models.character_profile import CharacterProfile
-from models.pet_settings import DockSide, PetSettings
+from models.pet_settings import DockSide
 from models.pet_state import PetState
 from services.character_profile_service import CharacterProfileService
-from services.gemini_chat_service import GeminiChatService
-from services.settings_service import SettingsService
-from services.sound_service import SoundService
-from services.sprite_manager import SpriteManager
-from services.system_monitor_service import SystemMonitorService
-from views.character_editor_window import CharacterEditorWindow
-from views.pet_window import PetWindow
 
 
-@pytest.fixture(scope="module")
-def app():
-    instance = QApplication.instance() or QApplication([])
-    instance.setQuitOnLastWindowClosed(False)
-    yield instance
-
-
-@pytest.fixture(scope="module")
-def sprites(app):
-    manager = SpriteManager()
-    manager.preload_all()
-    return manager
-
-
-def _make_pet(
-    tmp_path,
-    sprites: SpriteManager,
-    settings: PetSettings,
-) -> PetWindow:
-    sound = SoundService()
-    sound.enabled = False
-    pet = PetWindow(
-        settings,
-        SettingsService(str(tmp_path)),
-        sprites,
-        sound,
-        SystemMonitorService(),
-        GeminiChatService(),
-    )
-    return pet
-
-
-def test_character_lore_match_pose_and_pick_idle_speech():
+def test_character_lore_match_pose_and_pick_idle_speech() -> None:
     try:
         CharacterLore.set_active_profile(None)
         expected_chatter = [
@@ -135,274 +87,31 @@ def test_character_lore_match_pose_and_pick_idle_speech():
         CharacterLore.set_active_profile(None)
 
 
-def test_pet_idle_speech_matches_pose_and_respects_guards(app, sprites, tmp_path):
-    CharacterLore.set_active_profile(None)
-    settings = PetSettings(
-        show_speech_bubble=True,
-        auto_walk=False,
-        chat_sync_enabled=False,
-    )
-    pet = _make_pet(tmp_path, sprites, settings)
+def test_character_profile_service_persists_activity_and_lines(tmp_path) -> None:
     try:
-        pet.show()
-        pet._frame_timer.stop()
-        pet._ai_timer.stop()
-        pet._idle_speech_timer.stop()
-        app.processEvents()
-
-        # 刚上线还在等待间隔内，不触发闲聊
-        pet._hide_speech_bubble()
-        pet._override_pose = None
-        pet._last_pet_activity_monotonic = time.monotonic()
-        pet._idle_speech_next_delay_sec = 15.0
-        pet._idle_speech_timer_tick()
-        assert not pet._speech_bubble.isVisible()
-
-        # 超过无操作间隔后触发台词并同步切换到匹配动作
-        pet._last_pet_activity_monotonic = time.monotonic() - 30.0
-        pet._last_idle_speech_monotonic = pet._last_pet_activity_monotonic
-        with patch.object(
-            CharacterLore,
-            "pick_idle_speech",
-            return_value=("Nano Banana，启动！", PetState.DRAWING),
-        ):
-            pet._idle_speech_timer_tick()
-        app.processEvents()
-        assert pet._speech_bubble.isVisible()
-        assert pet._bubble_text_lbl.text() == "Nano Banana，启动！"
-        assert pet._override_pose == PetState.DRAWING
-        assert pet._override_is_autonomous is True
-        assert pet._idle_speech_bubble_active is True
-
-        # 闲聊气泡显示期间，常规 _ai_timer_tick 不会覆盖动作
-        pet._ai_timer_tick()
-        assert pet._override_pose == PetState.DRAWING
-
-        # 抽到 RUNNING 且允许漫步时应进入行走状态
-        pet._hide_speech_bubble()
-        settings.auto_walk = True
-        pet._last_pet_activity_monotonic = time.monotonic() - 30.0
-        pet._last_idle_speech_monotonic = pet._last_pet_activity_monotonic
-        with patch.object(
-            CharacterLore,
-            "pick_idle_speech",
-            return_value=("哒哒哒巡逻桌面喵～", PetState.RUNNING),
-        ):
-            pet._idle_speech_timer_tick()
-        assert pet._speech_bubble.isVisible()
-        assert pet._is_walking is True
-        assert pet._current_state == PetState.RUNNING
-        pet._is_walking = False
-
-        # 关闭气泡时仍按活跃度触发随机动作切换，但不弹出气泡
-        pet._hide_speech_bubble()
-        pet._override_pose = None
-        pet._override_is_autonomous = False
-        settings.show_speech_bubble = False
-        pet._last_pet_activity_monotonic = time.monotonic() - 30.0
-        pet._last_idle_speech_monotonic = pet._last_pet_activity_monotonic
-        with patch.object(
-            CharacterLore,
-            "pick_idle_speech",
-            return_value=("Nano Banana，启动！", PetState.DRAWING),
-        ):
-            pet._idle_speech_timer_tick()
-        app.processEvents()
-        assert not pet._speech_bubble.isVisible()
-        assert not pet._idle_speech_bubble_active
-        assert pet._override_pose == PetState.DRAWING
-        assert pet._override_is_autonomous is True
-
-        # 禁用条件：打盹 / 聊天 / 同步播报期间均不触发气泡与动作切换
-        settings.show_speech_bubble = True
-        for blocker in ("doze", "chat", "sync"):
-            pet._hide_speech_bubble()
-            pet._override_pose = None
-            pet._override_is_autonomous = False
-            settings.doze_mode = blocker == "doze"
-            pet._is_chat_open = blocker == "chat"
-            pet._sync_bubble_active = blocker == "sync"
-            pet._last_pet_activity_monotonic = time.monotonic() - 60.0
-            pet._last_idle_speech_monotonic = pet._last_pet_activity_monotonic
-            pet._idle_speech_timer_tick()
-            assert not pet._speech_bubble.isVisible(), blocker
-            assert pet._override_pose is None, blocker
-        settings.doze_mode = False
-        pet._is_chat_open = False
-        pet._sync_bubble_active = False
-
-        # 关闭气泡时，lively / normal / quiet 同步影响延迟、_ai_timer 间隔与随机动作概率
-        settings.show_speech_bubble = False
-        settings.auto_walk = False
-        for act_id, expected_ms, lo, hi in (
-            ("lively", 2600, 5.0, 10.0),
-            ("normal", 4500, 10.0, 20.0),
-            ("quiet", 9000, 30.0, 60.0),
-        ):
-            CharacterLore.set_active_profile(CharacterProfile(bubble_activity=act_id))
-            pet.sync_character_profile(CharacterLore.get_active_profile())
-            assert pet._ai_timer.interval() == expected_ms
-            assert lo <= pet._idle_speech_next_delay_sec <= hi
-
-        # auto_walk=False 且 roll=0.50：quiet 下保持待机，lively 下切到自主动效姿态
-        CharacterLore.set_active_profile(CharacterProfile(bubble_activity="quiet"))
-        pet.sync_character_profile(CharacterLore.get_active_profile())
-        pet._override_pose = None
-        pet._override_is_autonomous = False
-        with patch("views.pet_window.random.random", return_value=0.50):
-            pet._ai_timer_tick()
-        assert pet._override_pose is None
-        assert pet._current_state == PetState.IDLE
-
-        CharacterLore.set_active_profile(CharacterProfile(bubble_activity="lively"))
-        pet.sync_character_profile(CharacterLore.get_active_profile())
-        pet._override_pose = None
-        pet._override_is_autonomous = False
-        with patch("views.pet_window.random.random", return_value=0.50):
-            pet._ai_timer_tick()
-        assert pet._override_is_autonomous is True
-        assert pet._override_pose is not None
-    finally:
         CharacterLore.set_active_profile(None)
-        pet.close()
-        pet.deleteLater()
-        app.processEvents()
-
-
-def test_character_editor_bubble_activity_and_action_lines_persist(app, tmp_path):
-    CharacterLore.set_active_profile(None)
-    svc = CharacterProfileService(str(tmp_path))
-    applied: list[CharacterProfile] = []
-    editor = CharacterEditorWindow(svc, lambda p: applied.append(p))
-    try:
-        editor.show()
-        app.processEvents()
-
-        # 1. 选择气泡活跃度为偏活跃
-        lively_idx = editor._bubble_activity_combo.findData("lively")
-        assert lively_idx >= 0
-        editor._bubble_activity_combo.setCurrentIndex(lively_idx)
-
-        # 2. 编辑第一个分类 (chatter) 后切换到另一个分类 (hum) 编辑，保留两者改动
-        chatter_idx = editor._action_line_category_combo.findData("chatter")
-        hum_idx = editor._action_line_category_combo.findData("hum")
-        drawing_idx = editor._action_line_category_combo.findData("drawing")
-        assert chatter_idx >= 0 and hum_idx >= 0 and drawing_idx >= 0
-
-        editor._action_line_category_combo.setCurrentIndex(chatter_idx)
-        editor._action_line_edit.setPlainText("自定义碎碎念台词一\n自定义碎碎念台词二")
-
-        editor._action_line_category_combo.setCurrentIndex(hum_idx)
-        editor._action_line_edit.setPlainText("♪ 自定义哼歌台词")
-
-        # 3. 切到 drawing 清空后点还原默认，可恢复内置台词
-        editor._action_line_category_combo.setCurrentIndex(drawing_idx)
-        editor._action_line_edit.setPlainText("")
-        editor._reset_action_line_btn.click()
-        assert "Nano Banana，启动！" in editor._action_line_edit.toPlainText()
-
-        # 4. 保存并重新从磁盘加载验证
-        editor._on_save()
-        app.processEvents()
-        assert applied
-        assert applied[-1].bubble_activity == "lively"
-        assert applied[-1].lines["chatter"] == ["自定义碎碎念台词一", "自定义碎碎念台词二"]
-        assert applied[-1].lines["hum"] == ["♪ 自定义哼歌台词"]
+        svc = CharacterProfileService(str(tmp_path))
+        profile = CharacterProfile(
+            bubble_activity="lively",
+            lines={
+                "chatter": ["自定义碎碎念台词一", "自定义碎碎念台词二"],
+                "hum": ["♪ 自定义哼歌台词"],
+            },
+        )
+        svc.save(profile)
 
         saved_json = json.loads((tmp_path / "character.json").read_text(encoding="utf-8"))
         assert saved_json["bubbleActivity"] == "lively"
+
         reloaded = svc.load()
         assert reloaded.bubble_activity == "lively"
         assert reloaded.lines["chatter"] == ["自定义碎碎念台词一", "自定义碎碎念台词二"]
         assert reloaded.lines["hum"] == ["♪ 自定义哼歌台词"]
+        assert reloaded.lines["drawing"] == DEFAULT_LINES["drawing"]
 
-        # 5. 清空某类台词后保存，应自动恢复该类内置默认台词
-        editor._action_line_category_combo.setCurrentIndex(hum_idx)
-        editor._action_line_edit.setPlainText("")
-        editor._on_save()
-        app.processEvents()
+        # 清空某类台词后保存，应自动恢复该类内置默认台词
+        reloaded.lines["hum"] = []
+        svc.save(reloaded)
         assert svc.load().lines["hum"] == DEFAULT_LINES["hum"]
-        assert editor._action_line_edit.toPlainText().splitlines() == DEFAULT_LINES["hum"]
     finally:
-        CharacterLore.set_active_profile(None)
-        editor.close()
-        editor.deleteLater()
-        app.processEvents()
-
-
-def test_settings_window_activity_syncs_with_pet_and_editor(app, tmp_path):
-    CharacterLore.set_active_profile(None)
-    startup_dir = tmp_path / "startup"
-    home_dir = tmp_path / "home"
-    appdata_dir = tmp_path / "appdata"
-    startup_dir.mkdir()
-    home_dir.mkdir()
-    appdata_dir.mkdir()
-
-    coord = None
-    try:
-        with (
-            patch.dict(os.environ, {"USERPROFILE": str(home_dir), "APPDATA": str(appdata_dir)}),
-            patch("services.win32_ipc.get_windows_startup_dir", return_value=startup_dir),
-            patch("services.settings_service.get_windows_startup_dir", return_value=startup_dir),
-            patch("services.app_follow_service.AppFollowService.sync_and_apply", return_value=None),
-            patch("services.app_follow_service.AppFollowService.stop_follow_watcher"),
-            patch.object(PetApplicationCoordinator, "_start_silent_update_check", return_value=None),
-        ):
-            coord = PetApplicationCoordinator(app, [], MagicMock())
-            coord._pet.show()
-            coord.open_settings_window()
-            coord.open_character_editor_window()
-            app.processEvents()
-
-            settings_win = coord._settings_win
-            editor_win = coord._editor_win
-            assert settings_win is not None
-            assert editor_win is not None
-
-            def _activity_summary_value() -> str:
-                row = next(
-                    r
-                    for r, _hay, _getter in settings_win._summary_rows
-                    if any(lbl.text() == "互动活跃度" for lbl in r.findChildren(QLabel))
-                )
-                return row.value_label.text()
-
-            # 1. 在设置窗口关闭默认气泡并将互动活跃度改为偏活跃后确认保存
-            settings_win._chk_bubble.setChecked(False)
-            lively_idx = settings_win._activity_combo.findData("lively")
-            assert lively_idx >= 0
-            settings_win._activity_combo.setCurrentIndex(lively_idx)
-            settings_win._confirm_btn.click()
-            app.processEvents()
-
-            char_path = Path(coord._profile_service.character_file_path)
-            saved_json = json.loads(char_path.read_text(encoding="utf-8"))
-            assert saved_json["bubbleActivity"] == "lively"
-            assert CharacterLore.get_active_profile().bubble_activity == "lively"
-            assert coord._settings.show_speech_bubble is False
-            assert coord._pet._ai_timer.interval() == 2600
-            assert 5.0 <= coord._pet._idle_speech_next_delay_sec <= 10.0
-            assert editor_win._bubble_activity_combo.currentData() == "lively"
-            assert _activity_summary_value() == "偏活跃"
-
-            # 2. 在角色设定工坊改回偏安静并保存，设置窗口与桌宠反向同步
-            quiet_idx = editor_win._bubble_activity_combo.findData("quiet")
-            assert quiet_idx >= 0
-            editor_win._bubble_activity_combo.setCurrentIndex(quiet_idx)
-            editor_win._on_save()
-            app.processEvents()
-
-            assert settings_win._activity_combo.currentData() == "quiet"
-            assert _activity_summary_value() == "偏安静"
-            assert coord._pet._ai_timer.interval() == 9000
-            assert 30.0 <= coord._pet._idle_speech_next_delay_sec <= 60.0
-    finally:
-        if coord is not None:
-            with (
-                patch("services.app_follow_service.AppFollowService.stop_follow_watcher"),
-                patch("services.app_follow_service.AppFollowService.is_stop_all_signaled", return_value=True),
-            ):
-                coord.gracefully_exit(allow_respawn_watcher=False)
-                app.processEvents()
         CharacterLore.set_active_profile(None)

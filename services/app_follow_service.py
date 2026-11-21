@@ -247,9 +247,6 @@ class AppFollowService:
             working_dir=str(get_user_config_dir()) if enable else get_app_base_dir(),
         )
 
-    def is_follow_logon_enabled(self) -> bool:
-        return self.is_follow_watcher_run_enabled() or SettingsService.is_startup_enabled()
-
     def sync_and_apply(self, settings: PetSettings) -> None:
         enabled = self.any_follow_enabled(settings)
         # 主界面自带联动监听，先停止旧后台守护以释放用户目录副本，再同步启动入口。

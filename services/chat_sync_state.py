@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Lock
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -27,21 +26,11 @@ class ChatSyncState:
         self._counter = 0
         self._leaves: dict[str, StateLeaf] = {}
 
-    @property
-    def version(self) -> int:
-        """整份状态的版本号，等于最后一次写入的编号。"""
-        with self._lock:
-            return self._counter
-
     def write(self, name: str, data: object) -> int:
         with self._lock:
             self._counter += 1
             self._leaves[name] = StateLeaf(self._counter, data)
             return self._counter
-
-    def read(self, name: str) -> Optional[StateLeaf]:
-        with self._lock:
-            return self._leaves.get(name)
 
     def counters(self) -> dict[str, int]:
         """各叶子的当前编号，用作差量基线。"""

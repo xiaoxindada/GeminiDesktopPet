@@ -29,8 +29,6 @@ class TrayIconService(QObject):
         super().__init__(parent)
         self._disposed = False
         self._icon = self.load_app_icon()
-        self._shared_menu_spec = shared_menu_spec
-        self._shared_menu_refresh = shared_menu_refresh
         self._update_action = update_action
 
         self._menu = QMenu()
@@ -69,16 +67,6 @@ class TrayIconService(QObject):
             self._update_action.setText(f"🆕 发现新版本 {latest_tag}（点击查看更新）")
         else:
             self._update_action.setText("🆕 检查更新...")
-
-    def show_balloon(self, title: str, text: str) -> None:
-        if self._disposed:
-            return
-        try:
-            self._tray.showMessage(
-                title, text, QSystemTrayIcon.MessageIcon.Information, 2500
-            )
-        except Exception:
-            pass
 
     @staticmethod
     def load_app_icon() -> QIcon:

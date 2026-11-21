@@ -15,10 +15,6 @@ class AppLogger:
     _enabled: bool = False
 
     @classmethod
-    def is_enabled(cls) -> bool:
-        return cls._enabled
-
-    @classmethod
     def log_directory(cls) -> str:
         return str(get_user_config_dir() / "Logs")
 

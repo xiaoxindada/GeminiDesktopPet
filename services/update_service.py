@@ -499,7 +499,7 @@ class UpdateService:
     @classmethod
     def _copy_dir_with_retry(cls, source_dir: str, target_dir: str) -> None:
         os.makedirs(target_dir, exist_ok=True)
-        for root, dirs, files in os.walk(source_dir):
+        for root, _dirs, files in os.walk(source_dir):
             rel = os.path.relpath(root, source_dir)
             dst_root = target_dir if rel == "." else os.path.join(target_dir, rel)
             os.makedirs(dst_root, exist_ok=True)

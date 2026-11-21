@@ -81,9 +81,7 @@ class WalkRigAssets:
     chibi_arm_l: Optional[QPixmap] = None
     chibi_arm_r: Optional[QPixmap] = None
     chibi_leg_l: Optional[QPixmap] = None
-    chibi_leg_l_back: Optional[QPixmap] = None
     chibi_leg_r: Optional[QPixmap] = None
-    chibi_leg_r_back: Optional[QPixmap] = None
     std_body: Optional[QPixmap] = None
     std_front_thigh: Optional[QPixmap] = None
     std_front_shin: Optional[QPixmap] = None
@@ -112,11 +110,9 @@ class SpriteManager:
         self._standard_dir = os.path.join(base, "Standard")
         self._walkrig_dir = os.path.join(base, "WalkRig")
         self._cache: dict[PetState, QPixmap] = {}
-        self._key_cache: dict[str, QPixmap] = {}
         self._standard_cache: dict[str, QPixmap] = {}
         self._fallback: Optional[QPixmap] = None
         self._standard_fallback: Optional[QPixmap] = None
-        self._avatar: Optional[QPixmap] = None
         self.walk_rig = WalkRigAssets()
 
     def preload_all(self) -> None:
@@ -126,7 +122,6 @@ class SpriteManager:
             pix = self._load_pixmap(os.path.join(self._sprites_dir, f"{key}.png"))
             if pix is not None:
                 self._cache[state] = pix
-                self._key_cache[key.lower()] = pix
 
         # 预加载标准立绘分面贴图（standee / front / side / back / edge_*）
         self._standard_fallback = self._load_pixmap(os.path.join(self._standard_dir, "standee.png"))
@@ -144,17 +139,12 @@ class SpriteManager:
             if pix is not None:
                 self._standard_cache[std_key] = pix
 
-        avatar = self._load_pixmap(os.path.join(self._sprites_dir, "avatar.png"))
-        self._avatar = avatar or self._fallback
-
         self.walk_rig = WalkRigAssets(
             chibi_body=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_body.png")),
             chibi_arm_l=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_arm_l.png")),
             chibi_arm_r=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_arm_r.png")),
             chibi_leg_l=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_leg_l.png")),
-            chibi_leg_l_back=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_leg_l_back.png")),
             chibi_leg_r=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_leg_r.png")),
-            chibi_leg_r_back=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_leg_r_back.png")),
             std_body=self._load_pixmap(os.path.join(self._walkrig_dir, "std_body.png")),
             std_front_thigh=self._load_pixmap(os.path.join(self._walkrig_dir, "std_thigh.png")),
             std_front_shin=self._load_pixmap(os.path.join(self._walkrig_dir, "std_shin.png")),
@@ -207,23 +197,6 @@ class SpriteManager:
                 return pix
         return self._fallback
 
-    def get_by_key(self, key: str, style_mode: PetStyleMode = PetStyleMode.CHIBI) -> Optional[QPixmap]:
-        parsed = PetState.from_sprite_key(key)
-        if parsed is not None:
-            return self.get(parsed, style_mode)
-        low = key.strip().lower()
-        if not low or not all(c.isalnum() or c in "_-" for c in low):
-            return self.get(PetState.IDLE, style_mode)
-        if style_mode == PetStyleMode.STANDARD:
-            return self._load_pixmap(os.path.join(self._standard_dir, f"{low}.png")) or self.get(PetState.IDLE, style_mode)
-        if low in self._key_cache:
-            return self._key_cache[low]
-        pix = self._load_pixmap(os.path.join(self._sprites_dir, f"{low}.png"))
-        if pix is not None:
-            self._key_cache[low] = pix
-            return pix
-        return self._fallback
-
     def _get_standard_for_state(self, state: PetState) -> Optional[QPixmap]:
         exact = self._standard_cache.get(state.value)
         if exact is None:
@@ -272,9 +245,6 @@ class SpriteManager:
         else:
             key = "standee"
         return self._standard_cache.get(key) or self._standard_fallback
-
-    def get_avatar(self) -> Optional[QPixmap]:
-        return self._avatar or self._fallback
 
     @staticmethod
     def _load_pixmap(path: str) -> Optional[QPixmap]:

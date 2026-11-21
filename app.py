@@ -96,7 +96,6 @@ class PetApplicationCoordinator(QObject):
     ) -> None:
         super().__init__()
         self._app = qt_app
-        self._args = args
         self._main_mutex = main_mutex
         self._is_exiting = False
         self._shutdown_workers_timed_out = False

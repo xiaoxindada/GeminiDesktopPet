@@ -23,7 +23,6 @@ class PetSoundEffect(str, Enum):
     SPARKLE = "sparkle"
     BOING = "boing"
     ANGRY = "angry"
-    VICTORY = "victory"
 
 
 def _clamp16(val: float) -> int:
@@ -95,9 +94,6 @@ class SoundService:
             ),
             PetSoundEffect.BOING: _synthesize_sweep(340, 620, 0.11, 0.16),
             PetSoundEffect.ANGRY: _synthesize_sweep(480, 220, 0.12, 0.18),
-            PetSoundEffect.VICTORY: _synthesize_notes(
-                [(659.25, 0.06, 0.14), (783.99, 0.06, 0.14), (987.77, 0.06, 0.14), (1318.5, 0.14, 0.16)]
-            ),
         }
         self._wav_files: dict[PetSoundEffect, str] = {}
         try:

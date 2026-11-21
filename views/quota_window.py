@@ -257,10 +257,6 @@ class QuotaWindow(QWidget):
         )
         return btn
 
-    @property
-    def is_user_dragged(self) -> bool:
-        return self._user_dragged
-
     def ensure_on_top(self) -> None:
         """保持额度卡片位于桌宠前方。"""
         if not self.isVisible():
@@ -273,8 +269,6 @@ class QuotaWindow(QWidget):
         if hasattr(self._anchor_pet, "get_visual_obstacle_rects"):
             rects = list(self._anchor_pet.get_visual_obstacle_rects())
             return rects if rects else [sprite_rect]
-        if hasattr(self._anchor_pet, "get_visual_ui_bounds"):
-            return [self._anchor_pet.get_visual_ui_bounds()]
         return [sprite_rect]
 
     def ensure_clear_of_anchor(self) -> None:

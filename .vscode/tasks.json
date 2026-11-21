@@ -19,7 +19,7 @@
       "label": "Run Unit Tests",
       "type": "process",
       "command": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "args": ["-m", "unittest", "discover", "-s", "tests", "-v"],
+      "args": ["-m", "pytest", "-q"],
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -40,12 +40,12 @@
         "app.py",
         "clean_config.py",
         "cli.py",
+        "follow_watcher.py",
         "main.py",
         "models",
         "services",
         "themes",
         "views",
-        "tools",
         "tests"
       ],
       "options": {

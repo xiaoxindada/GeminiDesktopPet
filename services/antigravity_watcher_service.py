@@ -7,7 +7,6 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
 
-from models.pet_settings import PetSettings
 from services.followed_app_probe import AppActivitySnapshot, FollowedAppProbe
 
 
@@ -34,18 +33,6 @@ class AntigravityWatcherService:
         self.on_antigravity_started: Optional[Callable[[], None]] = None
         self.on_gemini_app_started: Optional[Callable[[], None]] = None
 
-    @property
-    def is_running(self) -> bool:
-        return self._was_ag_running
-
-    @property
-    def is_antigravity_running(self) -> bool:
-        return self._was_ag_running
-
-    @property
-    def is_gemini_app_running(self) -> bool:
-        return self._was_gemini_running
-
     def start(self) -> None:
         ag = FollowedAppProbe.sample_antigravity_activity()
         cli = FollowedAppProbe.sample_antigravity_cli_activity()
@@ -69,14 +56,6 @@ class AntigravityWatcherService:
     def dispose(self) -> None:
         self.stop()
 
-    @staticmethod
-    def detect_running_followed_app_key(settings: PetSettings) -> Optional[str]:
-        return FollowedAppProbe.detect_running_followed_app_key(settings)
-
-    @staticmethod
-    def check_any_followed_target_running(settings: PetSettings) -> bool:
-        return FollowedAppProbe.detect_running_followed_app_key(settings) is not None
-
     def _poll(self) -> None:
         if not self._initialized:
             return
@@ -86,7 +65,7 @@ class AntigravityWatcherService:
 
         (
             ag_started,
-            ag_exited,
+            _,
             self._was_ag_running,
             self._known_ag_pids,
             self._last_ag_start_utc,
@@ -95,7 +74,7 @@ class AntigravityWatcherService:
         )
         (
             gem_started,
-            gem_exited,
+            _,
             self._was_gemini_running,
             self._known_gemini_pids,
             self._last_gemini_start_utc,
