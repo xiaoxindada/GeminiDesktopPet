@@ -116,6 +116,53 @@ _DOZE_ZZZ_ANCHOR: dict[PetStyleMode, tuple[float, float]] = {
     PetStyleMode.STANDARD: (0.12, 0.08),
 }
 
+# 标准立绘中蹲坐等低重心动作相对站姿的高度缩放比，避免按站姿高度拉伸导致头身比例偏大
+_STANDARD_POSE_HEIGHT_SCALE: dict[PetState, float] = {
+    PetState.SULK: 0.68,
+}
+
+# 身体连戳炸毛检测：连续点击身体按阶梯升级 烦恼 -> 鼓嘴 -> 炸毛 -> 生气，每阶段（含生气）播完回常态后才可继续点击
+_POKE_COMBO_WINDOW_S = 2.0
+_POKE_STAGE_MEMORY_S = 4.5
+_POKE_ANNOYED_COUNT = 3
+_POKE_PUFFED_COUNT = 4
+_POKE_REDHOT_COUNT = 5
+_POKE_SULK_REFLARE_COUNT = 3
+_BODY_DOUBLE_CLICK_QUOTA_DELAY_MS = 360
+_ANNOYED_POSE_DURATION_S = 1.8
+_PUFFED_POSE_DURATION_S = 2.0
+_REDHOT_POSE_DURATION_S = 2.6
+_SULK_POSE_DURATION_S = 5.0
+_COAXED_POSE_DURATION_S = 2.2
+_FORGIVEN_POSE_DURATION_S = 2.6
+
+# 拖拽摇晃/画圈炸毛检测：融合双轴快速折返甩动与连续同向画圈角位移，
+# 完整流程：摇晃 -> 烦恼(ANNOYED) -> 鼓嘴(PUFFED) -> 炸毛(REDHOT) -> 松手下落眩晕(DIZZY) -> 生气(SULK)
+_SHAKE_STROKE_MIN_PX = 10.0
+_SHAKE_MIN_SPEED_PX_S = 240.0
+_SHAKE_STROKE_MAX_AGE_S = 0.45
+_SHAKE_REVERSAL_COOLDOWN_S = 0.045
+_SHAKE_IDLE_RESET_S = 0.32
+_SHAKE_WHIP_GAIN = 0.85
+_SHAKE_SPIN_SEG_MIN_PX = 14.0
+_SHAKE_SPIN_MIN_SPEED_PX_S = 180.0
+_SHAKE_SPIN_WARMUP_RAD = math.radians(60.0)
+_SHAKE_SPIN_GAIN_PER_RAD = 0.60
+_SHAKE_DECAY_PER_SEC = 0.65
+_SHAKE_ENERGY_MAX = 5.0
+_SHAKE_ANNOYED_THRESHOLD = 1.0
+_SHAKE_PUFFED_THRESHOLD = 2.0
+_SHAKE_REDHOT_THRESHOLD = 3.0
+_SHAKE_ANNOYED_DURATION_S = 0.70
+_SHAKE_PUFFED_DURATION_S = 0.75
+_SHAKE_STOP_RECOVER_S = 2.0
+_SHAKE_REDHOT_DURATION_S = _SHAKE_STOP_RECOVER_S
+_SHAKE_HOLD_ACTIVE_S = 0.65
+_SHAKE_RELEASE_GRACE_S = 1.0
+_DIZZY_POSE_DURATION_S = 2.8
+_POST_DIZZY_PAT_GRACE_S = 0.75
+_HOVER_PAT_COOLDOWN_S = 0.40
+
 
 def _ensure_tool_window_ex_style(hwnd: int) -> None:
     if os.name != "nt" or not hwnd:
@@ -592,7 +639,10 @@ class PetWindow(QWidget):
         self._override_pose: Optional[PetState] = None
         # 区分自动闲置动作与交互临时动作：自动动作持续到下次决策直接衔接，不提前回落默认待机
         self._override_is_autonomous = False
-        self._pending_sulk_after_dizzy = False
+        # 仅烦恼/鼓嘴/炸毛/眩晕/生气(5秒)/安抚/原谅播放期锁定，避免随机闲聊命中 PUFFED 误锁交互
+        self._override_locked = False
+        # 炸毛（REDHOT）或首次安抚（COAXED）结束后衔接闹脾气（SULK）的待续标志
+        self._pending_sulk_after_pose = False
         self._override_until_utc = datetime.min.replace(tzinfo=timezone.utc)
         self._active_static_pixmap: Optional[QPixmap] = None
         self._use_chibi_walk_rig = False
@@ -630,16 +680,50 @@ class PetWindow(QWidget):
             "body_rot": 0.0,
         }
 
-        # Drag, shake & gravity physics
+        # Body poke -> bristle state
+        self._poke_count = 0
+        self._poke_stage = 0
+        self._poke_last_mono = 0.0
+        self._poke_stage_until_mono = 0.0
+        self._sulk_poke_count = 0
+        self._poke_recoil = 0.0
+        self._poke_recoil_dir = 1.0
+        self._bristle_burst = 0.0
+        self._bristle_last_particle_mono = 0.0
+        self._bristle_last_sound_mono = 0.0
+        self._press_is_double_click = False
+        self._press_started_while_locked = False
+
+        # Drag, shake (whip + circular spin) & gravity physics
         self._mouse_down = False
         self._is_dragging = False
+        self._is_shaking = False
+        self._shake_stage = 0
+        self._shake_peak_energy = 0.0
         self._drag_start_global = QPointF()
         self._win_start_left = 0.0
         self._win_start_top = 0.0
         self._last_move_global = QPointF()
         self._last_move_utc = datetime.now(timezone.utc)
         self._prev_vx = 0.0
-        self._shake_energy = 0.0
+        self._drag_tilt_vx = 0.0
+        self._whip_energy = 0.0
+        self._spin_energy = 0.0
+        self._shake_last_reversal_mono = 0.0
+        self._shake_last_active_mono = 0.0
+        self._dizzy_last_particle_mono = 0.0
+        self._last_move_mono = 0.0
+        # 轴向甩动状态：[已确立方向(-1/0/1), 当前方向累计位移, 当前方向起点时间戳, 最近活跃时间戳]
+        self._shake_axis_x: list[float | int] = [0, 0.0, 0.0, 0.0]
+        self._shake_axis_y: list[float | int] = [0, 0.0, 0.0, 0.0]
+        # 画圈转角状态：按最小位移步段累计连续同向偏转弧度，兼容高回报率鼠标
+        self._spin_seg_dx = 0.0
+        self._spin_seg_dy = 0.0
+        self._spin_seg_start_mono = 0.0
+        self._spin_prev_vec: Optional[tuple[float, float]] = None
+        self._spin_last_vec_mono = 0.0
+        self._spin_curve_dir = 0
+        self._spin_curve_rad = 0.0
         self._is_falling = False
         self._fall_velocity_y = 0.0
         self._landing_squash = 0.0
@@ -647,6 +731,8 @@ class PetWindow(QWidget):
         # Headpat tracking
         self._last_pat_local = QPointF()
         self._pat_travel = 0.0
+        self._pat_hover_blocked_until_mono = 0.0
+        self._last_hover_pat_mono = 0.0
         self._last_pat_sound_utc = datetime.min.replace(tzinfo=timezone.utc)
 
         # Hover & bubble/chat state
@@ -1239,6 +1325,11 @@ class PetWindow(QWidget):
         self._idle_speech_timer.setInterval(_IDLE_SPEECH_CHECK_MS)
         self._idle_speech_timer.timeout.connect(self._idle_speech_timer_tick)
 
+        self._quota_double_click_timer = QTimer(self)
+        self._quota_double_click_timer.setSingleShot(True)
+        self._quota_double_click_timer.setInterval(_BODY_DOUBLE_CLICK_QUOTA_DELAY_MS)
+        self._quota_double_click_timer.timeout.connect(self._fire_pending_body_double_click_quota)
+
     # ==================== Lifecycle Events ====================
 
     def showEvent(self, event) -> None:
@@ -1292,6 +1383,7 @@ class PetWindow(QWidget):
         self._monitor_timer.stop()
         self._hover_grace_timer.stop()
         self._idle_speech_timer.stop()
+        self._quota_double_click_timer.stop()
         self._ag_sync_timer.stop()
         for worker in list(self._active_chat_workers):
             if worker.isRunning():
@@ -1308,6 +1400,14 @@ class PetWindow(QWidget):
 
     def hideEvent(self, event) -> None:
         self._mouse_down = False
+        self._is_dragging = False
+        self._is_shaking = False
+        self._shake_stage = 0
+        self._shake_peak_energy = 0.0
+        self._press_is_double_click = False
+        self._press_started_while_locked = False
+        if hasattr(self, "_quota_double_click_timer"):
+            self._quota_double_click_timer.stop()
         if getattr(self, "_ui_ready", False):
             self._is_chat_open = False
             self._is_forced_bubble_active = False
@@ -1806,6 +1906,14 @@ class PetWindow(QWidget):
             cw = float(content.width())
             ch = float(content.height())
             rh = sprite_h
+            visual_state = getattr(self, "_visual_state", None)
+            if (
+                self._settings.style_mode == PetStyleMode.STANDARD
+                and visual_state in _STANDARD_POSE_HEIGHT_SCALE
+                and ch > 0
+                and (cw / ch) > 0.72
+            ):
+                rh *= _STANDARD_POSE_HEIGHT_SCALE[visual_state]
             rw = rh * (cw / ch) if ch > 0 else rh * 0.85
         else:
             rh = sprite_h
@@ -1899,8 +2007,13 @@ class PetWindow(QWidget):
         )
         self._override_pose = state
         self._override_is_autonomous = False
-        self._pending_sulk_after_dizzy = False
+        self._override_locked = False
+        self._pending_sulk_after_pose = False
         self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=4.5)
+        if state == PetState.REDHOT:
+            self._bristle_burst = 1.0
+        elif state == PetState.PUFFED:
+            self._bristle_burst = 0.55
 
         if style is not None and self._settings.style_mode != style:
             self._settings.style_mode = style
@@ -1930,7 +2043,7 @@ class PetWindow(QWidget):
         else:
             self._override_pose = None
             self._override_is_autonomous = False
-            self._pending_sulk_after_dizzy = False
+            self._pending_sulk_after_pose = False
             self._use_chibi_walk_rig = False
             self._use_std_walk_rig = False
             self._active_static_pixmap = self._sprites.get_by_key(sprite_key, self._settings.style_mode)
@@ -1948,12 +2061,15 @@ class PetWindow(QWidget):
     ) -> None:
         self._override_pose = None
         self._override_is_autonomous = False
-        self._pending_sulk_after_dizzy = False
+        self._override_locked = False
+        self._pending_sulk_after_pose = False
         self._is_dragging = False
         self._is_falling = False
         self._is_sleeping = False
         self._is_sulk = False
         self._landing_squash = 0.0
+        self._poke_recoil = 0.0
+        self._bristle_burst = 0.0
 
         self._settings.style_mode = style_mode
         self._settings.docked_side = dock_side
@@ -1987,8 +2103,14 @@ class PetWindow(QWidget):
         dt = max(0.001, min(0.05, (now - self._last_tick_utc).total_seconds()))
         self._last_tick_utc = now
         self._anim_time += dt
-        if self._shake_energy > 0:
-            self._shake_energy = max(0.0, self._shake_energy - dt * 1.4)
+        if self._whip_energy > 0.0:
+            self._whip_energy = max(0.0, self._whip_energy - dt * _SHAKE_DECAY_PER_SEC)
+        if self._spin_energy > 0.0:
+            self._spin_energy = max(0.0, self._spin_energy - dt * _SHAKE_DECAY_PER_SEC)
+        if self._drag_tilt_vx != 0.0:
+            self._drag_tilt_vx *= max(0.0, 1.0 - dt * 12.0)
+            if abs(self._drag_tilt_vx) <= 1.0:
+                self._drag_tilt_vx = 0.0
 
         if self._waiting_chat_workers:
             # 模型正在回复期间锁定展示“思考中”形象，防止长耗时思考请求被超时定时器打断
@@ -1997,32 +2119,98 @@ class PetWindow(QWidget):
                 self._is_sleeping = False
                 self._override_pose = PetState.THINKING
                 self._override_is_autonomous = False
-                self._pending_sulk_after_dizzy = False
+                self._override_locked = False
+                self._pending_sulk_after_pose = False
                 self._refresh_sprite_visual()
+        elif (
+            self._is_dragging
+            and self._is_shaking
+            and self._override_pose == PetState.REDHOT
+            and self._shake_last_active_mono > 0.0
+            and (time.monotonic() - self._shake_last_active_mono) >= _SHAKE_STOP_RECOVER_S
+        ):
+            # 完全炸毛后中途停止晃动满 2 秒：消退摇晃状态并回到正常反重力拖拽流程（松手正常下落 Q 弹）
+            self._reset_drag_shake_tracking()
+            self._override_pose = PetState.FLOAT
+            self._override_is_autonomous = False
+            self._override_locked = False
+            if not self._is_sulk:
+                self._pending_sulk_after_pose = False
+            self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
+            if (
+                self._speech_bubble.isVisible()
+                and not self._is_chat_open
+                and not self._sync_bubble_active
+            ):
+                self._hide_speech_bubble()
+            self._refresh_sprite_visual()
         elif (
             self._override_pose is not None
             and not self._override_is_autonomous
             and now >= self._override_until_utc
         ):
+            finished_pose = self._override_pose
             if self._is_dragging:
-                # 拖拽中临时表情结束后保持悬浮拖拽姿态，避免退回旧贴边半身图。
-                if self._override_pose != PetState.FLOAT:
-                    self._override_pose = PetState.FLOAT
-                    self._override_is_autonomous = False
-                    self._pending_sulk_after_dizzy = False
-                    self._refresh_sprite_visual()
-            elif self._pending_sulk_after_dizzy and self._is_sulk and self.isVisible():
-                # 头晕结束后在同一帧直接衔接闹脾气，避免定时竞态闪回默认待机。
-                self._pending_sulk_after_dizzy = False
-                self._enter_sulk_after_dizzy()
+                now_mono = time.monotonic()
+                # 当前阶段动作刚播完且仍在持续摇晃时，在同一帧顺阶推进 烦恼 -> 鼓嘴 -> 炸毛
+                if self._advance_drag_shake_stage_if_ready(now_mono):
+                    pass
+                elif not self._is_drag_float_allowed(now_mono):
+                    self._override_until_utc = now + timedelta(seconds=1.2)
+                else:
+                    self._reset_drag_shake_tracking()
+                    if self._override_pose != PetState.FLOAT:
+                        self._override_pose = PetState.FLOAT
+                        self._override_is_autonomous = False
+                        self._override_locked = False
+                        if finished_pose == PetState.SULK and self._is_sulk:
+                            self._is_sulk = False
+                            self._sulk_poke_count = 0
+                        if not self._is_sulk:
+                            self._pending_sulk_after_pose = False
+                        self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
+                        self._refresh_sprite_visual()
+            elif self._pending_sulk_after_pose and self._is_sulk and self.isVisible():
+                # 炸毛或首次安抚播完后在同一帧衔接闹脾气，避免定时竞态闪回默认待机。
+                self._pending_sulk_after_pose = False
+                self._override_locked = False
+                self._poke_count = 0
+                self._poke_stage = 0
+                self._poke_stage_until_mono = 0.0
+                self._enter_sulk_state(show_bubble=(finished_pose != PetState.COAXED))
             else:
-                self._pending_sulk_after_dizzy = False
+                self._pending_sulk_after_pose = False
                 self._override_pose = None
                 self._override_is_autonomous = False
+                self._override_locked = False
+                if finished_pose == PetState.ANNOYED and self._poke_count > 0:
+                    # 连戳触发的烦恼播完后保留短暂怒气记忆，再次戳身体时顺阶进入鼓嘴
+                    self._poke_stage = 1
+                    self._poke_stage_until_mono = time.monotonic() + _POKE_STAGE_MEMORY_S
+                elif finished_pose == PetState.PUFFED and self._poke_count > 0:
+                    # 连戳触发的鼓嘴播完后保留短暂怒气记忆，再次戳身体时顺阶爆发炸毛
+                    self._poke_stage = 2
+                    self._poke_stage_until_mono = time.monotonic() + _POKE_STAGE_MEMORY_S
+                else:
+                    self._poke_count = 0
+                    self._poke_stage = 0
+                    self._poke_stage_until_mono = 0.0
                 if self._is_sulk:
                     self._is_sulk = False
+                    self._sulk_poke_count = 0
                 self._refresh_sprite_visual()
                 self._restart_ai_timer()
+
+        if (
+            not self._is_dragging
+            and not self._waiting_chat_workers
+            and self._is_sulk
+            and self._override_pose is None
+            and not self._pending_sulk_after_pose
+        ):
+            # 兜底清除无对应闹脾气姿态的残留标记，避免状态卡死
+            self._is_sulk = False
+            self._sulk_poke_count = 0
 
         # Gravity fall physics
         if (
@@ -2042,6 +2230,8 @@ class PetWindow(QWidget):
                 self._fall_velocity_y = 0.0
                 self._landing_squash = 1.0
                 self._current_state = self._resolve_resting_state()
+                if self._override_pose == PetState.DIZZY:
+                    self._spawn_dizzy_particles(4)
                 self._refresh_sprite_visual()
                 self._restart_ai_timer()
                 self._sound.play(PetSoundEffect.BOING)
@@ -2074,6 +2264,10 @@ class PetWindow(QWidget):
 
         if self._landing_squash > 0.001:
             self._landing_squash = max(0.0, self._landing_squash - dt * 4.5)
+        if self._poke_recoil > 0.001:
+            self._poke_recoil = max(0.0, self._poke_recoil - dt * 5.5)
+        if self._bristle_burst > 0.001:
+            self._bristle_burst = max(0.0, self._bristle_burst - dt * 2.2)
 
         self._update_sprite_transforms()
         self._update_particles(dt)
@@ -2093,10 +2287,47 @@ class PetWindow(QWidget):
                 self._anim_time * 2.1
             )
         elif self._is_dragging:
-            angle = max(-16.0, min(16.0, self._prev_vx * 0.012))
+            angle = max(-16.0, min(16.0, self._drag_tilt_vx * 0.012))
             sy = 1.02
-            if self._shake_energy > 1.8:
-                tx = math.sin(self._anim_time * 48.0) * 4.0
+            if self._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
+                if self._override_pose == PetState.REDHOT:
+                    tx = (
+                        math.sin(self._anim_time * 64.0) * 0.7
+                        + math.cos(self._anim_time * 98.0) * 0.3
+                    ) * (5.6 * s)
+                    ty = math.sin(self._anim_time * 74.0) * (1.4 * s)
+                    angle += math.cos(self._anim_time * 52.0) * 4.8
+                    sx = 1.06
+                    sy = 1.06
+                    now_mono = time.monotonic()
+                    if (
+                        self._settings.particles_enabled
+                        and (now_mono - self._bristle_last_particle_mono) >= 0.28
+                    ):
+                        self._spawn_bristle_particles(1)
+                        self._bristle_last_particle_mono = now_mono
+                elif self._override_pose == PetState.PUFFED:
+                    tx = math.sin(self._anim_time * 48.0) * (3.8 * s)
+                    angle += math.cos(self._anim_time * 38.0) * 3.2
+                    sx = 1.035
+                    sy = 1.035
+                else:
+                    tx = math.sin(self._anim_time * 36.0) * (2.4 * s)
+                    angle += math.cos(self._anim_time * 28.0) * 2.0
+
+                if self._bristle_burst > 0.001:
+                    p = 1.0 - self._bristle_burst
+                    hop = math.sin(p * math.pi) * (1.0 - 0.3 * p)
+                    expand = math.sin(p * math.pi * 1.5) * math.exp(-2.6 * p)
+                    burst_amp = 1.0 if self._override_pose == PetState.REDHOT else 0.55
+                    ty -= 18.0 * s * hop * burst_amp
+                    sx *= 1.0 + 0.11 * expand * burst_amp
+                    sy *= 1.0 + 0.12 * expand * burst_amp
+                    angle += math.sin(p * math.pi * 4.0) * 5.0 * self._bristle_burst * burst_amp
+            elif self._override_pose == PetState.DIZZY:
+                tx = math.cos(self._anim_time * 7.2) * 5.0 * s
+                ty = math.sin(self._anim_time * 7.2) * 2.5 * s
+                angle += math.sin(self._anim_time * 7.2) * 8.0
         elif self._is_walking:
             sx = -1.0 if self._walk_dir > 0 else 1.0
             if not self._mouse_down:
@@ -2110,6 +2341,64 @@ class PetWindow(QWidget):
                 else:
                     ty = -abs(math.sin(self._anim_time * 11.0)) * 7.0
                     angle = math.sin(self._anim_time * 11.0) * 2.8 * self._walk_dir
+        elif self._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
+            if self._override_pose == PetState.REDHOT:
+                # 炸毛：高频双频震颤 + 持续膨胀张力 + 间歇火花怒气粒子
+                tx = (
+                    math.sin(self._anim_time * 62.0) * 0.7
+                    + math.cos(self._anim_time * 97.0) * 0.3
+                ) * (4.2 * s)
+                ty = math.sin(self._anim_time * 74.0) * (1.2 * s)
+                angle = math.sin(self._anim_time * 52.0) * 3.8
+                sx = 1.055
+                sy = 1.055
+                now_mono = time.monotonic()
+                if (
+                    self._settings.particles_enabled
+                    and (now_mono - self._bristle_last_particle_mono) >= 0.28
+                ):
+                    self._spawn_bristle_particles(1)
+                    self._bristle_last_particle_mono = now_mono
+            elif self._override_pose == PetState.PUFFED:
+                tx = math.sin(self._anim_time * 46.0) * (2.6 * s)
+                angle = math.sin(self._anim_time * 36.0) * 2.4
+                sx = 1.03
+                sy = 1.03
+            else:
+                tx = math.sin(self._anim_time * 34.0) * (1.5 * s)
+                angle = math.sin(self._anim_time * 24.0) * 1.3
+                sy = 1.0 + 0.012 * math.sin(self._anim_time * 8.0)
+
+            if self._bristle_burst > 0.001:
+                # 炸毛瞬间弹跳与弹性膨胀曲线（p: 0 -> 1）
+                p = 1.0 - self._bristle_burst
+                hop = math.sin(p * math.pi) * (1.0 - 0.3 * p)
+                expand = math.sin(p * math.pi * 1.5) * math.exp(-2.6 * p)
+                burst_amp = 1.0 if self._override_pose == PetState.REDHOT else 0.55
+                ty -= 22.0 * s * hop * burst_amp
+                sx *= 1.0 + 0.11 * expand * burst_amp
+                sy *= 1.0 + 0.12 * expand * burst_amp
+                angle += math.sin(p * math.pi * 4.0) * 5.0 * self._bristle_burst * burst_amp
+
+            if self._settings.anti_gravity_mode:
+                ty += -12.0 * s + 5.0 * s * math.sin(self._anim_time * 2.1)
+        elif self._override_pose == PetState.DIZZY:
+            # 眩晕：重心不稳的 8 字摇摆 + 微微踉跄软腿
+            sway = math.sin(self._anim_time * 4.6)
+            angle = 9.0 * sway + 2.4 * math.sin(self._anim_time * 9.2)
+            tx = 6.5 * s * math.cos(self._anim_time * 4.6)
+            ty = 2.5 * s * abs(sway)
+            sy = 1.0 - 0.022 * abs(sway)
+            sx = 1.0 + 0.018 * abs(sway)
+            if self._settings.anti_gravity_mode:
+                ty += -14.0 * s + 6.0 * s * math.sin(self._anim_time * 2.1)
+            now_mono = time.monotonic()
+            if (
+                self._settings.particles_enabled
+                and (now_mono - self._dizzy_last_particle_mono) >= 0.42
+            ):
+                self._spawn_dizzy_particles(1)
+                self._dizzy_last_particle_mono = now_mono
         elif self._override_pose == PetState.THINKING:
             sy = 1.0 + 0.016 * math.sin(self._anim_time * 3.0)
             angle = 1.8 * math.sin(self._anim_time * 1.8)
@@ -2168,6 +2457,12 @@ class PetWindow(QWidget):
                 1.8,
             )
 
+        if self._poke_recoil > 0.001:
+            pr = math.sin(self._poke_recoil * math.pi)
+            sy *= 1.0 - 0.10 * pr
+            sx *= 1.0 + 0.09 * pr
+            angle += self._poke_recoil_dir * 4.2 * pr
+
         if self._landing_squash > 0.001:
             ls = math.sin(self._landing_squash * math.pi)
             sy *= 1.0 - 0.14 * ls
@@ -2207,6 +2502,123 @@ class PetWindow(QWidget):
             "body_rot": -2.2 + 1.1 * math.sin(2.0 * p),
         }
 
+    def _head_click_ratio(self) -> float:
+        return 0.26 if self._settings.style_mode == PetStyleMode.STANDARD else 0.45
+
+    def _head_hover_ratio(self) -> float:
+        return 0.29 if self._settings.style_mode == PetStyleMode.STANDARD else 0.48
+
+    def _head_crown_anchor(self, sprite_rect: QRectF) -> tuple[float, float, float]:
+        """返回角色头顶中心与横向半轴，适配 Q 版与标准立绘的头身比例与重心偏移。"""
+        is_std = self._settings.style_mode == PetStyleMode.STANDARD
+        cx = sprite_rect.center().x()
+        if is_std and getattr(self, "_visual_state", None) == PetState.DIZZY:
+            # 标准立绘眩晕姿右手外伸导致画布中心偏右，光环中心同步左移贴合头部
+            cx -= sprite_rect.width() * 0.095
+        cy = sprite_rect.top() + sprite_rect.height() * (0.03 if is_std else 0.055)
+        rx = sprite_rect.width() * (0.24 if is_std else 0.34)
+        return cx, cy, rx
+
+    def _paint_dizzy_halo(
+        self,
+        painter: QPainter,
+        sprite_rect: QRectF,
+        pivot_x: float,
+        pivot_y: float,
+        *,
+        front_layer: bool,
+    ) -> None:
+        """在角色头顶绘制前后分层的绕圈旋转星光与晕眩轨迹环（随头部摇摆联动）。"""
+        s = self._effective_scale()
+        local_hx, local_hy, rx = self._head_crown_anchor(sprite_rect)
+        dx = (local_hx - pivot_x) * self._sprite_scale_x
+        dy = (local_hy - pivot_y) * self._sprite_scale_y
+        rad = math.radians(self._sprite_angle)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        cx = pivot_x + self._sprite_trans_x + dx * cos_a - dy * sin_a
+        cy = max(24.0 * s, pivot_y + self._sprite_trans_y + dx * sin_a + dy * cos_a)
+        ry = max(8.0, rx * 0.34)
+        ring_tilt = self._sprite_angle * 0.75 + 6.0 * math.sin(self._anim_time * 3.8)
+
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(ring_tilt)
+
+        # Qt drawArc 0°位于 3 点钟方向、逆时针为正：0~180° 为头后半圈，180~360° 为头前半圈
+        start_deg = 180 if front_layer else 0
+        outer_rect = QRectF(-rx, -ry, rx * 2.0, ry * 2.0)
+        inner_rect = QRectF(-rx * 0.78, -ry * 0.78, rx * 1.56, ry * 1.56)
+
+        outer_color = QColor("#C4B5FD")
+        outer_color.setAlpha(185 if front_layer else 105)
+        outer_pen = QPen(outer_color, max(1.4, 2.0 * s))
+        outer_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(outer_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(outer_rect, start_deg * 16, 180 * 16)
+
+        painter.save()
+        painter.rotate(-6.0 + 4.0 * math.sin(self._anim_time * 5.2))
+        inner_color = QColor("#FDE047")
+        inner_color.setAlpha(155 if front_layer else 85)
+        inner_pen = QPen(inner_color, max(1.1, 1.45 * s))
+        inner_pen.setStyle(Qt.PenStyle.DashLine)
+        inner_pen.setDashOffset(-self._anim_time * 8.0)
+        painter.setPen(inner_pen)
+        painter.drawArc(inner_rect, start_deg * 16, 180 * 16)
+        painter.restore()
+
+        orbit_stars = (
+            ("★", "#FDE047"),
+            ("✦", "#C4B5FD"),
+            ("✧", "#38BDF8"),
+            ("★", "#F9A8D4"),
+            ("✦", "#FDE047"),
+        )
+        base_phase = self._anim_time * 4.4
+        for idx, (glyph, color_hex) in enumerate(orbit_stars):
+            theta = base_phase + (2.0 * math.pi * idx) / len(orbit_stars)
+            sin_t = math.sin(theta)
+            is_front = sin_t > 0.0
+            if is_front != front_layer:
+                continue
+            px = rx * math.cos(theta)
+            py = ry * sin_t
+            depth = 0.5 + 0.5 * sin_t
+            font_px = max(12, int(round((13.0 + 9.0 * depth) * s)))
+            alpha = 0.48 + 0.50 * depth
+
+            color = QColor(color_hex)
+            color.setAlphaF(min(1.0, alpha))
+            font = QFont("Microsoft YaHei UI")
+            font.setBold(True)
+            font.setPixelSize(font_px)
+
+            painter.save()
+            painter.translate(px, py)
+            painter.rotate(math.degrees(theta) * 0.45)
+
+            if front_layer:
+                glow = QColor(color_hex)
+                glow.setAlphaF(0.16 * depth)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(glow)
+                r = font_px * 0.42
+                painter.drawEllipse(QRectF(-r, -r, r * 2.0, r * 2.0))
+
+            painter.setPen(color)
+            painter.setFont(font)
+            box = float(font_px) * 1.9
+            painter.drawText(
+                QRectF(-box * 0.5, -box * 0.5, box, box),
+                Qt.AlignmentFlag.AlignCenter,
+                glyph,
+            )
+            painter.restore()
+
+        painter.restore()
+
     def _paint_stage(self, painter: QPainter) -> None:
         sprite_rect = self._get_local_sprite_rect()
 
@@ -2220,6 +2632,14 @@ class PetWindow(QWidget):
         else:
             pivot_x = sprite_rect.center().x()
         pivot_y = sprite_rect.bottom()
+
+        show_dizzy_halo = (
+            getattr(self, "_visual_state", None) == PetState.DIZZY
+            and self._settings.particles_enabled
+            and self._settings.docked_side == DockSide.NONE
+        )
+        if show_dizzy_halo:
+            self._paint_dizzy_halo(painter, sprite_rect, pivot_x, pivot_y, front_layer=False)
 
         painter.save()
         painter.translate(pivot_x + self._sprite_trans_x, pivot_y + self._sprite_trans_y)
@@ -2238,6 +2658,9 @@ class PetWindow(QWidget):
                 draw_pixmap_smooth(painter, pixmap, sprite_rect, content)
 
         painter.restore()
+
+        if show_dizzy_halo:
+            self._paint_dizzy_halo(painter, sprite_rect, pivot_x, pivot_y, front_layer=True)
 
         # Paint floating particle overlay
         for pt in self._particles:
@@ -2406,12 +2829,16 @@ class PetWindow(QWidget):
         duration_sec: float,
         bubble_message: Optional[str] = None,
         force_bubble: bool = False,
+        *,
+        pending_sulk: bool = False,
+        locked: bool = False,
     ) -> None:
         self._is_walking = False
         self._is_sleeping = state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP)
         self._override_pose = state
         self._override_is_autonomous = False
-        self._pending_sulk_after_dizzy = False
+        self._override_locked = locked
+        self._pending_sulk_after_pose = pending_sulk
         self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=duration_sec)
         self._refresh_sprite_visual()
         self._update_sprite_transforms()
@@ -2432,7 +2859,8 @@ class PetWindow(QWidget):
         self._is_sleeping = False
         self._override_pose = state
         self._override_is_autonomous = True
-        self._pending_sulk_after_dizzy = False
+        self._override_locked = False
+        self._pending_sulk_after_pose = False
         self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
         self._refresh_sprite_visual()
         self._update_sprite_transforms()
@@ -2531,7 +2959,7 @@ class PetWindow(QWidget):
         elif pose == PetState.RUNNING:
             self._override_pose = None
             self._override_is_autonomous = False
-            self._pending_sulk_after_dizzy = False
+            self._pending_sulk_after_pose = False
             self._is_sleeping = False
             self._is_walking = True
             self._walk_dir = 1 if random.randint(0, 1) == 0 else -1
@@ -2653,6 +3081,7 @@ class PetWindow(QWidget):
             or self._settings.doze_mode
             or self._is_dragging
             or self._is_sulk
+            or self._is_action_playback_locked()
         ):
             return
 
@@ -2677,11 +3106,491 @@ class PetWindow(QWidget):
                 f"CPU 飙到 {snap.cpu_percent:.0f}% 了！电脑要烫爪子了喵！",
             )
 
-    # ==================== Mouse Drag, Shake & Headpat ====================
+    # ==================== Mouse Drag, Shake Bristle, Dizzy & Headpat ====================
+
+    def _current_shake_energy(self) -> float:
+        return max(self._whip_energy, self._spin_energy)
+
+    def _reset_drag_shake_tracking(self) -> None:
+        self._is_shaking = False
+        self._shake_stage = 0
+        self._shake_peak_energy = 0.0
+        self._prev_vx = 0.0
+        self._drag_tilt_vx = 0.0
+        self._whip_energy = 0.0
+        self._spin_energy = 0.0
+        self._shake_last_reversal_mono = 0.0
+        self._shake_last_active_mono = 0.0
+        self._dizzy_last_particle_mono = 0.0
+        self._shake_axis_x = [0, 0.0, 0.0, 0.0]
+        self._shake_axis_y = [0, 0.0, 0.0, 0.0]
+        self._reset_spin_segment_state()
+
+    def _reset_spin_segment_state(self) -> None:
+        self._spin_seg_dx = 0.0
+        self._spin_seg_dy = 0.0
+        self._spin_seg_start_mono = 0.0
+        self._spin_prev_vec = None
+        self._spin_last_vec_mono = 0.0
+        self._spin_curve_dir = 0
+        self._spin_curve_rad = 0.0
+
+    def _is_action_playback_locked(self) -> bool:
+        """判断当前是否处于不可中断的交互动作播放期（烦恼/鼓嘴/炸毛/眩晕/生气/安抚/原谅）。"""
+        return (
+            self._override_locked
+            and self._override_pose is not None
+            and not self._override_is_autonomous
+            and datetime.now(timezone.utc) < self._override_until_utc
+        )
+
+    def _is_drag_float_allowed(self, now_mono: Optional[float] = None) -> bool:
+        """判断当前拖拽是否应展示正常反重力悬浮反馈（完全炸毛停晃满 2 秒恢复 FLOAT，锁定/摇晃活跃期禁切）。"""
+        now = time.monotonic() if now_mono is None else now_mono
+        if self._is_shaking and self._override_pose == PetState.REDHOT:
+            if (
+                self._shake_last_active_mono > 0.0
+                and (now - self._shake_last_active_mono) >= _SHAKE_STOP_RECOVER_S
+            ):
+                return True
+            return False
+        if self._is_action_playback_locked():
+            return False
+        if (
+            self._is_shaking
+            and self._shake_last_active_mono > 0.0
+            and (now - self._shake_last_active_mono) <= _SHAKE_HOLD_ACTIVE_S
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _update_drag_whip_axis(
+        axis_state: list[float | int],
+        step: float,
+        now_mono: float,
+        prev_move_mono: float,
+    ) -> bool:
+        """识别单轴高速折返摇晃：新方向行程需达到有效位移与速度，兼容高回报率鼠标且抗微噪。"""
+        if abs(step) < 1e-6:
+            return False
+
+        last_fast_dir = int(axis_state[0])
+        accum = float(axis_state[1])
+        stroke_start = float(axis_state[2])
+        last_fast_mono = float(axis_state[3])
+        step_dir = 1 if step > 0.0 else -1
+
+        if accum == 0.0 or (accum > 0.0 and step_dir < 0) or (accum < 0.0 and step_dir > 0):
+            accum = step
+            stroke_start = (
+                prev_move_mono
+                if prev_move_mono > 0.0
+                and (now_mono - prev_move_mono) <= _SHAKE_IDLE_RESET_S
+                else now_mono
+            )
+        else:
+            accum += step
+
+        axis_state[1] = accum
+        axis_state[2] = stroke_start
+
+        if abs(accum) < _SHAKE_STROKE_MIN_PX:
+            return False
+
+        elapsed = max(0.012, now_mono - stroke_start)
+        stroke_speed = abs(accum) / elapsed
+        if stroke_speed < _SHAKE_MIN_SPEED_PX_S:
+            axis_state[1] = 0.0
+            axis_state[2] = now_mono
+            return False
+
+        is_reversal = (
+            last_fast_dir != 0
+            and step_dir != last_fast_dir
+            and (now_mono - last_fast_mono) <= _SHAKE_STROKE_MAX_AGE_S
+        )
+        axis_state[0] = step_dir
+        axis_state[3] = now_mono
+        if is_reversal:
+            axis_state[1] = 0.0
+            axis_state[2] = now_mono
+            return True
+
+        if abs(accum) >= _SHAKE_STROKE_MIN_PX * 2.0:
+            axis_state[1] = step_dir * _SHAKE_STROKE_MIN_PX
+            axis_state[2] = now_mono - (
+                _SHAKE_STROKE_MIN_PX / max(stroke_speed, _SHAKE_MIN_SPEED_PX_S)
+            )
+        return False
+
+    def _update_drag_spin_step(
+        self,
+        step_x: float,
+        step_y: float,
+        now_mono: float,
+        prev_move_mono: float,
+    ) -> bool:
+        """按最小位移步段累计连续同向画圈弧度，超过热身角后转为摇晃能量。"""
+        if self._spin_seg_start_mono <= 0.0:
+            self._spin_seg_start_mono = (
+                prev_move_mono
+                if prev_move_mono > 0.0
+                and (now_mono - prev_move_mono) <= _SHAKE_IDLE_RESET_S
+                else now_mono
+            )
+        self._spin_seg_dx += step_x
+        self._spin_seg_dy += step_y
+        seg_len = math.hypot(self._spin_seg_dx, self._spin_seg_dy)
+        if seg_len < _SHAKE_SPIN_SEG_MIN_PX:
+            return False
+
+        elapsed = max(0.012, now_mono - self._spin_seg_start_mono)
+        speed = seg_len / elapsed
+        ux = self._spin_seg_dx / seg_len
+        uy = self._spin_seg_dy / seg_len
+        self._spin_seg_dx = 0.0
+        self._spin_seg_dy = 0.0
+        self._spin_seg_start_mono = now_mono
+
+        if speed < _SHAKE_SPIN_MIN_SPEED_PX_S:
+            self._spin_prev_vec = None
+            self._spin_curve_dir = 0
+            self._spin_curve_rad = 0.0
+            return False
+
+        gained = False
+        if (
+            self._spin_prev_vec is not None
+            and (now_mono - self._spin_last_vec_mono) <= _SHAKE_IDLE_RESET_S
+        ):
+            px, py = self._spin_prev_vec
+            cross = px * uy - py * ux
+            dot = max(-1.0, min(1.0, px * ux + py * uy))
+            dtheta = math.atan2(cross, dot)
+            # 过滤直线抖动（<4.5°）和 180° 急折返（交给双轴摇晃分支处理，避免重复计分）
+            if 0.08 <= abs(dtheta) <= 2.15:
+                turn_dir = 1 if dtheta > 0.0 else -1
+                if self._spin_curve_dir != turn_dir:
+                    self._spin_curve_dir = turn_dir
+                    self._spin_curve_rad = abs(dtheta)
+                else:
+                    prev_rad = self._spin_curve_rad
+                    self._spin_curve_rad += abs(dtheta)
+                    if self._spin_curve_rad > _SHAKE_SPIN_WARMUP_RAD:
+                        effective_rad = self._spin_curve_rad - max(prev_rad, _SHAKE_SPIN_WARMUP_RAD)
+                        if effective_rad > 0.0:
+                            self._spin_energy = min(
+                                _SHAKE_ENERGY_MAX,
+                                self._spin_energy + effective_rad * _SHAKE_SPIN_GAIN_PER_RAD,
+                            )
+                            gained = True
+            elif abs(dtheta) > 2.15:
+                self._spin_curve_dir = 0
+                self._spin_curve_rad = 0.0
+        else:
+            self._spin_curve_dir = 0
+            self._spin_curve_rad = 0.0
+
+        self._spin_prev_vec = (ux, uy)
+        self._spin_last_vec_mono = now_mono
+        return gained
+
+    def _target_drag_shake_stage(self, now_mono: float) -> int:
+        recent = (
+            self._shake_last_active_mono > 0.0
+            and (now_mono - self._shake_last_active_mono) <= _SHAKE_HOLD_ACTIVE_S
+        )
+        effective_energy = (
+            max(self._current_shake_energy(), self._shake_peak_energy)
+            if recent
+            else self._current_shake_energy()
+        )
+        if effective_energy >= _SHAKE_REDHOT_THRESHOLD:
+            return 3
+        if effective_energy >= _SHAKE_PUFFED_THRESHOLD:
+            return 2
+        if effective_energy >= _SHAKE_ANNOYED_THRESHOLD:
+            return 1
+        return 0
+
+    def _apply_drag_shake_stage(self, stage: int, now_mono: float) -> None:
+        """进入指定的拖拽摇晃炸毛阶段，每个阶段播放完前均锁定不可中途打断。"""
+        self._is_shaking = True
+        self._shake_stage = stage
+        self._shake_last_active_mono = now_mono
+        if stage == 3:
+            self._bristle_burst = 1.0
+            self._set_temporary_pose(
+                PetState.REDHOT,
+                _SHAKE_REDHOT_DURATION_S,
+                CharacterLore.pick_line("redhot"),
+                locked=True,
+            )
+            if (now_mono - self._bristle_last_sound_mono) >= 0.65:
+                self._bristle_last_sound_mono = now_mono
+                self._sound.play(PetSoundEffect.ANGRY)
+            self._spawn_bristle_particles(3)
+            self._bristle_last_particle_mono = now_mono
+        elif stage == 2:
+            self._bristle_burst = max(self._bristle_burst, 0.55)
+            self._set_temporary_pose(
+                PetState.PUFFED,
+                _SHAKE_PUFFED_DURATION_S,
+                CharacterLore.pick_line("puffed"),
+                locked=True,
+            )
+            self._spawn_bristle_particles(2)
+            self._bristle_last_particle_mono = now_mono
+        else:
+            self._set_temporary_pose(
+                PetState.ANNOYED,
+                _SHAKE_ANNOYED_DURATION_S,
+                CharacterLore.pick_line("annoyed"),
+                locked=True,
+            )
+            self._spawn_bristle_particles(1)
+            self._bristle_last_particle_mono = now_mono
+
+    def _advance_drag_shake_stage_if_ready(self, now_mono: float) -> bool:
+        """上一摇晃阶段动作完整播完后，如仍在摇晃则在同一帧推进下一阶段（烦恼 -> 鼓嘴 -> 炸毛）。"""
+        if not self._is_dragging or self._is_action_playback_locked():
+            return False
+        target = self._target_drag_shake_stage(now_mono)
+        if target <= self._shake_stage:
+            return False
+        next_stage = min(target, self._shake_stage + 1)
+        self._apply_drag_shake_stage(next_stage, now_mono)
+        return True
+
+    def _process_drag_shake_step(
+        self,
+        step_x: float,
+        step_y: float,
+        now_mono: float,
+        prev_move_mono: float,
+    ) -> bool:
+        # 正在播放眩晕/安抚/原谅等非摇晃锁定动作期间，不被拖拽摇晃中途打断
+        if self._is_action_playback_locked() and self._override_pose not in (
+            PetState.ANNOYED,
+            PetState.PUFFED,
+            PetState.REDHOT,
+        ):
+            return False
+        if (
+            prev_move_mono > 0.0
+            and (now_mono - prev_move_mono) > _SHAKE_IDLE_RESET_S
+        ):
+            self._shake_axis_x = [0, 0.0, 0.0, 0.0]
+            self._shake_axis_y = [0, 0.0, 0.0, 0.0]
+            self._reset_spin_segment_state()
+
+        rev_x = self._update_drag_whip_axis(
+            self._shake_axis_x, step_x, now_mono, prev_move_mono
+        )
+        rev_y = self._update_drag_whip_axis(
+            self._shake_axis_y, step_y, now_mono, prev_move_mono
+        )
+        spin_gained = self._update_drag_spin_step(
+            step_x, step_y, now_mono, prev_move_mono
+        )
+
+        whip_gained = False
+        if rev_x or rev_y:
+            self._shake_last_active_mono = now_mono
+            if (now_mono - self._shake_last_reversal_mono) >= _SHAKE_REVERSAL_COOLDOWN_S:
+                self._shake_last_reversal_mono = now_mono
+                self._whip_energy = min(
+                    _SHAKE_ENERGY_MAX, self._whip_energy + _SHAKE_WHIP_GAIN
+                )
+                whip_gained = True
+
+        if spin_gained:
+            self._shake_last_active_mono = now_mono
+
+        if whip_gained or spin_gained:
+            self._shake_peak_energy = max(
+                self._shake_peak_energy, self._current_shake_energy()
+            )
+
+        if self._is_shaking and (rev_x or rev_y or spin_gained):
+            if self._override_pose == PetState.REDHOT:
+                self._override_until_utc = max(
+                    self._override_until_utc,
+                    datetime.now(timezone.utc) + timedelta(seconds=_SHAKE_STOP_RECOVER_S),
+                )
+                if (now_mono - self._bristle_last_particle_mono) >= 0.30:
+                    self._spawn_bristle_particles(1)
+                    self._bristle_last_particle_mono = now_mono
+
+        if not (whip_gained or spin_gained):
+            return False
+
+        # 当前阶段尚未播完时只累计摇晃能量，不中途打断；播完后才推进下一阶段
+        if self._is_action_playback_locked():
+            return False
+
+        return self._advance_drag_shake_stage_if_ready(now_mono)
+
+    def _trigger_dizzy_state(
+        self,
+        now_mono: float,
+        *,
+        particle_count: int = 5,
+    ) -> None:
+        """炸毛松手后进入下落眩晕 -> 生气序列（眩晕与生气期间均锁定播完，播完自动回常态）。"""
+        self._is_sulk = True
+        self._sulk_pats_needed = 2
+        self._sulk_poke_count = 0
+        self._poke_count = 0
+        self._poke_stage = 0
+        self._poke_stage_until_mono = 0.0
+        self._pat_hover_blocked_until_mono = now_mono + _POST_DIZZY_PAT_GRACE_S
+        self._set_temporary_pose(
+            PetState.DIZZY,
+            _DIZZY_POSE_DURATION_S,
+            CharacterLore.pick_line("dizzy"),
+            pending_sulk=True,
+            locked=True,
+        )
+        self._spawn_dizzy_particles(particle_count)
+        self._dizzy_last_particle_mono = now_mono
+
+    def _spawn_bristle_particles(self, intensity: int) -> None:
+        """按怒气强度在角色耳尖上方与两侧爆发怒气/火花粒子，避免遮挡面部表情。"""
+        if not self._settings.particles_enabled or intensity <= 0:
+            return
+        sprite_rect = self._get_local_sprite_rect()
+        cx, cy, head_rx = self._head_crown_anchor(sprite_rect)
+        # _paint_stage 文本按左上角绘制，生成点整体上移并外扩到头顶与耳侧外围
+        top_y = cy - 22.0
+        if intensity == 1:
+            self._spawn_particle(
+                "💢",
+                "#F87171",
+                cx + head_rx * 0.85,
+                top_y,
+                18.0,
+                -36.0,
+                0.85,
+            )
+            return
+        if intensity == 2:
+            specs = (
+                ("💢", "#F87171", cx + head_rx * 0.90, top_y - 2.0, 26.0, -42.0, 0.90),
+                ("⚡", "#FB923C", cx - head_rx * 1.05, top_y + 2.0, -28.0, -38.0, 0.85),
+            )
+            for glyph, color, x, y, vx, vy, life in specs:
+                self._spawn_particle(glyph, color, x, y, vx, vy, life)
+            return
+
+        # 炸毛瞬间从耳尖上方与头部外侧径向爆发怒气与静电火花粒子
+        burst_specs = (
+            ("💢", "#F87171"),
+            ("⚡", "#FACC15"),
+            ("✦", "#FB923C"),
+            ("✧", "#FDE047"),
+            ("⚡", "#FACC15"),
+            ("💢", "#F43F5E"),
+        )
+        for idx, (glyph, color) in enumerate(burst_specs):
+            ang = -math.pi * 0.95 + (math.pi * 0.90 * idx) / max(1, len(burst_specs) - 1)
+            spd = 58.0 + (idx % 2) * 24.0
+            sx = cx - 8.0 + math.cos(ang) * (head_rx * 1.05)
+            sy = top_y + math.sin(ang) * 16.0
+            self._spawn_particle(
+                glyph,
+                color,
+                sx,
+                sy,
+                math.cos(ang) * spd,
+                math.sin(ang) * spd - 30.0,
+                0.95,
+            )
+
+    def _spawn_dizzy_particles(self, count: int) -> None:
+        """生成头顶飘散的晕眩星光粒子，与 3D 绕头星光光环风格统一。"""
+        if not self._settings.particles_enabled or count <= 0:
+            return
+        sprite_rect = self._get_local_sprite_rect()
+        cx, cy, head_rx = self._head_crown_anchor(sprite_rect)
+        palette = (
+            ("★", "#FDE047"),
+            ("✦", "#C4B5FD"),
+            ("✧", "#38BDF8"),
+            ("✦", "#F9A8D4"),
+        )
+        for i in range(count):
+            glyph, color = palette[i % len(palette)]
+            ang = (2.0 * math.pi * i) / max(1, count) + random.random() * 0.4
+            spd = 26.0 + random.random() * 28.0
+            self._spawn_particle(
+                glyph,
+                color,
+                cx - 6.0 + math.cos(ang) * (head_rx * 0.85),
+                cy - 18.0 + math.sin(ang) * 8.0,
+                math.cos(ang) * spd,
+                -24.0 - random.random() * 18.0,
+                1.05,
+            )
+
+    def _fire_pending_body_double_click_quota(self) -> None:
+        if (
+            self._mouse_down
+            or self._is_dragging
+            or self._is_sulk
+            or self._poke_stage > 0
+            or self._is_action_playback_locked()
+        ):
+            return
+        self._poke_count = 0
+        self.open_quota_requested.emit()
+
+    def _begin_left_press_tracking(self, event: QMouseEvent, *, is_double_click: bool = False) -> None:
+        now_mono = time.monotonic()
+        self._quota_double_click_timer.stop()
+        last_shake_mono = max(
+            self._shake_last_reversal_mono, self._shake_last_active_mono
+        )
+        continuing_shake = (
+            self._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT)
+            and datetime.now(timezone.utc) < self._override_until_utc
+            and last_shake_mono > 0.0
+            and (now_mono - last_shake_mono) <= _SHAKE_RELEASE_GRACE_S
+        )
+
+        self._mouse_down = True
+        self._press_is_double_click = is_double_click
+        self._press_started_while_locked = self._is_action_playback_locked()
+        self._is_dragging = False
+        if not self._press_started_while_locked:
+            self._is_falling = False
+        self._is_sleeping = False
+        self._pat_travel = 0.0
+        if not continuing_shake:
+            self._reset_drag_shake_tracking()
+        else:
+            # 刚处于摇晃生气/炸毛状态又立即点按续晃时保留阶段，避免起步闪回反重力动作
+            self._is_shaking = True
+            self._prev_vx = 0.0
+            self._drag_tilt_vx = 0.0
+            self._shake_axis_x = [0, 0.0, 0.0, 0.0]
+            self._shake_axis_y = [0, 0.0, 0.0, 0.0]
+            self._reset_spin_segment_state()
+
+        gpos = event.globalPosition()
+        self._drag_start_global = QPointF(gpos.x(), gpos.y())
+        self._last_move_global = QPointF(gpos.x(), gpos.y())
+        self._last_move_mono = now_mono
+        self._last_move_utc = datetime.now(timezone.utc)
+        self._win_start_left = float(self.x())
+        self._win_start_top = float(self.y())
+        self._stage_canvas.grabMouse()
 
     def _on_stage_mouse_press(self, event: QMouseEvent) -> None:
         self._mark_pet_user_activity()
         if event.button() == Qt.MouseButton.RightButton:
+            self._quota_double_click_timer.stop()
             self._context_menu.popup(event.globalPosition().toPoint())
             event.accept()
             return
@@ -2689,36 +3598,59 @@ class PetWindow(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
-        self._mouse_down = True
-        self._is_dragging = False
-        self._is_falling = False
-        self._is_sleeping = False
-        self._shake_energy = 0.0
-        self._prev_vx = 0.0
-
-        gpos = event.globalPosition()
-        self._drag_start_global = QPointF(gpos.x(), gpos.y())
-        self._last_move_global = QPointF(gpos.x(), gpos.y())
-        self._last_move_utc = datetime.now(timezone.utc)
-        self._win_start_left = float(self.x())
-        self._win_start_top = float(self.y())
-        self._stage_canvas.grabMouse()
+        self._begin_left_press_tracking(event, is_double_click=False)
         event.accept()
 
     def _on_stage_mouse_double_click(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self._mark_pet_user_activity()
-        self._mouse_down = False
-        self._is_dragging = False
-        self._is_walking = False
-        if self._stage_canvas.mouseGrabber() is self._stage_canvas:
-            self._stage_canvas.releaseMouse()
-        self.open_quota_requested.emit()
-        if self._use_std_walk_rig or self._use_chibi_walk_rig:
-            self._refresh_sprite_visual()
-            self._update_sprite_transforms()
-            self._stage_canvas.update()
+        self._quota_double_click_timer.stop()
+
+        # 锁定动作播放期间禁止被双击查额度或再次点按打断
+        if self._is_action_playback_locked():
+            if not self._mouse_down:
+                self._begin_left_press_tracking(event, is_double_click=True)
+            else:
+                self._press_is_double_click = True
+                self._press_started_while_locked = True
+            event.accept()
+            return
+
+        local_pos = event.position()
+        sprite_rect = self._get_local_sprite_rect()
+        rel_y = (
+            (local_pos.y() - sprite_rect.y()) / sprite_rect.height()
+            if sprite_rect.height() > 0
+            else 0.5
+        )
+        head_ratio = self._head_click_ratio()
+
+        # 贴边或常态下双击头部直接呼出额度；双击身体或闹脾气期间转入点击释放统一判定，防连戳误开额度
+        direct_quota = (
+            self._settings.docked_side != DockSide.NONE
+            or (rel_y <= head_ratio and not self._is_sulk)
+        )
+        if direct_quota:
+            self._mouse_down = False
+            self._press_is_double_click = False
+            self._is_dragging = False
+            self._is_shaking = False
+            self._is_walking = False
+            if self._stage_canvas.mouseGrabber() is self._stage_canvas:
+                self._stage_canvas.releaseMouse()
+            self.open_quota_requested.emit()
+            if self._use_std_walk_rig or self._use_chibi_walk_rig:
+                self._refresh_sprite_visual()
+                self._update_sprite_transforms()
+                self._stage_canvas.update()
+            event.accept()
+            return
+
+        if not self._mouse_down:
+            self._begin_left_press_tracking(event, is_double_click=True)
+        else:
+            self._press_is_double_click = True
         event.accept()
 
     def _on_stage_mouse_move(self, event: QMouseEvent) -> None:
@@ -2731,11 +3663,20 @@ class PetWindow(QWidget):
             dy = cur_g.y() - self._drag_start_global.y()
 
             if not self._is_dragging and math.hypot(dx, dy) > 5.0:
+                now_mono = time.monotonic()
+                self._quota_double_click_timer.stop()
+                self._press_is_double_click = False
+                self._poke_recoil = 0.0
                 self._is_walking = False
                 self._is_dragging = True
-                self._override_pose = PetState.FLOAT
+                self._is_falling = False
                 self._override_is_autonomous = False
-                self._pending_sulk_after_dizzy = False
+                if not self._is_action_playback_locked():
+                    self._pending_sulk_after_pose = False
+                if self._is_drag_float_allowed(now_mono):
+                    self._override_pose = PetState.FLOAT
+                    self._override_locked = False
+                    self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                 if self._settings.docked_side != DockSide.NONE:
                     old_local_rect = self._get_local_sprite_rect()
                     self._settings.docked_side = DockSide.NONE
@@ -2751,28 +3692,43 @@ class PetWindow(QWidget):
                 self._stage_canvas.update()
 
             if self._is_dragging:
-                self.move(int(round(self._win_start_left + dx)), int(round(self._win_start_top + dy)))
+                step_x = cur_g.x() - self._last_move_global.x()
+                step_y = cur_g.y() - self._last_move_global.y()
+                if abs(step_x) < 1e-6 and abs(step_y) < 1e-6:
+                    return
 
-                now = datetime.now(timezone.utc)
-                dt = max(0.005, (now - self._last_move_utc).total_seconds())
-                vx = (cur_g.x() - self._last_move_global.x()) / dt
-                vy = (cur_g.y() - self._last_move_global.y()) / dt
-                speed = math.hypot(vx, vy)
-
-                if speed > 460.0 and (self._prev_vx * vx < -12000.0):
-                    self._shake_energy += 0.65
-                    self._react_to_shake()
-
-                self._prev_vx = vx
+                now_mono = time.monotonic()
+                prev_move_mono = self._last_move_mono
+                dt = (
+                    max(0.004, now_mono - prev_move_mono)
+                    if prev_move_mono > 0.0
+                    else 0.016
+                )
                 self._last_move_global = QPointF(cur_g.x(), cur_g.y())
-                self._last_move_utc = now
+                self._last_move_mono = now_mono
+                self._last_move_utc = datetime.now(timezone.utc)
+
+                self.move(
+                    int(round(self._win_start_left + dx)),
+                    int(round(self._win_start_top + dy)),
+                )
+
+                vx = step_x / dt
+                self._prev_vx = vx
+                self._drag_tilt_vx = self._drag_tilt_vx * 0.65 + vx * 0.35
+                self._process_drag_shake_step(step_x, step_y, now_mono, prev_move_mono)
             return
 
-        # 悬停头部（上半部分 48% 区域）抚摸检测
+        # 悬停头部抚摸检测（按画风适配头部区域占比；锁定动作播放期间不积累或触发摸头）
         hit_h = sprite_rect.height()
         if self._settings.docked_side == DockSide.NONE and hit_h > 20.0:
+            now_mono = time.monotonic()
+            if now_mono < self._pat_hover_blocked_until_mono or self._is_action_playback_locked():
+                self._pat_travel = 0.0
+                self._last_pat_local = QPointF(local_pos.x(), local_pos.y())
+                return
             rel_y = (local_pos.y() - sprite_rect.y()) / hit_h
-            if 0.0 <= rel_y <= 0.48 and sprite_rect.left() <= local_pos.x() <= sprite_rect.right():
+            if 0.0 <= rel_y <= self._head_hover_ratio() and sprite_rect.left() <= local_pos.x() <= sprite_rect.right():
                 dist = math.hypot(
                     local_pos.x() - self._last_pat_local.x(),
                     local_pos.y() - self._last_pat_local.y(),
@@ -2781,23 +3737,155 @@ class PetWindow(QWidget):
                     self._pat_travel += dist
                 self._last_pat_local = QPointF(local_pos.x(), local_pos.y())
 
-                if self._pat_travel >= 60.0:
+                if (
+                    self._pat_travel >= 60.0
+                    and (now_mono - self._last_hover_pat_mono) >= _HOVER_PAT_COOLDOWN_S
+                ):
                     self._pat_travel = 0.0
+                    self._last_hover_pat_mono = now_mono
                     self.trigger_pat()
             else:
                 self._pat_travel = 0.0
+
+    def _enter_bristle_redhot(self, now_mono: float) -> None:
+        """进入炸毛爆发态：瞬间弹跳膨胀、火花怒气爆发，播完后衔接生气（5 秒）并锁定至播完回常态。"""
+        self._poke_stage = 3
+        self._poke_stage_until_mono = 0.0
+        self._sulk_poke_count = 0
+        self._is_sulk = True
+        self._sulk_pats_needed = 2
+        self._poke_recoil = 0.85
+        self._bristle_burst = 1.0
+        self._set_temporary_pose(
+            PetState.REDHOT,
+            _REDHOT_POSE_DURATION_S,
+            CharacterLore.pick_line("redhot"),
+            pending_sulk=True,
+            locked=True,
+        )
+        if (now_mono - self._bristle_last_sound_mono) >= 0.65:
+            self._bristle_last_sound_mono = now_mono
+            self._sound.play(PetSoundEffect.ANGRY)
+        self._spawn_bristle_particles(3)
+        self._bristle_last_particle_mono = now_mono
+
+    def _handle_body_poke(
+        self,
+        now_mono: float,
+        local_pos: QPointF,
+        sprite_rect: QRectF,
+        *,
+        is_double_click: bool,
+    ) -> None:
+        """处理点击身体交互：单点闲聊，连戳按阶段播完递进 烦恼 -> 鼓嘴 -> 炸毛 -> 闹脾气。"""
+        if self._waiting_chat_workers or self._is_action_playback_locked():
+            return
+
+        self._poke_recoil_dir = -1.0 if local_pos.x() >= sprite_rect.center().x() else 1.0
+
+        # 闹脾气期间继续戳身体：轻戳提示摸头安抚，连续快戳 3 下再次气炸毛
+        if self._is_sulk:
+            if self._poke_last_mono > 0.0 and (now_mono - self._poke_last_mono) <= _POKE_COMBO_WINDOW_S:
+                self._sulk_poke_count += 1
+            else:
+                self._sulk_poke_count = 1
+            self._poke_last_mono = now_mono
+            if self._sulk_poke_count >= _POKE_SULK_REFLARE_COUNT:
+                self._enter_bristle_redhot(now_mono)
+            else:
+                self._poke_recoil = 0.55
+                self._set_temporary_pose(PetState.SULK, 10.0, "……哼！（摸摸头才原谅你喵）")
+            return
+
+        # 烦恼或鼓嘴完整播完后的短暂怒气记忆期内再次戳身体，顺阶进入下一阶段动作
+        if self._poke_stage > 0 and now_mono <= self._poke_stage_until_mono:
+            self._poke_last_mono = now_mono
+            if self._poke_stage == 1:
+                self._poke_stage = 2
+                self._poke_stage_until_mono = 0.0
+                self._poke_count = _POKE_PUFFED_COUNT
+                self._poke_recoil = 0.75
+                self._bristle_burst = max(self._bristle_burst, 0.55)
+                self._set_temporary_pose(
+                    PetState.PUFFED,
+                    _PUFFED_POSE_DURATION_S,
+                    CharacterLore.pick_line("puffed"),
+                    locked=True,
+                )
+                self._spawn_bristle_particles(2)
+                self._bristle_last_particle_mono = now_mono
+                return
+            if self._poke_stage == 2:
+                self._poke_count = _POKE_REDHOT_COUNT
+                self._enter_bristle_redhot(now_mono)
+                return
+
+        if self._poke_stage > 0 and now_mono > self._poke_stage_until_mono:
+            self._poke_stage = 0
+            self._poke_count = 0
+            self._poke_stage_until_mono = 0.0
+
+        if (
+            self._poke_last_mono <= 0.0
+            or (now_mono - self._poke_last_mono) > _POKE_COMBO_WINDOW_S
+        ):
+            self._poke_count = 0
+
+        self._poke_count += 1
+        self._poke_last_mono = now_mono
+
+        # 同位快速第 2 击先延时判定是否为“双击查额度”；若第 3 击紧随而至则取消额度并进入烦恼态
+        if is_double_click and self._poke_stage == 0 and self._poke_count == 2:
+            self._poke_recoil = 0.35
+            self._quota_double_click_timer.start()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
+            return
+
+        if self._poke_count >= _POKE_ANNOYED_COUNT:
+            self._poke_stage = 1
+            self._poke_stage_until_mono = 0.0
+            self._poke_recoil = 0.60
+            self._set_temporary_pose(
+                PetState.ANNOYED,
+                _ANNOYED_POSE_DURATION_S,
+                CharacterLore.pick_line("annoyed"),
+                locked=True,
+            )
+            self._spawn_bristle_particles(1)
+            self._bristle_last_particle_mono = now_mono
+        else:
+            self._poke_recoil = 0.40
+            line = CharacterLore.pick_line("chatter")
+            pose = CharacterLore.match_pose_for_line("chatter", line)
+            self._set_temporary_pose(pose, 4.5, line)
+            self._sound.play(PetSoundEffect.CHIME)
 
     def _on_stage_mouse_release(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton or not self._mouse_down:
             return
         self._mark_pet_user_activity()
         self._mouse_down = False
+        is_double_click = self._press_is_double_click
+        self._press_is_double_click = False
+        press_started_while_locked = self._press_started_while_locked
+        self._press_started_while_locked = False
+        self._pat_travel = 0.0
+        self._last_pat_local = QPointF(event.position().x(), event.position().y())
         if self._stage_canvas.mouseGrabber() is self._stage_canvas:
             self._stage_canvas.releaseMouse()
 
+        now_mono = time.monotonic()
         if not self._is_dragging:
+            self._is_shaking = False
+            self._shake_stage = 0
+            self._shake_peak_energy = 0.0
+            self._drag_tilt_vx = 0.0
             was_walking = self._is_walking
             self._is_walking = False
+            # 当前交互动作尚未播完（或按下时仍处于锁定状态）时，点击不中断或偷跑触发动作
+            if press_started_while_locked or self._is_action_playback_locked():
+                return
             local_pos = event.position()
             sprite_rect = self._get_local_sprite_rect()
             rel_y = (
@@ -2805,7 +3893,7 @@ class PetWindow(QWidget):
                 if sprite_rect.height() > 0
                 else 0.5
             )
-            if rel_y <= 0.45 and self._settings.docked_side == DockSide.NONE:
+            if rel_y <= self._head_click_ratio() and self._settings.docked_side == DockSide.NONE:
                 self.trigger_pat()
             elif self._settings.docked_side != DockSide.NONE:
                 peek = (
@@ -2815,13 +3903,13 @@ class PetWindow(QWidget):
                 )
                 self._set_temporary_pose(peek, 3.5, CharacterLore.pick_line("edge"))
                 self._sound.play(PetSoundEffect.CHIME)
-            elif self._is_sulk:
-                self.show_bubble("……哼！（摸摸头才原谅你喵）", 3.5)
             else:
-                line = CharacterLore.pick_line("chatter")
-                pose = CharacterLore.match_pose_for_line("chatter", line)
-                self._set_temporary_pose(pose, 4.5, line)
-                self._sound.play(PetSoundEffect.CHIME)
+                self._handle_body_poke(
+                    now_mono,
+                    local_pos,
+                    sprite_rect,
+                    is_double_click=is_double_click,
+                )
             if was_walking and (self._use_std_walk_rig or self._use_chibi_walk_rig):
                 self._refresh_sprite_visual()
                 self._update_sprite_transforms()
@@ -2829,50 +3917,89 @@ class PetWindow(QWidget):
             return
 
         self._is_dragging = False
+        last_shake_mono = max(
+            self._shake_last_reversal_mono, self._shake_last_active_mono
+        )
+        recent_shake = (
+            last_shake_mono > 0.0
+            and (now_mono - last_shake_mono) <= _SHAKE_RELEASE_GRACE_S
+        )
+        stopped_recovered = (
+            self._is_shaking
+            and self._override_pose == PetState.REDHOT
+            and self._shake_last_active_mono > 0.0
+            and (now_mono - self._shake_last_active_mono) >= _SHAKE_STOP_RECOVER_S
+        )
+        # 完整摇晃流程：摇晃进入炸毛（REDHOT）后松手 -> 下落眩晕（DIZZY）-> 生气（SULK）；
+        # 若停晃已满 2 秒则视为已恢复正常流程，松手按正常反重力 -> 下落 Q 弹处理。
+        bristled_on_release = (
+            not stopped_recovered
+            and self._shake_stage >= 3
+            and (
+                self._override_pose == PetState.REDHOT
+                or recent_shake
+                or self._current_shake_energy() >= _SHAKE_PUFFED_THRESHOLD
+            )
+        )
 
-        # 剧烈摇晃触发头晕 -> 闹脾气序列（由主循环在头晕到期时直接衔接，避免闪回待机）
-        if self._shake_energy >= 2.2:
-            self._is_sulk = True
-            self._sulk_pats_needed = 2
-            self._set_temporary_pose(PetState.DIZZY, 2.6, CharacterLore.pick_line("dizzy"))
-            self._pending_sulk_after_dizzy = True
+        if bristled_on_release:
+            self._trigger_dizzy_state(now_mono, particle_count=5)
+            self._clamp_and_apply_gravity_after_release(refresh_resting=False)
+        elif not stopped_recovered and self._is_action_playback_locked():
+            # 未到炸毛的烦恼/鼓嘴或其他未播完锁定动作：松手保持播完不中断并正常落地
+            self._clamp_and_apply_gravity_after_release(refresh_resting=False)
+        elif self._is_sulk:
+            # 闹脾气期间轻拖松手：贴边时恢复贴边态，否则保持可见且锁定的生气动作，避免隐形卡死
+            self._try_edge_dock_or_gravity_drop()
+            if self._settings.docked_side != DockSide.NONE:
+                self._is_sulk = False
+                self._sulk_poke_count = 0
+                self._override_pose = None
+                self._override_is_autonomous = False
+                self._override_locked = False
+                self._pending_sulk_after_pose = False
+                self._refresh_sprite_visual()
+                self._restart_ai_timer()
+            else:
+                self._set_temporary_pose(
+                    PetState.SULK,
+                    _SULK_POSE_DURATION_S,
+                    locked=True,
+                )
         else:
             self._override_pose = None
             self._override_is_autonomous = False
-            self._pending_sulk_after_dizzy = False
+            self._override_locked = False
+            self._pending_sulk_after_pose = False
             self._current_state = self._resolve_resting_state()
             self._try_edge_dock_or_gravity_drop()
             self._restart_ai_timer()
 
+        self._is_shaking = False
+        self._shake_stage = 0
+        self._shake_peak_energy = 0.0
+        self._drag_tilt_vx = 0.0
         self._settings.last_left = float(self.x())
         self._settings.last_top = float(self.y())
         self._settings_service.save(self._settings)
         self.visual_bounds_changed.emit()
 
-    def _enter_sulk_after_dizzy(self) -> None:
+    def _enter_sulk_state(self, *, show_bubble: bool = True) -> None:
         if self.isVisible() and self._is_sulk and not self._is_dragging:
-            self._set_temporary_pose(PetState.SULK, 14.0, CharacterLore.pick_line("sulk"))
-
-    def _react_to_shake(self) -> None:
-        if self._shake_energy >= 3.4:
-            self._set_temporary_pose(PetState.REDHOT, 2.2, CharacterLore.pick_line("redhot"))
-            self._sound.play(PetSoundEffect.ANGRY)
-            self._spawn_particle(
-                "💢",
-                "#F87171",
-                self.width() * 0.65,
-                self.height() - self._sprite_height_px() * 0.85,
-                18.0,
-                -32.0,
-                0.8,
-            )
-        elif self._shake_energy >= 2.1:
-            self._set_temporary_pose(PetState.PUFFED, 2.0, CharacterLore.pick_line("puffed"))
-        elif self._shake_energy >= 1.0:
-            self._set_temporary_pose(PetState.ANNOYED, 1.8, CharacterLore.pick_line("annoyed"))
+            self._sulk_poke_count = 0
+            msg = CharacterLore.pick_line("sulk") if show_bubble else None
+            self._set_temporary_pose(PetState.SULK, _SULK_POSE_DURATION_S, msg, locked=True)
 
     def trigger_pat(self) -> None:
+        # 烦恼/鼓嘴/炸毛/眩晕/生气(5秒)/安抚/原谅播放期间禁止被摸头中途打断
+        if self._is_action_playback_locked():
+            return
         self._mark_pet_user_activity()
+        self._quota_double_click_timer.stop()
+        self._poke_count = 0
+        self._poke_stage = 0
+        self._poke_stage_until_mono = 0.0
+        self._sulk_poke_count = 0
         self._settings.total_pats += 1
         self._settings.favorability = min(9999, self._settings.favorability + 1)
         self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
@@ -2883,10 +4010,21 @@ class PetWindow(QWidget):
         elif self._is_sulk:
             self._sulk_pats_needed -= 1
             if self._sulk_pats_needed > 0:
-                self._set_temporary_pose(PetState.COAXED, 4.0, CharacterLore.pick_line("coaxed"))
+                self._set_temporary_pose(
+                    PetState.COAXED,
+                    _COAXED_POSE_DURATION_S,
+                    CharacterLore.pick_line("coaxed"),
+                    pending_sulk=True,
+                    locked=True,
+                )
             else:
                 self._is_sulk = False
-                self._set_temporary_pose(PetState.FORGIVEN, 3.5, CharacterLore.pick_line("forgiven"))
+                self._set_temporary_pose(
+                    PetState.FORGIVEN,
+                    _FORGIVEN_POSE_DURATION_S,
+                    CharacterLore.pick_line("forgiven"),
+                    locked=True,
+                )
         else:
             self._set_temporary_pose(PetState.PAT, 2.8, CharacterLore.pick_line("pat"))
 
@@ -2897,12 +4035,13 @@ class PetWindow(QWidget):
             self._settings_service.save(self._settings)
 
         if self._settings.particles_enabled:
-            sh = self._sprite_height_px()
+            sprite_rect = self._get_local_sprite_rect()
+            cx, cy, head_rx = self._head_crown_anchor(sprite_rect)
             self._spawn_particle(
                 "♥",
                 "#F472B6",
-                self.width() * 0.5 + (random.random() - 0.5) * 80.0,
-                self.height() - sh * 0.88,
+                cx + (random.random() - 0.5) * head_rx * 1.4,
+                cy + 6.0,
                 (random.random() - 0.5) * 30.0,
                 -45.0,
                 1.1,
@@ -2910,12 +4049,39 @@ class PetWindow(QWidget):
             self._spawn_particle(
                 "✦",
                 "#C4B5FD",
-                self.width() * 0.5 + (random.random() - 0.5) * 90.0,
-                self.height() - sh * 0.82,
+                cx + (random.random() - 0.5) * head_rx * 1.6,
+                cy + 14.0,
                 (random.random() - 0.5) * 36.0,
                 -52.0,
                 1.0,
             )
+
+    def _clamp_and_apply_gravity_after_release(self, *, refresh_resting: bool = False) -> None:
+        """拖拽松手后保证角色留在工作区内，并按设置触发正常重力下落。"""
+        area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
+        sprite_rect = self._get_local_sprite_rect()
+        sprite_w = sprite_rect.width() if sprite_rect.width() > 10 else 180.0 * self._effective_scale()
+        # 拖出侧边后先保证角色可见区域完全落在屏幕工作区内，避免松手后半身留在屏外。
+        min_x = area.left() - (self.width() - sprite_w) * 0.5
+        max_x = (area.right() + 1) - (self.width() + sprite_w) * 0.5
+        clamped_x = int(round(max(min_x, min(max_x, float(self.x())))))
+        if clamped_x != self.x():
+            self.move(clamped_x, self.y())
+
+        if (
+            not self._settings.anti_gravity_mode
+            and self._settings.gravity_enabled
+            and self.y() + self.height() < area.bottom() + 1 - 2
+        ):
+            self._fall_velocity_y = 0.0
+            self._is_falling = True
+        else:
+            self._clamp_inside_nearest_work_area()
+
+        if refresh_resting:
+            self._current_state = self._resolve_resting_state()
+        self._refresh_sprite_visual()
+        self._stage_canvas.update()
 
     def _try_edge_dock_or_gravity_drop(self) -> None:
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
@@ -2953,28 +4119,7 @@ class PetWindow(QWidget):
             self._sound.play(PetSoundEffect.CHIME)
             return
 
-        # 拖出侧边后先保证角色可见区域完全落在屏幕工作区内，避免松手后半身留在屏外。
-        min_x = area.left() - (self.width() - sprite_w) * 0.5
-        max_x = (area.right() + 1) - (self.width() + sprite_w) * 0.5
-        clamped_x = int(round(max(min_x, min(max_x, float(self.x())))))
-        if clamped_x != self.x():
-            self.move(clamped_x, self.y())
-
-        if (
-            not self._settings.anti_gravity_mode
-            and self._settings.gravity_enabled
-            and self.y() + self.height() < area.bottom() + 1 - 2
-        ):
-            self._fall_velocity_y = 0.0
-            self._is_falling = True
-            self._current_state = self._resolve_resting_state()
-            self._refresh_sprite_visual()
-            self._stage_canvas.update()
-        else:
-            self._clamp_inside_nearest_work_area()
-            self._current_state = self._resolve_resting_state()
-            self._refresh_sprite_visual()
-            self._stage_canvas.update()
+        self._clamp_and_apply_gravity_after_release(refresh_resting=True)
 
     # ==================== Speech Bubble & Inline Gemini Chat ====================
 
@@ -4511,7 +5656,7 @@ class PetWindow(QWidget):
         if self._settings.docked_side != DockSide.NONE:
             self._override_pose = None
             self._override_is_autonomous = False
-            self._pending_sulk_after_dizzy = False
+            self._pending_sulk_after_pose = False
             self._refresh_sprite_visual()
             return
         if not self._first_shown or not self.isVisible():
