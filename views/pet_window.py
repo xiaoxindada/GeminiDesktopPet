@@ -4845,7 +4845,10 @@ class PetWindow(QWidget):
             if self._is_chat_open:
                 self._ag_sync_session_id = f"sync:{uuid.uuid4().hex}"
                 self._ag_sync_events.clear()
-                if self._waiting_chat_workers:
+                if silent:
+                    # 后台静默重连到可同步对话时仅刷新会话列表并继续收消息，不自动跳转。
+                    self._refresh_chat_sessions()
+                elif self._waiting_chat_workers:
                     self._ag_pending_handoff = True
                 else:
                     self._show_sync_chat_session()
@@ -4997,6 +5000,7 @@ class PetWindow(QWidget):
                 self._ag_sync_events[-1] = event
             else:
                 self._ag_sync_events.append(event)
+            # 非实时会话视图下仅在后台持续记录同步消息，不自动跳转打断当前聊天。
             if self._ag_viewing_sync:
                 if replace_last and self._ag_sync_labels:
                     # 续写只更新当前文本，保留卡片、布局及用户的滚动位置。
@@ -5005,13 +5009,6 @@ class PetWindow(QWidget):
                         label.setText(message)
                 else:
                     self._append_sync_chat_event(event)
-            elif self._is_chat_open:
-                # 普通聊天仍可浏览；同步流一有新内容就交接到实时会话。
-                # 正在发送的普通消息先等回复落盘，避免切换时丢失上下文。
-                if self._waiting_chat_workers:
-                    self._ag_pending_handoff = True
-                else:
-                    self._show_sync_chat_session()
         if self._is_chat_open or not self.isVisible():
             return
         if event.role == "user":
