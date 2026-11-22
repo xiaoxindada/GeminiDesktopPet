@@ -190,6 +190,9 @@ class PetApplicationCoordinator(QObject):
         self._pet.open_character_editor_requested.connect(self.open_character_editor_window)
         self._pet.open_bubble_editor_requested.connect(self.open_bubble_editor_window)
         self._pet.open_settings_requested.connect(self.open_settings_window)
+        self._pet.open_chat_settings_requested.connect(
+            lambda: self.open_settings_window("chat")
+        )
         self._pet.open_quota_requested.connect(self.toggle_quota_window)
         self._pet.open_update_requested.connect(self.open_update_window)
         self._pet.settings_synced.connect(self._sync_all_views_from_settings)
@@ -412,7 +415,7 @@ class PetApplicationCoordinator(QObject):
         """设置窗口拖动滑杆时实时预览，不写盘；None 表示回到已保存值。"""
         self._pet.set_appearance_preview(scale, opacity)
 
-    def open_settings_window(self) -> None:
+    def open_settings_window(self, page: Optional[str] = None) -> None:
         try:
             if self._settings_win is None:
                 self._settings_win = SettingsWindow(
@@ -429,6 +432,8 @@ class PetApplicationCoordinator(QObject):
                     on_bubble_activity_changed=self._set_bubble_activity,
                 )
             self._settings_win.sync_from_settings()
+            if isinstance(page, str) and page:
+                self._settings_win.select_page_by_key(page)
             self._show_and_focus(self._settings_win)
         except Exception as exc:
             AppLogger.error(f"[App] open settings window failed: {exc}")

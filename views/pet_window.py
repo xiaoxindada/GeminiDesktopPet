@@ -62,6 +62,8 @@ from PySide6.QtWidgets import (
 )
 
 from models import (
+    API_PROVIDER_AGENT_PLATFORM,
+    API_PROVIDER_GEMINI_DEVELOPER,
     CharacterLore,
     CharacterProfile,
     DEFAULT_GEMINI_MODEL,
@@ -69,9 +71,11 @@ from models import (
     PetSettings,
     PetState,
     PetStyleMode,
+    format_api_provider_label,
     format_model_display_name,
     format_thinking_level_label,
     get_supported_thinking_levels,
+    normalize_api_provider,
     normalize_gemini_model,
     normalize_thinking_level,
     resolve_effective_thinking_level,
@@ -546,6 +550,7 @@ class PetWindow(QWidget):
     open_character_editor_requested = Signal()
     open_bubble_editor_requested = Signal()
     open_settings_requested = Signal()
+    open_chat_settings_requested = Signal()
     open_quota_requested = Signal()
     open_update_requested = Signal()
     settings_synced = Signal()
@@ -858,7 +863,7 @@ class PetWindow(QWidget):
             }
             """
         )
-        self._bubble_settings_btn.clicked.connect(self.open_settings_requested.emit)
+        self._bubble_settings_btn.clicked.connect(self.open_chat_settings_requested.emit)
         self._bubble_settings_btn.setVisible(False)
         header_row.addWidget(self._bubble_settings_btn)
 
@@ -4005,14 +4010,18 @@ class PetWindow(QWidget):
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
     def _resolve_active_chat_channel_and_models(self) -> tuple[str, list[str], str]:
-        """返回 API Key 连接状态、官方模型缓存及已选模型。"""
+        """返回当前 API 渠道连接状态、官方模型缓存及已选模型。"""
         current = normalize_gemini_model(self._settings.gemini_model)
-        cached = GeminiChatService.get_cached_api_key_models(self._settings.gemini_api_key)
+        cached = GeminiChatService.get_cached_models_for_settings(self._settings)
         models = list(dict.fromkeys([*cached, current]))
+        active_provider = normalize_api_provider(self._settings.api_provider)
+        provider = self._chat.resolve_chat_provider(self._settings)
         if self._chat.get_api_error(self._settings):
-            badge = "⚠️ API Key 不可用"
-        elif self._chat.resolve_chat_provider(self._settings):
-            badge = "在线 · API Key"
+            badge = f"⚠️ {format_api_provider_label(active_provider, short=True)} 不可用"
+        elif provider == API_PROVIDER_AGENT_PLATFORM:
+            badge = "在线 · Agent Platform"
+        elif provider == API_PROVIDER_GEMINI_DEVELOPER:
+            badge = "在线 · Gemini API"
         else:
             badge = "离线模式"
         return badge, models, current
@@ -4085,20 +4094,29 @@ class PetWindow(QWidget):
 
         badge_text, _models, current = self._resolve_active_chat_channel_and_models()
         error = self._chat.get_api_error(self._settings)
+        active_provider = normalize_api_provider(self._settings.api_provider)
+        active_label = format_api_provider_label(active_provider)
+        provider = self._chat.resolve_chat_provider(self._settings)
         self._chat_channel_badge.setText(badge_text)
         if error:
             color, rgb = "#FCA5A5", "248, 113, 113"
-            tooltip = f"{error}\n点击可打开 API Key 设置或重新获取模型"
-        elif self._chat.resolve_chat_provider(self._settings):
+            tooltip = f"{error}\n点击可切换 API Key 或打开设置"
+        elif provider == API_PROVIDER_AGENT_PLATFORM:
+            self._last_chat_api_notice = ""
+            color, rgb = "#C4B5FD", "167, 139, 250"
+            proj = (self._settings.agent_platform_project or "").strip()
+            mode_hint = f"项目 {proj}" if proj else "Express 模式"
+            tooltip = f"使用 Agent Platform API Key（{mode_hint}，点击可切换 Key 或打开设置）"
+        elif provider == API_PROVIDER_GEMINI_DEVELOPER:
             self._last_chat_api_notice = ""
             color, rgb = "#93C5FD", "96, 165, 250"
-            tooltip = "使用 Gemini 官方 API Key（点击可获取模型或打开设置）"
+            tooltip = "使用 Gemini API Key（点击可切换 Key 或打开设置）"
         else:
             color, rgb = "#FDE68A", "251, 191, 36"
             tooltip = (
-                "当前处于离线模式，点击可切换为官方 API Key 联网对话"
+                f"当前处于离线模式，点击可切换为在线模式（当前渠道：{active_label}）"
                 if self._settings.chat_offline_mode
-                else "未填写 Gemini API Key，当前使用离线陪伴；点击可打开设置"
+                else f"未填写 {active_label} Key，当前使用离线陪伴；点击可切换渠道或打开设置"
             )
         self._chat_channel_badge.setToolTip(tooltip)
         self._chat_channel_badge.setStyleSheet(
@@ -4117,69 +4135,101 @@ class PetWindow(QWidget):
         )
         self._update_chat_size_btn_label()
 
-    def _effective_chat_offline(self) -> bool:
-        """未填写 API Key 时实际按离线运行，用于同步状态徽章与菜单勾选。"""
-        return self._settings.chat_offline_mode or not (self._settings.gemini_api_key or "").strip()
+    def _effective_chat_mode(self) -> str:
+        """当前所选渠道未填写 Key 或处于手动离线时返回 'offline'，否则返回生效渠道标识。"""
+        if self._settings.chat_offline_mode or not GeminiChatService.has_active_api_key(
+            self._settings
+        ):
+            return "offline"
+        return normalize_api_provider(self._settings.api_provider)
 
     def _populate_connection_menu(self, menu: QMenu) -> None:
         self._populate_chat_mode_actions(menu)
         menu.addSeparator()
         settings = menu.addAction("⚙️ API Key 与模型设置...")
-        settings.triggered.connect(self.open_settings_requested)
+        settings.triggered.connect(self.open_chat_settings_requested)
 
     def _populate_chat_mode_actions(self, menu: QMenu) -> None:
         modes = QActionGroup(menu)
         modes.setExclusive(True)
-        effective_offline = self._effective_chat_offline()
-        for offline, label in ((True, "🌙 离线陪伴"), (False, "🌐 在线 · 官方 API Key")):
+        effective_mode = self._effective_chat_mode()
+        dev_ready = bool((self._settings.gemini_api_key or "").strip())
+        agent_ready = bool((self._settings.agent_platform_api_key or "").strip())
+        options = (
+            ("offline", "🌙 离线陪伴"),
+            (
+                API_PROVIDER_GEMINI_DEVELOPER,
+                "🌐 在线 · Gemini API" + ("" if dev_ready else "（未配置）"),
+            ),
+            (
+                API_PROVIDER_AGENT_PLATFORM,
+                "☁️ 在线 · Agent Platform API" + ("" if agent_ready else "（未配置）"),
+            ),
+        )
+        for mode, label in options:
             action = menu.addAction(label)
             action.setCheckable(True)
-            action.setChecked(effective_offline == offline)
-            action.setData(("chat_mode", "offline" if offline else "api_key"))
+            action.setChecked(effective_mode == mode)
+            action.setData(("chat_mode", mode))
             modes.addAction(action)
             action.triggered.connect(
-                lambda _checked=False, value=offline, act=action: self._select_chat_mode_from_menu(act, value)
+                lambda _checked=False, value=mode, act=action: self._select_chat_mode_from_menu(
+                    act, value
+                )
             )
 
-    def _select_chat_mode_from_menu(self, action: QAction, offline: bool) -> None:
+    def _select_chat_mode_from_menu(self, action: QAction, mode: str) -> None:
         """点击菜单后按实际生效模式回写勾选，避免无 Key 时在线挡被误选。"""
-        self.select_chat_offline_mode(offline)
+        self.select_chat_mode(mode)
         group = action.actionGroup()
         if group is None:
             return
-        effective_offline = self._effective_chat_offline()
+        effective_mode = self._effective_chat_mode()
         for item in group.actions():
-            item.setChecked(
-                item.data() == ("chat_mode", "offline" if effective_offline else "api_key")
-            )
+            item.setChecked(item.data() == ("chat_mode", effective_mode))
 
-    def select_chat_offline_mode(self, offline: bool) -> None:
+    def select_chat_mode(self, mode: str) -> None:
         if self._ag_viewing_sync:
             self._return_to_regular_chat()
-        previous = self._settings.chat_offline_mode
-        if previous == offline:
-            # 无 Key 时在线挡实际仍走离线，重复点击时提示补全配置。
-            if not offline and not (self._settings.gemini_api_key or "").strip():
+        want_offline = mode == "offline"
+        prev_offline = self._settings.chat_offline_mode
+        prev_provider = normalize_api_provider(self._settings.api_provider)
+        want_provider = prev_provider if want_offline else normalize_api_provider(mode)
+
+        if not want_offline:
+            has_target_key = (
+                bool((self._settings.agent_platform_api_key or "").strip())
+                if want_provider == API_PROVIDER_AGENT_PLATFORM
+                else bool((self._settings.gemini_api_key or "").strip())
+            )
+            if not has_target_key:
                 self._show_chat_status_notice(
-                    "✦ 在线模式需要 Gemini API Key，请先在设置中填写", force=True
+                    f"✦ 请先在「设置 → 对话与模型」填写 {format_api_provider_label(want_provider)} Key",
+                    force=True,
                 )
+                return
+
+        if prev_offline == want_offline and (want_offline or prev_provider == want_provider):
             return
-        self._settings.chat_offline_mode = offline
+
+        self._settings.chat_offline_mode = want_offline
+        self._settings.api_provider = want_provider
         try:
             self._settings_service.save(self._settings)
         except Exception as exc:
-            self._settings.chat_offline_mode = previous
+            self._settings.chat_offline_mode = prev_offline
+            self._settings.api_provider = prev_provider
             self._show_chat_status_notice(f"⚠️ 保存聊天模式失败：{exc}", is_error=True, force=True)
             return
         self._chat.reset_conversation()
         self._sync_chat_controls()
         self.settings_synced.emit()
-        if offline:
+        if want_offline:
             notice = "✦ 已切换为离线陪伴，可以继续聊天和使用本地互动指令"
-        elif self._settings.gemini_api_key.strip():
-            notice = "✦ 已切换为官方 API Key 在线模式"
+        elif want_provider == API_PROVIDER_AGENT_PLATFORM:
+            notice = "✦ 已切换为 Agent Platform API 在线模式"
         else:
-            notice = "请先在设置中填写 Gemini API Key，当前继续使用离线陪伴"
+            notice = "✦ 已切换为 Gemini API 在线模式"
         self._show_chat_status_notice(notice, force=True)
 
     def _open_chat_connection_menu(self) -> None:
@@ -4290,9 +4340,10 @@ class PetWindow(QWidget):
             return
         if self._chat_models_discovery_worker is not None and self._chat_models_discovery_worker.isRunning():
             return
-        if not self._settings.gemini_api_key.strip():
+        if not GeminiChatService.has_active_api_key(self._settings):
             if explicit:
-                self._show_chat_status_notice("请先在设置中填写 Gemini API Key", force=True)
+                label = format_api_provider_label(self._settings.api_provider)
+                self._show_chat_status_notice(f"请先在设置中填写 {label} Key", force=True)
             return
         worker = _ChatModelsDiscoveryWorker(self._chat, self._settings, explicit=explicit, parent=self)
         worker.completed.connect(self._on_chat_models_discovered)
@@ -4309,7 +4360,9 @@ class PetWindow(QWidget):
             if worker.isFinished():
                 worker.deleteLater()
             self._chat_models_discovery_worker = None
-            if worker._settings.gemini_api_key != self._settings.gemini_api_key:
+            if GeminiChatService.connection_signature_for_settings(
+                worker._settings
+            ) != GeminiChatService.connection_signature_for_settings(self._settings):
                 return
         self._sync_chat_controls()
         menu = self._chat_model_menu
@@ -5142,9 +5195,11 @@ class PetWindow(QWidget):
                 self._show_sync_chat_session()
         self._toggle_chat_history(True)
         # 未填写 Key 不会产生请求错误，进入聊天时也需要明确显示配置提示。
+        active_label = format_api_provider_label(self._settings.api_provider)
         invalid_reason = "" if self._ag_viewing_sync else (
-            "尚未填写 Gemini API Key"
-            if not (self._settings.gemini_api_key or "").strip()
+            f"尚未填写 {active_label} Key"
+            if not self._settings.chat_offline_mode
+            and not GeminiChatService.has_active_api_key(self._settings)
             else self._chat.get_api_error(self._settings)
         )
         if self._chat_message_rows:

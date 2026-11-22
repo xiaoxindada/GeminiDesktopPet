@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
+from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import (
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -57,20 +60,33 @@ from PySide6.QtWidgets import (
 from models.app_version import AppVersion
 from models.character_lore import BUBBLE_ACTIVITY_OPTIONS, CharacterLore
 from models.pet_settings import (
+    AGENT_PLATFORM_API_VERSION_OPTIONS,
+    AGENT_PLATFORM_LOCATION_PRESETS,
+    API_PROVIDER_AGENT_PLATFORM,
+    API_PROVIDER_GEMINI_DEVELOPER,
+    DEFAULT_AGENT_PLATFORM_API_VERSION,
+    DEFAULT_AGENT_PLATFORM_LOCATION,
     DEFAULT_GEMINI_MODEL,
     THINKING_LEVEL_OPTIONS,
     PetSettings,
     PetStyleMode,
+    format_api_provider_label,
     format_model_display_name,
     format_thinking_level_label,
+    normalize_agent_platform_api_version,
+    normalize_agent_platform_location,
+    normalize_api_provider,
     normalize_gemini_model,
     normalize_thinking_level,
+    parse_agent_platform_json_config,
+    validate_agent_platform_location,
+    validate_agent_platform_project,
 )
 from services.app_follow_service import AppFollowService
 from services.app_logger import AppLogger
 from services.character_profile_service import CharacterProfileService
 from services.followed_app_probe import FollowedAppProbe
-from services.gemini_chat_service import GeminiChatService
+from services.gemini_chat_service import ApiConnectionConfig, GeminiChatService
 from services.settings_service import SettingsService
 from services.tray_icon_service import TrayIconService
 from services.update_service import UpdateService
@@ -78,19 +94,28 @@ from themes.settings_theme import SETTINGS_WINDOW_QSS
 
 
 class _ModelsRefreshWorker(QThread):
-    """后台使用当前 API Key 获取官方可用模型。"""
+    """后台使用当前官方 API 配置获取可用模型。"""
 
     completed = Signal(object, str)
 
-    def __init__(self, api_key: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        config: ApiConnectionConfig,
+        extra_models: tuple[str, ...] = (),
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
-        self._api_key = api_key
+        self._config = config
+        self._extra_models = extra_models
 
     def run(self) -> None:
         try:
-            models = GeminiChatService.fetch_api_key_models(self._api_key)
+            models = GeminiChatService.fetch_models_for_config(
+                self._config, extra_models=self._extra_models
+            )
             self.completed.emit(models, "")
         except Exception as exc:
+            AppLogger.error("Chat", f"获取官方模型失败 (Provider={self._config.provider})", exc)
             self.completed.emit([], str(exc))
 
 
@@ -348,11 +373,17 @@ class _Card:
         parent_layout.addWidget(self.frame)
 
     def add_row(self, control: QWidget, title: str, desc: str = "") -> QWidget:
+        container = QWidget()
+        container.setObjectName("CardHost")
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
         if self._rows:
             divider = QFrame()
             divider.setObjectName("RowDivider")
             divider.setFixedHeight(1)
-            self.layout.addWidget(divider)
+            vbox.addWidget(divider)
 
         row = QWidget()
         row.setObjectName("CardHost")
@@ -373,9 +404,10 @@ class _Card:
         hbox.addLayout(text_col, 1)
         hbox.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self.layout.addWidget(row)
+        vbox.addWidget(row)
+        self.layout.addWidget(container)
         self._rows += 1
-        return row
+        return container
 
     def add_widget(self, widget: QWidget, top: int = 8) -> None:
         self.layout.addSpacing(top)
@@ -780,8 +812,12 @@ class SettingsWindow(QWidget):
              lambda: self._on_off(self._settings.gravity_enabled)),
             (self._PAGE_BEHAVIOR, "四芒星与爱心粒子", "互动粒子特效", "行为互动",
              lambda: self._on_off(self._settings.particles_enabled)),
-            (self._PAGE_CHAT, "Gemini API Key", "官方在线对话凭据", "对话与模型",
+            (self._PAGE_CHAT, "API 渠道", "切换 Gemini API 或 Agent Platform API", "对话与模型",
+             lambda: format_api_provider_label(self._settings.api_provider, short=True)),
+            (self._PAGE_CHAT, "Gemini API Key", "AI Studio 官方在线对话凭据", "对话与模型",
              lambda: "已配置" if (self._settings.gemini_api_key or "").strip() else "未配置"),
+            (self._PAGE_CHAT, "Agent Platform API Key", "Google Cloud（原 Vertex AI）API Key / Project / Location", "对话与模型",
+             self._agent_key_summary_label),
             (self._PAGE_CHAT, "对话模型", "当前使用的 Gemini 模型", "对话与模型",
              lambda: format_model_display_name(self._settings.gemini_model)),
             (self._PAGE_CHAT, "思考强度", "模型推理深度", "对话与模型",
@@ -856,6 +892,14 @@ class SettingsWindow(QWidget):
             except Exception:
                 value = "--"
             row.value_label.setText(value)
+
+    def select_page_by_key(self, page_key: str) -> None:
+        """按导航键直接定位到指定设置分类页（例如 'chat'）。"""
+        key = (page_key or "").strip().lower()
+        for index, (nav_key, _label) in enumerate(self._NAV_ITEMS):
+            if nav_key == key:
+                self._select_page(index)
+                return
 
     def _select_page(self, index: int) -> None:
         if 0 <= index < self._stack.count():
@@ -986,20 +1030,107 @@ class SettingsWindow(QWidget):
     # ---- 对话与模型 ----
 
     def _build_chat_page(self) -> QWidget:
-        scroll, layout = self._new_page("对话与模型", "Gemini 官方 API Key、对话模型与实时播报。")
+        scroll, layout = self._new_page("对话与模型", "切换官方 API 渠道、填写凭据与模型配置。")
 
         card = _Card(layout, "Gemini 官方 API")
-        hint = QLabel("不填写 Key 时仍可离线互动；Key 只保存在本地 user_config.json 中。")
+        hint = QLabel(
+            "支持 Gemini API Key 与 Agent Platform API Key，两种 Key 独立保存在本地 user_config.json；当前所选渠道未填 Key 时使用离线模式。"
+        )
         hint.setObjectName("RowDesc")
         hint.setWordWrap(True)
         card.add_widget(hint, top=2)
 
+        self._api_provider_combo = QComboBox()
+        self._api_provider_combo.setFixedWidth(320)
+        self._api_provider_combo.addItem(
+            "Gemini API（AI Studio Key）", API_PROVIDER_GEMINI_DEVELOPER
+        )
+        self._api_provider_combo.addItem(
+            "Agent Platform API（Google Cloud Key）", API_PROVIDER_AGENT_PLATFORM
+        )
+        self._api_provider_combo.currentIndexChanged.connect(self._on_api_provider_changed)
+        card.add_row(
+            self._api_provider_combo,
+            "API 渠道",
+            "明确切换使用的官方 API Key 类型，两种 Key 独立保存互不覆盖",
+        )
+
         self._api_key_edit = QLineEdit()
-        self._api_key_edit.setFixedWidth(320)
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._api_key_edit.setPlaceholderText("AIza...（API Key 模式使用）")
+        self._api_key_edit.setPlaceholderText("AIza...（Gemini API Key）")
         self._api_key_edit.textChanged.connect(self._on_api_changed)
-        card.add_row(self._api_key_edit, "Gemini API Key", "官方在线对话凭据")
+        self._api_key_row = card.add_row(
+            self._wrap_secret_input(self._api_key_edit),
+            "Gemini API Key",
+            "Google AI Studio 官方 API Key",
+        )
+
+        self._agent_api_key_edit = QLineEdit()
+        self._agent_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._agent_api_key_edit.setPlaceholderText("AQ.Ab... / AIza...（Agent Platform API Key）")
+        self._agent_api_key_edit.textChanged.connect(self._on_api_changed)
+        self._agent_api_key_row = card.add_row(
+            self._wrap_secret_input(self._agent_api_key_edit),
+            "Agent Platform API Key",
+            "Google Cloud Agent Platform（原 Vertex AI）官方 API Key",
+        )
+
+        project_host = QWidget()
+        project_host.setObjectName("ControlHost")
+        project_host.setFixedWidth(320)
+        project_row = QHBoxLayout(project_host)
+        project_row.setContentsMargins(0, 0, 0, 0)
+        project_row.setSpacing(6)
+        self._agent_project_edit = QLineEdit()
+        self._agent_project_edit.setPlaceholderText("截取 @ 与 .iam 间部分")
+        self._agent_project_edit.setToolTip(
+            "Express 模式请留空；项目/授权 Key 请填写服务账号邮箱（名称@<项目ID>.iam.gserviceaccount.com）中 @ 与 .iam.gserviceaccount.com 之间的部分，或点击右侧「从JSON导入」"
+        )
+        self._agent_project_edit.textChanged.connect(self._on_api_changed)
+        project_row.addWidget(self._agent_project_edit, 1)
+        self._agent_import_json_btn = QPushButton("从JSON导入")
+        self._agent_import_json_btn.setFixedWidth(96)
+        self._agent_import_json_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._agent_import_json_btn.setToolTip(
+            "从 Google Cloud 官方 client_secret_*.json 一键导入 Project ID（仅读取项目 ID，不使用 OAuth 凭据，API Key 仍需单独填写）"
+        )
+        self._agent_import_json_btn.clicked.connect(self._on_import_agent_json_clicked)
+        project_row.addWidget(self._agent_import_json_btn)
+        self._agent_project_row = card.add_row(
+            project_host,
+            "Project ID（可选）",
+            "Express 模式留空；项目/授权 Key 请填写服务账号邮箱（名称@<项目ID>.iam.gserviceaccount.com）中 @ 与 .iam.gserviceaccount.com 之间的部分，或从 JSON 导入",
+        )
+
+        self._agent_location_combo = QComboBox()
+        self._agent_location_combo.setEditable(True)
+        self._agent_location_combo.setFixedWidth(320)
+        self._agent_location_combo.addItems(AGENT_PLATFORM_LOCATION_PRESETS)
+        self._agent_location_combo.lineEdit().setPlaceholderText(DEFAULT_AGENT_PLATFORM_LOCATION)
+        self._agent_location_combo.currentTextChanged.connect(self._on_api_changed)
+        self._agent_location_row = card.add_row(
+            self._agent_location_combo,
+            "区域 Location（可选）",
+            "填写 Project ID 时生效（默认 global），也可手动输入其他官方区域",
+        )
+
+        self._agent_api_version_combo = QComboBox()
+        self._agent_api_version_combo.setFixedWidth(320)
+        for ver_id, ver_label in AGENT_PLATFORM_API_VERSION_OPTIONS:
+            self._agent_api_version_combo.addItem(ver_label, ver_id)
+        self._agent_api_version_combo.currentIndexChanged.connect(self._on_api_changed)
+        self._agent_api_version_row = card.add_row(
+            self._agent_api_version_combo,
+            "API 版本",
+            "Agent Platform 官方接口版本，常规保持 v1beta1 即可",
+        )
+
+        self._api_endpoint_hint_lbl = QLabel("")
+        self._api_endpoint_hint_lbl.setWordWrap(True)
+        self._api_endpoint_hint_lbl.setStyleSheet(
+            "color: #A59EC9; font-size: 11px; background: transparent;"
+        )
+        card.add_widget(self._api_endpoint_hint_lbl, top=6)
 
         model_host = QWidget()
         model_host.setObjectName("ControlHost")
@@ -1014,10 +1145,10 @@ class SettingsWindow(QWidget):
         model_row.addWidget(self._model_combo)
         self._api_refresh_models_btn = QPushButton("获取官方模型")
         self._api_refresh_models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._api_refresh_models_btn.setToolTip("使用填写的 Gemini API Key 从 Google 官方接口获取模型列表")
+        self._api_refresh_models_btn.setToolTip("使用当前所选渠道的配置从 Google 官方接口获取模型列表")
         self._api_refresh_models_btn.clicked.connect(self._on_refresh_models_clicked)
         model_row.addWidget(self._api_refresh_models_btn)
-        card.add_row(model_host, "对话模型", "获取后可选择官方可用模型")
+        card.add_row(model_host, "对话模型", "获取后可选择官方可用模型，也可手动输入模型 ID")
 
         self._api_models_hint_lbl = QLabel("")
         self._api_models_hint_lbl.setWordWrap(True)
@@ -1040,6 +1171,15 @@ class SettingsWindow(QWidget):
             self._thinking_combo.addItem(desc_map.get(val, short_label), val)
         self._thinking_combo.currentIndexChanged.connect(self._on_api_changed)
         card.add_row(self._thinking_combo, "思考强度", "越高越适合复杂推理，响应也更慢")
+
+        self._clear_api_config_btn = QPushButton("清空API KEY设置")
+        self._clear_api_config_btn.setObjectName("DangerBtn")
+        self._clear_api_config_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_api_config_btn.setToolTip(
+            "清空当前选中的 API 渠道设置（仅清理当前渠道，保留另一渠道已保存的 Key）"
+        )
+        self._clear_api_config_btn.clicked.connect(self._on_clear_api_config_clicked)
+        card.add_buttons([self._clear_api_config_btn], top=10)
 
         card = _Card(layout, "对话播报")
         self._chk_ag_sync = self._make_switch()
@@ -1189,6 +1329,30 @@ class SettingsWindow(QWidget):
         return button
 
     @staticmethod
+    def _wrap_secret_input(edit: QLineEdit) -> QWidget:
+        host = QWidget()
+        host.setObjectName("ControlHost")
+        host.setFixedWidth(320)
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(edit, 1)
+        toggle_btn = QPushButton("显示")
+        toggle_btn.setCheckable(True)
+        toggle_btn.setFixedWidth(54)
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def _on_toggled(checked: bool) -> None:
+            edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+            toggle_btn.setText("隐藏" if checked else "显示")
+
+        toggle_btn.toggled.connect(_on_toggled)
+        row.addWidget(toggle_btn)
+        return host
+
+    @staticmethod
     def _wrap_slider(slider: QSlider, value_label: QLabel) -> QWidget:
         host = QWidget()
         host.setObjectName("ControlHost")
@@ -1231,11 +1395,96 @@ class SettingsWindow(QWidget):
         self._discard_btn.setEnabled(True)
         self._set_feedback("● 有未保存的修改，请点击「确认修改」生效", kind="dirty")
 
+    def _current_api_provider(self) -> str:
+        return normalize_api_provider(self._api_provider_combo.currentData())
+
+    def _set_api_provider_combo(self, provider: str) -> None:
+        norm = normalize_api_provider(provider)
+        idx = self._api_provider_combo.findData(norm)
+        if idx >= 0:
+            self._api_provider_combo.setCurrentIndex(idx)
+
+    def _build_draft_connection_config(self) -> ApiConnectionConfig:
+        provider = self._current_api_provider()
+        if provider == API_PROVIDER_AGENT_PLATFORM:
+            return ApiConnectionConfig(
+                provider=provider,
+                api_key=self._agent_api_key_edit.text().strip(),
+                project=self._agent_project_edit.text().strip(),
+                location=self._agent_location_combo.currentText().strip()
+                or DEFAULT_AGENT_PLATFORM_LOCATION,
+                api_version=normalize_agent_platform_api_version(
+                    self._agent_api_version_combo.currentData()
+                ),
+            )
+        return ApiConnectionConfig(
+            provider=API_PROVIDER_GEMINI_DEVELOPER,
+            api_key=self._api_key_edit.text().strip(),
+        )
+
+    def _validate_agent_platform_draft(self) -> Optional[str]:
+        return validate_agent_platform_project(
+            self._agent_project_edit.text()
+        ) or validate_agent_platform_location(self._agent_location_combo.currentText())
+
+    def _update_api_provider_ui(self) -> None:
+        provider = self._current_api_provider()
+        is_agent = provider == API_PROVIDER_AGENT_PLATFORM
+        self._api_key_row.setVisible(not is_agent)
+        self._agent_api_key_row.setVisible(is_agent)
+        self._agent_project_row.setVisible(is_agent)
+        self._agent_location_row.setVisible(is_agent)
+        self._agent_api_version_row.setVisible(is_agent)
+
+        cfg = self._build_draft_connection_config()
+        if is_agent:
+            err = self._validate_agent_platform_draft()
+            if err:
+                self._api_endpoint_hint_lbl.setStyleSheet(
+                    "color: #F87171; font-size: 11px; background: transparent;"
+                )
+                self._api_endpoint_hint_lbl.setText(f"⚠️ {err}")
+            else:
+                text = GeminiChatService.describe_connection_endpoint(cfg)
+                loc_raw = self._agent_location_combo.currentText().strip().lower()
+                if not cfg.project and loc_raw not in ("", "global"):
+                    self._api_endpoint_hint_lbl.setStyleSheet(
+                        "color: #FBBF24; font-size: 11px; background: transparent;"
+                    )
+                    text += "；未填 Project ID 时固定走 Express 全局地址，填写 Project ID 后将按所选区域路由"
+                else:
+                    self._api_endpoint_hint_lbl.setStyleSheet(
+                        "color: #A59EC9; font-size: 11px; background: transparent;"
+                    )
+                if self._api_key_edit.text().strip():
+                    text += " · 已同时保存 Gemini API Key"
+                self._api_endpoint_hint_lbl.setText(text)
+            self._api_refresh_models_btn.setToolTip(
+                "尝试使用 Agent Platform API Key 获取可用模型（若当前 Key 仅用于对话，可直接手动输入模型 ID）"
+            )
+            self._clear_api_config_btn.setToolTip(
+                "仅清空当前 Agent Platform API Key、Project ID、区域和 API 版本（保留已保存的 Gemini API Key）"
+            )
+        else:
+            text = GeminiChatService.describe_connection_endpoint(cfg)
+            if self._agent_api_key_edit.text().strip():
+                text += " · 已同时保存 Agent Platform Key"
+            self._api_endpoint_hint_lbl.setStyleSheet(
+                "color: #A59EC9; font-size: 11px; background: transparent;"
+            )
+            self._api_endpoint_hint_lbl.setText(text)
+            self._api_refresh_models_btn.setToolTip(
+                "使用填写的 Gemini API Key 从 Google 官方接口获取模型列表"
+            )
+            self._clear_api_config_btn.setToolTip(
+                "仅清空当前 Gemini API Key（保留已保存的 Agent Platform API 设置）"
+            )
+
     def _sync_model_combo(self, selected_model: Optional[str] = None) -> None:
         current = normalize_gemini_model(
             selected_model if selected_model is not None else self._draft_gemini_model
         )
-        cached = GeminiChatService.get_cached_api_key_models(self._api_key_edit.text().strip())
+        cached = GeminiChatService.get_cached_models_for_config(self._build_draft_connection_config())
         candidates = list(dict.fromkeys([*cached, current]))
         self._model_combo.blockSignals(True)
         try:
@@ -1244,6 +1493,13 @@ class SettingsWindow(QWidget):
             self._model_combo.setCurrentText(current)
         finally:
             self._model_combo.blockSignals(False)
+
+    def _agent_key_summary_label(self) -> str:
+        if not (self._settings.agent_platform_api_key or "").strip():
+            return "未配置"
+        if (self._settings.agent_platform_project or "").strip():
+            return "已配置 · 项目模式"
+        return "已配置 · Express"
 
     @staticmethod
     def _current_bubble_activity() -> str:
@@ -1264,6 +1520,8 @@ class SettingsWindow(QWidget):
 
     def _sync_menu_controls(self, preserve_drafts: bool) -> None:
         s = self._settings
+        provider_val = normalize_api_provider(s.api_provider)
+        provider_updated = False
         controls = (
             (
                 "style_mode",
@@ -1275,6 +1533,7 @@ class SettingsWindow(QWidget):
             ("bubble_activity", self._set_activity_combo, self._current_bubble_activity()),
             ("auto_walk", self._chk_pin.setChecked, not s.auto_walk),
             ("doze_mode", self._chk_doze.setChecked, s.doze_mode),
+            ("api_provider", self._set_api_provider_combo, provider_val),
             ("chat_sync_enabled", self._chk_ag_sync.setChecked, s.chat_sync_enabled),
             ("enable_runtime_log", self._chk_log.setChecked, s.enable_runtime_log),
         )
@@ -1283,6 +1542,11 @@ class SettingsWindow(QWidget):
             if not preserve_drafts or value != self._saved_menu_values.get(field):
                 set_value(value)
                 self._saved_menu_values[field] = value
+                if field == "api_provider":
+                    provider_updated = True
+        if provider_updated and preserve_drafts:
+            self._update_api_provider_ui()
+            self._sync_model_combo(self._model_combo.currentText())
         self._scale_val_lbl.setText(f"{self._scale_slider.value() / 100:.2f}x")
 
     def sync_from_settings(self, force: bool = True, clear_feedback: bool = True) -> None:
@@ -1310,7 +1574,21 @@ class SettingsWindow(QWidget):
             self._chk_gravity.setChecked(s.gravity_enabled)
             self._chk_particles.setChecked(s.particles_enabled)
 
+            self._set_api_provider_combo(s.api_provider)
             self._api_key_edit.setText(s.gemini_api_key or "")
+            self._agent_api_key_edit.setText(s.agent_platform_api_key or "")
+            self._agent_project_edit.setText(s.agent_platform_project or "")
+            norm_loc = normalize_agent_platform_location(s.agent_platform_location)
+            loc_idx = self._agent_location_combo.findText(norm_loc)
+            if loc_idx >= 0:
+                self._agent_location_combo.setCurrentIndex(loc_idx)
+            else:
+                self._agent_location_combo.setCurrentText(norm_loc)
+            norm_ver = normalize_agent_platform_api_version(s.agent_platform_api_version)
+            ver_idx = self._agent_api_version_combo.findData(norm_ver)
+            self._agent_api_version_combo.setCurrentIndex(ver_idx if ver_idx >= 0 else 0)
+            self._update_api_provider_ui()
+
             self._draft_gemini_model = normalize_gemini_model(s.gemini_model or DEFAULT_GEMINI_MODEL)
             self._sync_model_combo()
             cur_thinking = normalize_thinking_level(getattr(s, "thinking_level", "auto"))
@@ -1375,9 +1653,16 @@ class SettingsWindow(QWidget):
         self._draft_gemini_model = text
         self._mark_dirty()
 
+    def _on_api_provider_changed(self) -> None:
+        if self._loading:
+            return
+        self._api_models_hint_lbl.setVisible(False)
+        self._on_api_changed()
+
     def _on_api_changed(self) -> None:
         if self._loading:
             return
+        self._update_api_provider_ui()
         self._sync_model_combo(self._model_combo.currentText())
         self._mark_dirty()
 
@@ -1399,7 +1684,16 @@ class SettingsWindow(QWidget):
         s.particles_enabled = self._chk_particles.isChecked()
 
         self._draft_gemini_model = self._model_combo.currentText()
+        s.api_provider = self._current_api_provider()
         s.gemini_api_key = self._api_key_edit.text().strip()
+        s.agent_platform_api_key = self._agent_api_key_edit.text().strip()
+        s.agent_platform_project = self._agent_project_edit.text().strip()
+        s.agent_platform_location = normalize_agent_platform_location(
+            self._agent_location_combo.currentText()
+        )
+        s.agent_platform_api_version = normalize_agent_platform_api_version(
+            self._agent_api_version_combo.currentData()
+        )
         s.gemini_model = normalize_gemini_model(self._draft_gemini_model)
         s.thinking_level = normalize_thinking_level(self._thinking_combo.currentData())
         s.chat_sync_enabled = self._chk_ag_sync.isChecked()
@@ -1413,6 +1707,11 @@ class SettingsWindow(QWidget):
 
     def confirm_and_save(self) -> bool:
         """校验并提交界面草稿到运行态与 user_config.json，成功/失败均展示明确状态提示。"""
+        validation_err = self._validate_agent_platform_draft()
+        if validation_err:
+            self._set_feedback(f"❌ {validation_err}", kind="error")
+            return False
+
         snapshot = dict(vars(self._settings))
         follow_changed = (
             self._settings.follow_antigravity != self._chk_follow_ag.isChecked()
@@ -1484,19 +1783,37 @@ class SettingsWindow(QWidget):
     def _on_refresh_models_clicked(self) -> None:
         if self._models_refresh_worker is not None and self._models_refresh_worker.isRunning():
             return
-        api_key = self._api_key_edit.text().strip()
-        if not api_key:
-            self._api_models_hint_lbl.setStyleSheet("color: #FBBF24; font-size: 11px; background: transparent;")
-            self._api_models_hint_lbl.setText("⚠️ 请先填写 Gemini API Key 后获取官方模型")
+        cfg = self._build_draft_connection_config()
+        if not cfg.api_key:
+            self._api_models_hint_lbl.setStyleSheet(
+                "color: #FBBF24; font-size: 11px; background: transparent;"
+            )
+            self._api_models_hint_lbl.setText(
+                f"⚠️ 请先填写 {format_api_provider_label(cfg.provider)} Key 后获取官方模型"
+            )
             self._api_models_hint_lbl.setVisible(True)
             return
+
+        if cfg.provider == API_PROVIDER_AGENT_PLATFORM:
+            err = self._validate_agent_platform_draft()
+            if err:
+                self._api_models_hint_lbl.setStyleSheet(
+                    "color: #F87171; font-size: 11px; background: transparent;"
+                )
+                self._api_models_hint_lbl.setText(f"⚠️ {err}")
+                self._api_models_hint_lbl.setVisible(True)
+                return
 
         self._api_refresh_models_btn.setEnabled(False)
         self._api_refresh_models_btn.setText("获取中...")
         self._api_models_hint_lbl.setStyleSheet("color: #A59EC9; font-size: 11px; background: transparent;")
-        self._api_models_hint_lbl.setText("正在从 Google 官方接口获取可用对话模型...")
+        self._api_models_hint_lbl.setText(
+            f"正在从 {format_api_provider_label(cfg.provider)} 官方接口获取可用对话模型..."
+        )
         self._api_models_hint_lbl.setVisible(True)
-        worker = _ModelsRefreshWorker(api_key, parent=self)
+        cur_model = self._model_combo.currentText().strip()
+        extra_models = (cur_model,) if cur_model else ()
+        worker = _ModelsRefreshWorker(cfg, extra_models=extra_models, parent=self)
         worker.completed.connect(self._on_models_refreshed)
         self._models_refresh_worker = worker
         worker.start()
@@ -1510,9 +1827,11 @@ class SettingsWindow(QWidget):
             self._models_refresh_worker = None
         self._api_refresh_models_btn.setEnabled(True)
         self._api_refresh_models_btn.setText("获取官方模型")
-        # 请求期间若更换了 Key，不把旧 Key 的结果显示在新配置中。
-        if worker is not None and worker._api_key != self._api_key_edit.text().strip():
-            self._api_models_hint_lbl.setText("API Key 已修改，请重新获取模型")
+        # 请求期间若更换了渠道/Key/项目参数，不把旧配置的结果显示在新配置中。
+        if worker is not None and GeminiChatService.connection_signature(
+            worker._config
+        ) != GeminiChatService.connection_signature(self._build_draft_connection_config()):
+            self._api_models_hint_lbl.setText("API 配置已修改，请重新获取模型")
             return
         if err_msg:
             self._api_models_hint_lbl.setStyleSheet("color: #F87171; font-size: 11px; background: transparent;")
@@ -1525,6 +1844,110 @@ class SettingsWindow(QWidget):
             self._api_models_hint_lbl.setStyleSheet("color: #34D399; font-size: 11px; background: transparent;")
             self._api_models_hint_lbl.setText(f"✅ 已获取 {len(models)} 个官方可用模型，选择后请点击「确认修改」生效")
         self._api_models_hint_lbl.setVisible(True)
+
+    def _on_import_agent_json_clicked(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Google Cloud 官方配置 JSON",
+            "",
+            "JSON 文件 (*.json);;所有文件 (*.*)",
+        )
+        if file_path:
+            self.import_agent_platform_json_file(file_path)
+
+    def import_agent_platform_json_file(self, file_path: str) -> bool:
+        """从用户选择的官方 client_secret_*.json 中提取 Project ID（与可选 Location），不保存 OAuth 字段。"""
+        path = Path(file_path)
+        try:
+            if not path.is_file():
+                raise ValueError("所选文件不存在或不可读取")
+            if path.stat().st_size > 1_048_576:
+                raise ValueError("JSON 文件过大（超过 1 MB）")
+            raw_text = path.read_text(encoding="utf-8-sig")
+            project_id, location = parse_agent_platform_json_config(raw_text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            err_msg = str(exc).strip() or type(exc).__name__
+            self._set_feedback(f"❌ 从 JSON 导入失败：{err_msg}", kind="error")
+            return False
+
+        if self._current_api_provider() != API_PROVIDER_AGENT_PLATFORM:
+            self._set_api_provider_combo(API_PROVIDER_AGENT_PLATFORM)
+        self._agent_project_edit.setText(project_id)
+        if location:
+            self._agent_location_combo.setCurrentText(location)
+
+        next_step = (
+            "请继续填写 Agent Platform API Key 后点击「确认修改」"
+            if not self._agent_api_key_edit.text().strip()
+            else "请点击「确认修改」生效"
+        )
+        self._set_feedback(f"● 已从 JSON 导入 Project ID（{project_id}），{next_step}", kind="dirty")
+        return True
+
+    def _on_clear_api_config_clicked(self) -> None:
+        provider = self._current_api_provider()
+        provider_label = format_api_provider_label(provider)
+        if provider == API_PROVIDER_AGENT_PLATFORM:
+            detail = (
+                "将清除 Agent Platform API Key、Project ID、区域和 API 版本并立即保存；"
+                "已保存的 Gemini API Key 保持不变。"
+            )
+        else:
+            detail = (
+                "将清除 Gemini API Key 并立即保存；"
+                "已保存的 Agent Platform API 设置保持不变。"
+            )
+        answer = QMessageBox.question(
+            self,
+            "清空 API KEY 设置",
+            f"确定要清空当前选中的「{provider_label}」配置吗？\n\n{detail}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.clear_current_api_config()
+
+    def clear_current_api_config(self) -> bool:
+        """仅清空当前选中的 API 渠道凭据与参数并立即落盘，保留另一渠道配置。"""
+        provider = self._current_api_provider()
+        provider_label = format_api_provider_label(provider)
+        snapshot = dict(vars(self._settings))
+        draft_cfg = self._build_draft_connection_config()
+        saved_cfg = GeminiChatService.build_connection_config(self._settings, provider=provider)
+        stale_signatures = {
+            GeminiChatService.connection_signature(saved_cfg),
+            GeminiChatService.connection_signature(draft_cfg),
+        }
+
+        s = self._settings
+        # 将当前选中渠道写入配置，使清空后的界面停留在用户当前操作的渠道下。
+        s.api_provider = provider
+        s.chat_offline_mode = False
+        if provider == API_PROVIDER_AGENT_PLATFORM:
+            s.agent_platform_api_key = ""
+            s.agent_platform_project = ""
+            s.agent_platform_location = DEFAULT_AGENT_PLATFORM_LOCATION
+            s.agent_platform_api_version = DEFAULT_AGENT_PLATFORM_API_VERSION
+        else:
+            s.gemini_api_key = ""
+
+        try:
+            self._settings_service.save(s)
+        except Exception as exc:
+            vars(self._settings).update(snapshot)
+            AppLogger.error("[Settings] clear api config failed", exc)
+            err_msg = str(exc).strip() or type(exc).__name__
+            self._set_feedback(f"❌ 清空 {provider_label} 设置失败：{err_msg}", kind="error")
+            return False
+
+        # 仅失效当前渠道对应的模型缓存（涵盖已保存与未保存草稿签名），避免影响另一渠道。
+        for sig in stale_signatures:
+            GeminiChatService._api_models_cache.pop(sig, None)
+        self._api_models_hint_lbl.setVisible(False)
+        self.sync_from_settings(force=True, clear_feedback=False)
+        self._set_feedback(f"✅ 已清空 {provider_label} 设置", kind="success")
+        self._emit_applied()
+        return True
 
     # ==================== 应用联动 ====================
 

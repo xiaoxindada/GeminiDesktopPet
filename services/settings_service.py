@@ -19,6 +19,9 @@ from models.pet_settings import (
     DockSide,
     PetSettings,
     PetStyleMode,
+    normalize_agent_platform_api_version,
+    normalize_agent_platform_location,
+    normalize_api_provider,
     normalize_gemini_model,
     normalize_thinking_level,
 )
@@ -196,12 +199,51 @@ _SETTINGS_SCHEMA: tuple[_SettingFieldSpec, ...] = (
     _SettingFieldSpec("favorability", "stats", "favorability", _parse_nonneg_int, int),
     _SettingFieldSpec("chat_offline_mode", "gemini", "offline_mode", _parse_bool, bool),
     _SettingFieldSpec(
+        "api_provider",
+        "gemini",
+        "api_provider",
+        lambda raw, _cur: normalize_api_provider(str(raw)) if raw is not None else _cur,
+        normalize_api_provider,
+        ("key_type", "provider"),
+    ),
+    _SettingFieldSpec(
         "gemini_api_key",
         "gemini",
         "api_key",
         lambda raw, _cur: "" if raw is None else str(raw).strip(),
         lambda v: (v or "").strip(),
         ("ai_key",),
+    ),
+    _SettingFieldSpec(
+        "agent_platform_api_key",
+        "gemini",
+        "agent_platform_api_key",
+        lambda raw, _cur: "" if raw is None else str(raw).strip(),
+        lambda v: (v or "").strip(),
+    ),
+    _SettingFieldSpec(
+        "agent_platform_project",
+        "gemini",
+        "agent_platform_project",
+        lambda raw, _cur: "" if raw is None else str(raw).strip(),
+        lambda v: (v or "").strip(),
+        ("project_id",),
+    ),
+    _SettingFieldSpec(
+        "agent_platform_location",
+        "gemini",
+        "agent_platform_location",
+        lambda raw, _cur: normalize_agent_platform_location(str(raw)) if raw is not None else _cur,
+        normalize_agent_platform_location,
+        ("location",),
+    ),
+    _SettingFieldSpec(
+        "agent_platform_api_version",
+        "gemini",
+        "agent_platform_api_version",
+        lambda raw, _cur: normalize_agent_platform_api_version(str(raw)) if raw is not None else _cur,
+        normalize_agent_platform_api_version,
+        ("api_version",),
     ),
     _SettingFieldSpec(
         "gemini_model",
@@ -247,6 +289,21 @@ class SettingsService:
         self._apply_json_dict(raw_obj, settings)
         return True
 
+    @staticmethod
+    def _normalize_settings(settings: PetSettings) -> None:
+        settings.api_provider = normalize_api_provider(settings.api_provider)
+        settings.gemini_api_key = (settings.gemini_api_key or "").strip()
+        settings.agent_platform_api_key = (settings.agent_platform_api_key or "").strip()
+        settings.agent_platform_project = (settings.agent_platform_project or "").strip()
+        settings.agent_platform_location = normalize_agent_platform_location(
+            settings.agent_platform_location
+        )
+        settings.agent_platform_api_version = normalize_agent_platform_api_version(
+            settings.agent_platform_api_version
+        )
+        settings.gemini_model = normalize_gemini_model(settings.gemini_model)
+        settings.thinking_level = normalize_thinking_level(settings.thinking_level)
+
     def load(self) -> PetSettings:
         settings = PetSettings()
         if self.settings_path.is_file():
@@ -254,15 +311,12 @@ class SettingsService:
                 self._load_json_into(self.settings_path, settings)
             except Exception:
                 pass
-        settings.gemini_model = normalize_gemini_model(settings.gemini_model)
-        settings.thinking_level = normalize_thinking_level(settings.thinking_level)
+        self._normalize_settings(settings)
         return settings
 
     def save(self, settings: PetSettings) -> None:
         self.settings_folder.mkdir(parents=True, exist_ok=True)
-        settings.gemini_model = normalize_gemini_model(settings.gemini_model)
-        settings.thinking_level = normalize_thinking_level(settings.thinking_level)
-        settings.gemini_api_key = (settings.gemini_api_key or "").strip()
+        self._normalize_settings(settings)
         self.settings_path.write_text(self._serialize_json(settings), encoding="utf-8")
 
     @staticmethod

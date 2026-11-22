@@ -21,6 +21,8 @@ from .character_lore import (
 )
 from .character_profile import CharacterProfile
 from .pet_settings import (
+    API_PROVIDER_AGENT_PLATFORM,
+    API_PROVIDER_GEMINI_DEVELOPER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_THINKING_LEVEL,
     THINKING_LEVEL_LABELS,
@@ -28,9 +30,11 @@ from .pet_settings import (
     DockSide,
     PetSettings,
     PetStyleMode,
+    format_api_provider_label,
     format_model_display_name,
     format_thinking_level_label,
     get_supported_thinking_levels,
+    normalize_api_provider,
     normalize_gemini_model,
     normalize_thinking_level,
     resolve_effective_thinking_level,
@@ -39,6 +43,8 @@ from .pet_state import PetState
 
 __all__ = [
     "AI_TONE_OPTIONS",
+    "API_PROVIDER_AGENT_PLATFORM",
+    "API_PROVIDER_GEMINI_DEVELOPER",
     "AiTonePreset",
     "AppVersion",
     "BUBBLE_ACTIVITY_OPTIONS",
@@ -59,12 +65,14 @@ __all__ = [
     "THINKING_LEVEL_LABELS",
     "THINKING_LEVEL_OPTIONS",
     "USER_CONFIG_DIR_NAME",
+    "format_api_provider_label",
     "format_model_display_name",
     "format_thinking_level_label",
     "get_app_base_dir",
     "get_bundled_resource_dir",
     "get_supported_thinking_levels",
     "get_user_config_dir",
+    "normalize_api_provider",
     "normalize_gemini_model",
     "normalize_thinking_level",
     "resolve_effective_thinking_level",

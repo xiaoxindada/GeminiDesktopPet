@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
+import re
+from typing import Optional
 
 
 class DockSide(str, Enum):
@@ -38,6 +41,32 @@ class PetStyleMode(str, Enum):
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_THINKING_LEVEL = "auto"
 
+API_PROVIDER_GEMINI_DEVELOPER = "gemini_developer"
+API_PROVIDER_AGENT_PLATFORM = "agent_platform"
+DEFAULT_API_PROVIDER = API_PROVIDER_GEMINI_DEVELOPER
+
+DEFAULT_AGENT_PLATFORM_LOCATION = "global"
+AGENT_PLATFORM_LOCATION_PRESETS: tuple[str, ...] = (
+    "global",
+    "us-central1",
+    "us-east4",
+    "us-west1",
+    "europe-west1",
+    "europe-west4",
+    "asia-northeast1",
+    "asia-southeast1",
+    "us",
+    "eu",
+)
+DEFAULT_AGENT_PLATFORM_API_VERSION = "v1beta1"
+AGENT_PLATFORM_API_VERSION_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("v1beta1", "v1beta1（默认 · 支持预览模型）"),
+    ("v1", "v1（稳定版 GA）"),
+)
+
+_AGENT_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_AGENT_LOCATION_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+
 DEPRECATED_MODEL_PREFIXES = ("gemini-2.0-", "gemini-1.5-", "gemini-1.0-")
 LEGACY_GEMINI_DEFAULT_MODELS = ("gemini-4-hydrogen",)
 
@@ -53,11 +82,118 @@ THINKING_LEVEL_OPTIONS: tuple[tuple[str, str], ...] = (
 THINKING_LEVEL_LABELS: dict[str, str] = dict(THINKING_LEVEL_OPTIONS)
 
 
+def normalize_api_provider(provider: str | None) -> str:
+    """规范化 API 渠道标识，仅在官方 Gemini API 与 Agent Platform API 间切换。"""
+    cleaned = (provider or "").strip().lower()
+    if cleaned in (
+        "agent_platform",
+        "agent-platform",
+        "agent",
+        "enterprise",
+        "vertex",
+        "vertexai",
+        "vertex_ai",
+    ):
+        return API_PROVIDER_AGENT_PLATFORM
+    return API_PROVIDER_GEMINI_DEVELOPER
+
+
+def format_api_provider_label(provider: str | None, *, short: bool = False) -> str:
+    if normalize_api_provider(provider) == API_PROVIDER_AGENT_PLATFORM:
+        return "Agent Platform" if short else "Agent Platform API"
+    return "Gemini API"
+
+
+def normalize_agent_platform_location(location: str | None) -> str:
+    cleaned = (location or "").strip().lower()
+    return cleaned or DEFAULT_AGENT_PLATFORM_LOCATION
+
+
+def normalize_agent_platform_api_version(api_version: str | None) -> str:
+    cleaned = (api_version or "").strip().lower()
+    return "v1" if cleaned == "v1" else DEFAULT_AGENT_PLATFORM_API_VERSION
+
+
+def validate_agent_platform_project(project: str | None) -> Optional[str]:
+    """校验 Google Cloud Project ID 格式，留空表示使用 Express 模式。"""
+    cleaned = (project or "").strip()
+    if not cleaned:
+        return None
+    low = cleaned.lower()
+    if low.endswith(".apps.googleusercontent.com"):
+        return (
+            "填写的是 OAuth Client ID（*.apps.googleusercontent.com），不是 Google Cloud Project ID；"
+            "Express 模式 Key 请直接留空，项目模式请填项目 ID（如 my-project-123）或纯数字项目编号"
+        )
+    if low.endswith(".gserviceaccount.com") or "@" in cleaned:
+        return (
+            "填写的是完整服务账号邮箱，不是 Project ID；"
+            "请仅截取 @ 与 .iam.gserviceaccount.com 之间的部分（Express 模式 Key 请直接留空）"
+        )
+    if cleaned.startswith(("AIza", "AQ.")):
+        return "请不要将 API Key 填在 Project ID 栏；Express 模式 Key 请直接留空"
+    if ".." in cleaned or not _AGENT_PROJECT_RE.match(cleaned):
+        return "Project ID 格式无效，仅支持字母、数字及 . _ : -，不能包含空白或路径符号"
+    return None
+
+
+def validate_agent_platform_location(location: str | None) -> Optional[str]:
+    """校验官方区域标识符，防止将主机/URL 片段注入到 aiplatform 域名。"""
+    cleaned = (location or "").strip().lower()
+    if not cleaned:
+        return None
+    if len(cleaned) < 2 or len(cleaned) > 40 or not _AGENT_LOCATION_RE.match(cleaned):
+        return "区域 Location 格式无效，请填写如 global、us-central1、asia-northeast1 等官方区域名"
+    return None
+
+
+def parse_agent_platform_json_config(raw_text: str) -> tuple[str, Optional[str]]:
+    """仅从官方 client_secret_*.json 提取 project_id（与可选 location），忽略全部 OAuth 凭据字段。"""
+    data = json.loads(raw_text)
+    if not isinstance(data, dict):
+        raise ValueError("文件内容不是有效的 JSON 对象")
+
+    raw_project = ""
+    for container in (data, data.get("installed"), data.get("web")):
+        if isinstance(container, dict):
+            candidate = container.get("project_id")
+            if isinstance(candidate, (str, int)) and not isinstance(candidate, bool):
+                stripped = str(candidate).strip()
+                if stripped:
+                    raw_project = stripped
+                    break
+
+    if not raw_project:
+        raise ValueError("JSON 中未找到 project_id 字段（请确认选择了官方 client_secret_*.json）")
+
+    project_err = validate_agent_platform_project(raw_project)
+    if project_err:
+        raise ValueError(project_err)
+
+    raw_location = data.get("location")
+    parsed_location: Optional[str] = None
+    if isinstance(raw_location, str) and raw_location.strip():
+        if validate_agent_platform_location(raw_location) is None:
+            parsed_location = normalize_agent_platform_location(raw_location)
+
+    return raw_project, parsed_location
+
+
+def strip_gemini_model_prefix(model_id: str | None) -> str:
+    """移除官方模型 ID 前缀（models/ 或 publishers/google/models/）。"""
+    cleaned = (model_id or "").strip()
+    if "/publishers/google/models/" in cleaned:
+        return cleaned.split("/publishers/google/models/", 1)[1]
+    if cleaned.startswith("publishers/google/models/"):
+        return cleaned[len("publishers/google/models/") :]
+    if cleaned.startswith("models/"):
+        return cleaned[len("models/") :]
+    return cleaned
+
+
 def format_model_display_name(model_id: str | None) -> str:
     """将动态获取的模型 ID 格式化为简洁可读名称（不写死静态清单，也不显示新/旧标签）。"""
-    cleaned = (model_id or "").strip() or DEFAULT_GEMINI_MODEL
-    if cleaned.startswith("models/"):
-        cleaned = cleaned[len("models/") :]
+    cleaned = strip_gemini_model_prefix(model_id) or DEFAULT_GEMINI_MODEL
     low = cleaned.lower()
 
     if low == "gemini-pro-orchestrator-g1-pro":
@@ -210,7 +346,12 @@ class PetSettings:
     favorability: int = 20
 
     chat_offline_mode: bool = False
+    api_provider: str = DEFAULT_API_PROVIDER
     gemini_api_key: str = ""
+    agent_platform_api_key: str = ""
+    agent_platform_project: str = ""
+    agent_platform_location: str = DEFAULT_AGENT_PLATFORM_LOCATION
+    agent_platform_api_version: str = DEFAULT_AGENT_PLATFORM_API_VERSION
     gemini_model: str = DEFAULT_GEMINI_MODEL
     thinking_level: str = DEFAULT_THINKING_LEVEL
 
