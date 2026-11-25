@@ -322,5 +322,103 @@ class TestAntigravityChatCollector(unittest.TestCase):
         self.assertEqual(status["status"]["title"], "新的会话")
 
 
+class TestSyncBubbleChatIsolation(unittest.TestCase):
+    def test_long_sync_bubble_does_not_switch_to_chat_mode_after_closing_chat(self) -> None:
+        from unittest.mock import Mock
+
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+
+        from models.pet_settings import PetSettings
+        from services.antigravity_chat_collector import SyncEvent
+        from services.gemini_chat_service import GeminiChatService
+        from services.sound_service import SoundService
+        from services.sprite_manager import SpriteManager
+        from services.system_monitor_service import SystemMonitorService
+        from views.pet_window import PetWindow
+
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = PetSettings(
+                auto_walk=False, chat_sync_enabled=False, show_speech_bubble=True
+            )
+            service = Mock(settings_path=Path(tmp) / "settings.json")
+            pet = PetWindow(
+                settings,
+                service,
+                SpriteManager(),
+                SoundService(),
+                SystemMonitorService(),
+                GeminiChatService(),
+            )
+            try:
+                pet.show()
+                pet._frame_timer.stop()
+                pet._ag_mirror_active = True
+
+                # 打开再关闭聊天模式后，非聊天状态应保持普通气泡，不切回聊天消息卡片区。
+                pet.open_chat_dialog()
+                app.processEvents()
+                pet._close_bubble_click()
+                app.processEvents()
+
+                pet._show_sync_event(SyncEvent("user", "示例提问", "message"))
+                app.processEvents()
+                self.assertFalse(pet._is_chat_open)
+                self.assertFalse(pet._chat_messages_panel.isVisible())
+                self.assertTrue(pet._bubble_text_lbl.isVisible())
+
+                long_context = (
+                    "Long path: https://example.com/" + "very_long_segment_" * 12 + "\n\n"
+                    + "这是一段较长的同步思维上下文，用于验证普通气泡保持紧凑换行展示。\n" * 60
+                )
+                pet._show_sync_event(SyncEvent("system", long_context, "thinking"))
+                app.processEvents()
+                self.assertFalse(pet._is_chat_open)
+                self.assertFalse(pet._chat_messages_panel.isVisible())
+                self.assertTrue(pet._bubble_text_lbl.isVisible())
+                self.assertEqual(pet._bubble_scroll.horizontalScrollBar().maximum(), 0)
+
+                pet._show_sync_event(
+                    SyncEvent("system", long_context + "续写结尾", "thinking", replace=True)
+                )
+                app.processEvents()
+                self.assertFalse(pet._chat_messages_panel.isVisible())
+                self.assertTrue(pet._bubble_text_lbl.isVisible())
+                self.assertTrue(pet._bubble_text_lbl.text().endswith("续写结尾"))
+
+                # 点击固定思维气泡后收到其他同步事件，也不应切出聊天卡片面板。
+                QTest.mouseClick(pet._bubble_text_lbl, Qt.MouseButton.LeftButton)
+                app.processEvents()
+                pet._show_sync_event(SyncEvent("assistant", "普通回复", "message"))
+                app.processEvents()
+                self.assertFalse(pet._chat_messages_panel.isVisible())
+                self.assertTrue(pet._bubble_text_lbl.isVisible())
+
+                # 重新进入聊天模式时，应能看到关闭期间累计记录的全部实时同步事件。
+                pet.open_chat_dialog()
+                app.processEvents()
+                self.assertTrue(pet._is_chat_open)
+                self.assertTrue(pet._ag_viewing_sync)
+                self.assertTrue(pet._chat_messages_panel.isVisible())
+                self.assertEqual(len(pet._ag_sync_events), 3)
+                self.assertEqual(len(pet._ag_sync_labels), 3)
+
+                # 再次关闭聊天并停止同步时，不应把普通气泡切回聊天面板或覆盖气泡内容。
+                pet._close_bubble_click()
+                app.processEvents()
+                pet.show_bubble("正常提示气泡", 3.0, force=True)
+                app.processEvents()
+                pet.stop_antigravity_sync(silent=True)
+                app.processEvents()
+                self.assertFalse(pet._is_chat_open)
+                self.assertFalse(pet._chat_messages_panel.isVisible())
+                self.assertTrue(pet._bubble_text_lbl.isVisible())
+                self.assertEqual(pet._bubble_text_lbl.text(), "正常提示气泡")
+            finally:
+                pet.close()
+
+
 if __name__ == "__main__":
     unittest.main()

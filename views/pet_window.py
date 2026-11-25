@@ -1050,6 +1050,7 @@ class PetWindow(QWidget):
         self._bubble_text_lbl = QLabel("喵～Gemini 上线！")
         self._bubble_text_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._bubble_text_lbl.setWordWrap(True)
+        self._bubble_text_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._bubble_text_lbl.setCursor(Qt.CursorShape.ArrowCursor)
         self._bubble_text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._bubble_text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -4090,6 +4091,8 @@ class PetWindow(QWidget):
             "Antigravity 实时同步中（只读）" if self._chat_readonly else "输入聊天内容或指令…"
         )
         if not in_chat:
+            self._chat_messages_panel.setVisible(False)
+            self._bubble_text_lbl.setVisible(True)
             return
 
         badge_text, _models, current = self._resolve_active_chat_channel_and_models()
@@ -4322,7 +4325,7 @@ class PetWindow(QWidget):
             return
         if is_error:
             self._last_chat_api_notice = notice_text
-        if self._chat_message_rows:
+        if self._is_chat_open and self._chat_message_rows:
             self._append_chat_turn(role="system", sender="", text=notice_text)
         else:
             self._chat_messages_panel.setVisible(False)
@@ -4415,7 +4418,7 @@ class PetWindow(QWidget):
         if model_changed:
             self._chat.reset_conversation()
         self._sync_chat_controls()
-        if self._chat_message_rows:
+        if self._is_chat_open and self._chat_message_rows:
             self._append_chat_turn(
                 role="system",
                 sender="",
@@ -4463,8 +4466,10 @@ class PetWindow(QWidget):
         meta: str = "",
     ) -> tuple[QWidget, Optional[QLabel], QLabel]:
         """向标准聊天消息列表追加一条消息卡片（用户靠右、助手靠左、提示居中）。"""
-        self._bubble_text_lbl.setVisible(False)
-        self._chat_messages_panel.setVisible(True)
+        # 仅在聊天模式打开时切换为消息卡片区，避免普通气泡被切入聊天视图。
+        if self._is_chat_open:
+            self._bubble_text_lbl.setVisible(False)
+            self._chat_messages_panel.setVisible(True)
 
         row = QWidget(self._chat_messages_panel)
         row.setStyleSheet("background: transparent;")
@@ -4775,16 +4780,18 @@ class PetWindow(QWidget):
         else:
             self._clear_chat_rows()
             self._chat.reset_conversation()
-            self._chat_messages_panel.setVisible(False)
-            self._bubble_text_lbl.setVisible(True)
-            self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
+            if self._is_chat_open:
+                self._chat_messages_panel.setVisible(False)
+                self._bubble_text_lbl.setVisible(True)
+                self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
         self._chat_input.setText(self._ag_regular_draft)
         self._ag_regular_draft = ""
         self._update_chat_save_path()
         self._refresh_chat_sessions()
         self._sync_chat_controls()
-        self._relayout_stage_top()
-        self._chat_input.setFocus()
+        if self._is_chat_open:
+            self._relayout_stage_top()
+            self._chat_input.setFocus()
 
     def _clear_chat_history(self) -> None:
         if self._waiting_chat_workers:
@@ -5053,8 +5060,8 @@ class PetWindow(QWidget):
                 self._ag_sync_events[-1] = event
             else:
                 self._ag_sync_events.append(event)
-            # 非实时会话视图下仅在后台持续记录同步消息，不自动跳转打断当前聊天。
-            if self._ag_viewing_sync:
+            # 非实时会话视图或非聊天模式下仅在后台持续记录同步消息，不操作聊天消息卡片区。
+            if self._is_chat_open and self._ag_viewing_sync:
                 if replace_last and self._ag_sync_labels:
                     # 续写只更新当前文本，保留卡片、布局及用户的滚动位置。
                     label = self._ag_sync_labels[-1]
@@ -5076,15 +5083,17 @@ class PetWindow(QWidget):
 
     def _render_chat_messages(self, record: dict) -> None:
         self._clear_chat_rows()
-        self._chat_messages_panel.setVisible(bool(record["messages"]))
-        self._bubble_text_lbl.setVisible(not record["messages"])
+        if self._is_chat_open:
+            self._chat_messages_panel.setVisible(bool(record["messages"]))
+            self._bubble_text_lbl.setVisible(not record["messages"])
         for message in record["messages"]:
             sender = "你" if message["role"] == "user" else "Gemini 娘"
             self._append_chat_turn(
                 role=message["role"], sender=sender, text=message["text"],
                 meta=f"{sender} · {message.get('time', '').replace('T', ' ')}",
             )
-        self._relayout_stage_top()
+        if self._is_chat_open:
+            self._relayout_stage_top()
 
     def show_bubble(self, message: str, duration_sec: float, force: bool = False) -> None:
         if self._sync_thinking_pinned or (self._sync_bubble_active and not force):
@@ -5125,9 +5134,10 @@ class PetWindow(QWidget):
             from_sync and self._sync_bubble_active and self._speech_bubble.isVisible()
         )
         self._sync_bubble_active = from_sync
-        if not already_showing_sync:
-            self._disable_chat_scroll_auto()
+        self._disable_chat_scroll_auto()
+        if not self._chat_messages_panel.isHidden():
             self._chat_messages_panel.setVisible(False)
+        if not already_showing_sync or self._bubble_text_lbl.isHidden():
             self._bubble_text_lbl.setStyleSheet(
                 "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
             )
@@ -5193,6 +5203,9 @@ class PetWindow(QWidget):
                 self._ag_pending_handoff = True
             else:
                 self._show_sync_chat_session()
+        elif self._ag_viewing_sync and self._ag_sync_session_id is not None:
+            # 非聊天模式下收到新同步事件只记录数据不改聊天卡片，重新进入时按最新事件重绘。
+            self._render_sync_chat_events()
         self._toggle_chat_history(True)
         # 未填写 Key 不会产生请求错误，进入聊天时也需要明确显示配置提示。
         active_label = format_api_provider_label(self._settings.api_provider)
