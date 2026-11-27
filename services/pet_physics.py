@@ -1385,40 +1385,42 @@ class PetMotionEngine:
             dock_rem = 1.0 - self.damper.dock_progress
             if dock_rem > 0.001:
                 angle += side_sign * 8.0 * dock_rem
-        elif state.is_dragging and not state.is_sync_working_locked:
+        elif state.is_dragging:
+            # 同步工作屏蔽期仍保留跟手拖倾与纵向提拉形变，仅屏蔽炸毛/眩晕震颤表现
             angle = clamp(self.drag_tilt_vx * 0.0095, -14.0, 14.0)
             drag_stretch = clamp(-self.drag_vel_y * 0.000032, -0.040, 0.055)
             sy = 1.02 + drag_stretch
             sx = clamp(1.0 - drag_stretch * 0.58, 0.95, 1.04)
-            if state.override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
-                if state.override_pose == PetState.REDHOT:
-                    impulse_tx = (math.sin(t * 64.0) * 0.7 + math.cos(t * 98.0) * 0.3) * (5.6 * s)
-                    impulse_ty = math.sin(t * 74.0) * (1.4 * s)
-                    impulse_angle = math.cos(t * 52.0) * 4.8
-                    sx = 1.06
-                    sy = 1.06
-                elif state.override_pose == PetState.PUFFED:
-                    impulse_tx = math.sin(t * 48.0) * (3.8 * s)
-                    impulse_angle = math.cos(t * 38.0) * 3.2
-                    sx = 1.035
-                    sy = 1.035
-                else:
-                    impulse_tx = math.sin(t * 36.0) * (2.4 * s)
-                    impulse_angle = math.cos(t * 28.0) * 2.0
+            if not state.is_sync_working_locked:
+                if state.override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
+                    if state.override_pose == PetState.REDHOT:
+                        impulse_tx = (math.sin(t * 64.0) * 0.7 + math.cos(t * 98.0) * 0.3) * (5.6 * s)
+                        impulse_ty = math.sin(t * 74.0) * (1.4 * s)
+                        impulse_angle = math.cos(t * 52.0) * 4.8
+                        sx = 1.06
+                        sy = 1.06
+                    elif state.override_pose == PetState.PUFFED:
+                        impulse_tx = math.sin(t * 48.0) * (3.8 * s)
+                        impulse_angle = math.cos(t * 38.0) * 3.2
+                        sx = 1.035
+                        sy = 1.035
+                    else:
+                        impulse_tx = math.sin(t * 36.0) * (2.4 * s)
+                        impulse_angle = math.cos(t * 28.0) * 2.0
 
-                b_ty, b_sx, b_sy, b_ang = self.bristle_burst.sample(
-                    scale=s,
-                    is_redhot=(state.override_pose == PetState.REDHOT),
-                    is_dragging=True,
-                )
-                impulse_ty += b_ty
-                impulse_sx *= b_sx
-                impulse_sy *= b_sy
-                impulse_angle += b_ang
-            elif state.override_pose == PetState.DIZZY:
-                tx = math.cos(t * 7.2) * 5.0 * s
-                ty = math.sin(t * 7.2) * 2.5 * s
-                angle += math.sin(t * 7.2) * 8.0
+                    b_ty, b_sx, b_sy, b_ang = self.bristle_burst.sample(
+                        scale=s,
+                        is_redhot=(state.override_pose == PetState.REDHOT),
+                        is_dragging=True,
+                    )
+                    impulse_ty += b_ty
+                    impulse_sx *= b_sx
+                    impulse_sy *= b_sy
+                    impulse_angle += b_ang
+                elif state.override_pose == PetState.DIZZY:
+                    tx = math.cos(t * 7.2) * 5.0 * s
+                    ty = math.sin(t * 7.2) * 2.5 * s
+                    angle += math.sin(t * 7.2) * 8.0
         elif state.is_walking:
             if state.is_animated_clip:
                 facing_sign = 1.0 if (state.walk_dir * state.clip_source_facing) >= 0 else -1.0

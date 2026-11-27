@@ -927,6 +927,41 @@ class TestSyncBubbleChatIsolation(unittest.TestCase):
                 self.assertEqual(pet._override_pose, turn2_pose)
                 self.assertFalse(pet._is_falling)
 
+                # 工作屏蔽期放行回弹系列物理交互：拖拽跟手倾角、松手甩动抛掷弹跳与点击 Q 弹挤压均生效且保持工作动作。
+                pet._is_dragging = True
+                pet._motion_engine.push_drag_velocity(900.0, -300.0)
+                pet._update_sprite_transforms(0.1)
+                self.assertGreater(abs(pet._final_transform.angle), 0.5)
+                t_fling = time.monotonic()
+                pet._drag_trail.clear()
+                for i in range(9):
+                    pet._drag_trail.add_sample(400.0 + i * 24.0, 360.0 - i * 10.0, t_fling + i * 0.016)
+                pet._finish_drag_release(t_fling + 8 * 0.016 + 0.01)
+                self.assertTrue(pet._is_falling)
+                self.assertGreater(pet._throw_vx, 400.0)
+                self.assertTrue(pet._motion_engine.squash_spring.is_active)
+                self.assertEqual(pet._override_pose, turn2_pose)
+                # 复位落地态后验证点击放行 Q 弹回弹但不切换姿态或增加摸头计数。
+                pet._is_falling = False
+                pet._throw_vx = 0.0
+                pet._fall_velocity_y = 0.0
+                pet._motion_engine.reset_transient_effects(clear_drag_tilt=True)
+                pat_count_click = pet._settings.total_pats
+                pet._mouse_down = True
+                pet._is_dragging = False
+                click_rel = QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    body_pt,
+                    body_pt,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                pet._on_stage_mouse_release(click_rel)
+                self.assertTrue(pet._motion_engine.squash_spring.is_active)
+                self.assertEqual(pet._override_pose, turn2_pose)
+                self.assertEqual(pet._settings.total_pats, pat_count_click)
+
                 # 4. 锁定交互动作播放期与打盹模式下，同步事件不得强行打断当前动作。
                 pet._set_temporary_pose(PetState.REDHOT, 5.0, locked=True)
                 pet._show_sync_event(SyncEvent("system", "工具调用中", "tool"))

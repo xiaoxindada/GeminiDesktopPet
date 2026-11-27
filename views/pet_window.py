@@ -3598,7 +3598,7 @@ class PetWindow(QWidget):
         )
 
     def _is_sync_working_locked(self) -> bool:
-        """反重力同步工作进行中屏蔽除查看额度与贴边外的交互动作，直至本轮完成释放。"""
+        """反重力同步工作进行中屏蔽除查看额度、贴边与物理回弹交互外的切姿动作，直至本轮完成释放。"""
         return (
             self._sync_busy_active
             and self._sync_turn_pose is not None
@@ -4411,7 +4411,7 @@ class PetWindow(QWidget):
         )
 
         if self._is_sync_working_locked():
-            # 同步工作期放行贴边吸附；未贴边时仅平稳回落并保持本轮固定忙碌动作，不触发眩晕或悬浮。
+            # 同步工作期放行贴边吸附与甩动抛掷/回弹物理交互，保持本轮固定忙碌动作不触发眩晕或悬浮。
             self._try_edge_dock_or_gravity_drop(
                 release_vel=release_vel,
                 release_impulse=release_impulse,
@@ -4473,12 +4473,18 @@ class PetWindow(QWidget):
             self._reset_drag_shake_tracking()
             was_walking = self._is_walking
             self._stop_walking(immediate=True)
-            # 当前交互动作尚未播完（或按下时仍处于锁定状态）及同步工作期，点击不中断或偷跑触发动作
-            if (
-                press_started_while_locked
-                or self._is_action_playback_locked()
-                or self._is_sync_working_locked()
-            ):
+            # 当前交互动作尚未播完（或按下时仍处于锁定状态）时直接拦截；
+            # 同步工作期不切姿态与气泡，但放行纯物理 Q 弹戳击回弹反馈。
+            if press_started_while_locked or self._is_action_playback_locked():
+                return
+            if self._is_sync_working_locked():
+                if self._settings.docked_side == DockSide.NONE:
+                    local_pos = event.position()
+                    sprite_rect = self._get_local_sprite_rect()
+                    recoil_dir = -1.0 if local_pos.x() >= sprite_rect.center().x() else 1.0
+                    self._motion_engine.trigger_poke(0.09, recoil_dir)
+                    self._update_sprite_transforms()
+                    self._stage_canvas.update()
                 return
             local_pos = event.position()
             sprite_rect = self._get_local_sprite_rect()
@@ -4688,8 +4694,8 @@ class PetWindow(QWidget):
 
         self._clamp_and_apply_gravity_after_release(
             refresh_resting=refresh_resting,
-            release_vel=(0.0, 0.0) if sync_working else release_vel,
-            release_impulse=None if sync_working else release_impulse,
+            release_vel=release_vel,
+            release_impulse=release_impulse,
         )
 
     # ==================== Speech Bubble & Inline Gemini Chat ====================
