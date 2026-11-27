@@ -14,7 +14,7 @@ Assisted-by: <当前模型的代号名称>
 - **尾注**：在提交信息正文末尾附上 `Assisted-by: <当前模型的代号名称>` 尾注 新会话读取一次 例 `Assisted-by: GPT-6 Astra`, `Assisted-by: Claude Opus 5.5, Gemini 4 Carbon`
 2. **禁止未经允许不要 push**：永远不要在用户不允许的情况下 push 任何本地提交，除非用户明确指定。
 3. **提交前保持标准格式化**：代码提交 git 时需要保持标准格式化。
-4. **提交必须按职责拆分**：禁止将多个不相关或跨模块的改动打包为单次大提交；应按功能模块、逻辑边界或独立修复拆分为多个原子提交，保证每次提交职责单一且可独立编译。
+4. **提交必须按职责拆分**：禁止将多个不相关的改动打包在同一次提交中；按功能或修复职责合理区分拆分，同一职责内相互配套的改动可合并提交。
 5. **发布新版本（Tag + Release）**
    - 运行 `BuildRelease.bat --no-pause` 打包出 `out\GeminiDesktopPet-<tag>-win-x64.zip`。
    - 创建并推送 Tag 后，汇总描述(AI)自行对比和上个版本的差异, 用简洁的描述整理修改历史后，通过 `gh release create` 发布到对应 Tag 的 GitHub Release；若 Release 已存在则用 `gh release upload --clobber` 与 `gh release edit` 更新。
