@@ -97,6 +97,12 @@ class SoundService:
             PetSoundEffect.BOING: _synthesize_sweep(340, 620, 0.11, 0.16),
             PetSoundEffect.ANGRY: _synthesize_sweep(480, 220, 0.12, 0.18),
         }
+        # 按撞击/弹跳力度预合成三档 BOING 音色，运行时零主线程合成开销
+        self._boing_tiers: tuple[bytes, bytes, bytes] = (
+            _synthesize_sweep(270, 470, 0.095, 0.11),
+            self._wav_bytes[PetSoundEffect.BOING],
+            _synthesize_sweep(390, 760, 0.125, 0.21),
+        )
         self._worker = threading.Thread(
             target=self._audio_worker_loop,
             name="GeminiDesktopPetSoundWorker",
@@ -104,11 +110,15 @@ class SoundService:
         )
         self._worker.start()
 
-    def play(self, effect: PetSoundEffect) -> None:
+    def play(self, effect: PetSoundEffect, *, intensity: Optional[float] = None) -> None:
         if not self.enabled or self._disposed:
             return
         now = time.monotonic()
-        raw = self._wav_bytes.get(effect)
+        if effect == PetSoundEffect.BOING and intensity is not None:
+            lvl = max(0.0, min(1.0, float(intensity)))
+            raw = self._boing_tiers[0 if lvl < 0.35 else (1 if lvl < 0.72 else 2)]
+        else:
+            raw = self._wav_bytes.get(effect)
         if not raw:
             return
         with self._lock:

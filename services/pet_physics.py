@@ -21,33 +21,40 @@ from models.pet_state import PetState
 DRAG_SPRING_K = 220.0
 DRAG_SPRING_C = 31.5
 
-# 拖拽轨迹速度估算窗口参数（提高抛掷死区，避免普通挪动误甩出）
-TRAIL_KEEP_SEC = 0.20
-RELEASE_WINDOW_SEC = 0.15
-RELEASE_STALE_SEC = 0.14
-MIN_SPAN_SEC = 0.024
-SEG_MIN_DT_SEC = 0.010
-THROW_DEAD_ZONE_SPEED = 680.0
-MAX_THROW_SPEED = 1550.0
-PEAK_SPEED_WEIGHT = 0.35
+# 拖拽轨迹速度与甩动幅度估算参数（渐进式档位：轻推柔和收敛，大摆臂大力甩出才有强弹性）
+TRAIL_KEEP_SEC = 0.28
+RELEASE_WINDOW_SEC = 0.12
+RELEASE_STALE_SEC = 0.115
+MIN_SPAN_SEC = 0.018
+SEG_MIN_DT_SEC = 0.008
+THROW_DEAD_ZONE_SPEED = 450.0
+THROW_TERMINAL_MIN_SPEED = 280.0
+THROW_MIN_AMPLITUDE_PX = 32.0
+THROW_AMPLITUDE_REF_PX = 240.0
+THROW_LINEAR_KNEE_SPEED = 880.0
+MAX_THROW_SPEED = 1950.0
+PEAK_SPEED_WEIGHT = 0.28
 
-# 重力、反弹与地面摩擦参数（温和自然的落速与轻弹）
-DEFAULT_GRAVITY = 1350.0
-WALL_RESTITUTION = 0.48
-FLOOR_RESTITUTION = 0.28
-FLOOR_BOUNCE_MIN_VY = 620.0
-GROUND_FRICTION = 5.6
+# 重力、力度联动弹性与地面惯性滑行参数（克制柔和的弹跳上限，避免小幅发力过弹）
+DEFAULT_GRAVITY = 1560.0
+AIR_DRAG = 0.16
+WALL_RESTITUTION = 0.46
+FLOOR_RESTITUTION = 0.38
+FLOOR_BOUNCE_MIN_VY = 380.0
+GENTLE_DROP_BOUNCE_MIN_VY = 1280.0
+FLOOR_BOUNCE_TANGENT_KEEP = 0.78
+GROUND_FRICTION = 5.4
 REST_TANGENT_SPEED = 20.0
 SUBSTEP_MAX_PX = 14.0
-SUBSTEP_LIMIT = 16
+SUBSTEP_LIMIT = 18
 
-# Q 弹挤压参数（舒缓柔弹，避免抽搐感）
+# Q 弹挤压参数（按冲击力度渐进放大，轻落柔和、重砸有弹性）
 SQUASH_DURATION_SEC = 0.36
 POKE_SQUASH_DURATION_SEC = 0.32
-SQUASH_SOFT_SPEED = 320.0
-SQUASH_HARD_SPEED = 1450.0
-SQUASH_MIN_DEPTH = 0.08
-SQUASH_MAX_DEPTH = 0.19
+SQUASH_SOFT_SPEED = 300.0
+SQUASH_HARD_SPEED = 1750.0
+SQUASH_MIN_DEPTH = 0.06
+SQUASH_MAX_DEPTH = 0.21
 SQUASH_SPRING_OMEGA = 17.5
 SQUASH_SPRING_ZETA = 0.46
 # 欠阻尼弹簧单位初速的峰值偏移系数 exp(-ζ / sqrt(1 - ζ²) * arccos(ζ))，用于把深度精准映射为初速冲量
@@ -82,14 +89,38 @@ def smoothstep(progress: float) -> float:
 
 
 def soft_clamp_speed(speed: float, max_speed: float = MAX_THROW_SPEED) -> float:
-    """渐近软限速：任意力度下保持单调可区分，但平滑收敛至上限。"""
+    """线性跟手区 + C1 渐近软限速：轻中力度忠实还原手速，大力甩动单调放大并平滑收敛至上限。"""
     if speed <= 0.0 or max_speed <= 0.0:
         return 0.0
-    return max_speed * (1.0 - math.exp(-speed / max_speed))
+    knee = min(THROW_LINEAR_KNEE_SPEED, max_speed * 0.45)
+    if speed <= knee:
+        return speed
+    span = max_speed - knee
+    return knee + span * (1.0 - math.exp(-(speed - knee) / span))
+
+
+def throw_intensity_from_velocity(
+    vx: float,
+    vy: float,
+    amplitude_px: float = 0.0,
+) -> float:
+    """根据初速度与甩动行程幅度映射归一化力度（0.0~1.0），用于联动弹性、形变与音效。"""
+    spd = math.hypot(vx, vy)
+    if spd <= 1.0:
+        return 0.0
+    spd_norm = clamp(spd / MAX_THROW_SPEED, 0.0, 1.0)
+    if amplitude_px > 0.0:
+        amp_norm = clamp(
+            (amplitude_px - THROW_MIN_AMPLITUDE_PX) / (THROW_AMPLITUDE_REF_PX * 1.85),
+            0.0,
+            1.0,
+        )
+        return clamp(spd_norm * 0.72 + amp_norm * 0.28, 0.0, 1.0)
+    return spd_norm
 
 
 def landing_squash_depth(impact_vy: float) -> float:
-    """将竖直落地冲击速度（px/s）映射为下压深度（0.11~0.28）。"""
+    """将竖直落地冲击速度（px/s）映射为下压深度（0.07~0.25）。"""
     t = clamp(
         (abs(impact_vy) - SQUASH_SOFT_SPEED) / (SQUASH_HARD_SPEED - SQUASH_SOFT_SPEED),
         0.0,
@@ -165,8 +196,8 @@ class SquashSpring:
             self.vel = target_vel
 
     def trigger_stretch(self, amount: float) -> None:
-        """注入轻微纵向拉伸/横向收窄冲量（用于撞侧墙或轻弹起跳瞬间，配合运动方向不打架）。"""
-        a = clamp(amount, 0.0, 0.16)
+        """注入轻微纵向拉伸/横向收窄冲量（用于撞侧墙或起飞瞬间，配合运动方向不打架）。"""
+        a = clamp(amount, 0.0, 0.19)
         if a <= 1e-4:
             return
         target_vel = (a * self.omega) / _SQUASH_PEAK_FACTOR
@@ -174,6 +205,17 @@ class SquashSpring:
             self.vel = min(target_vel * 1.15, self.vel + target_vel * 0.6)
         else:
             self.vel = target_vel
+
+    def trigger_bounce_rebound(self, impact_depth: float) -> None:
+        """触地弹跳瞬间先瞬时吸能压扁，再沿上升方向回弹拉伸，契合真实弹性起跳节奏。"""
+        d = clamp(impact_depth, 0.0, 0.28)
+        if d <= 1e-4:
+            return
+        # 触地瞬间顺势压扁，随后注入向上回弹速度，使离地前几帧自然舒展拉长
+        contact_dip = min(0.11, d * 0.52)
+        self.offset = clamp(min(self.offset, -contact_dip), -0.28, 0.17)
+        stretch_target = clamp(d * 0.58, 0.035, 0.16)
+        self.vel = ((stretch_target + abs(self.offset) * 0.72) * self.omega) / _SQUASH_PEAK_FACTOR
 
     def step(self, dt: float) -> tuple[float, float]:
         """采用固定子步半隐式欧拉推进弹簧，返回面积近似守恒的 (scale_x, scale_y)。"""
@@ -187,20 +229,20 @@ class SquashSpring:
                 accel = -w2 * self.offset - damp * self.vel
                 self.vel += accel * sub_dt
                 self.offset += self.vel * sub_dt
-                if self.offset < -0.26:
-                    self.offset = -0.26
+                if self.offset < -0.30:
+                    self.offset = -0.30
                     if self.vel < 0.0:
                         self.vel *= -0.25
-                elif self.offset > 0.15:
-                    self.offset = 0.15
+                elif self.offset > 0.19:
+                    self.offset = 0.19
                     if self.vel > 0.0:
                         self.vel *= -0.25
             if not self.is_active:
                 self.offset = 0.0
                 self.vel = 0.0
 
-        sy = clamp(1.0 + self.offset, 0.74, 1.15)
-        sx = clamp(1.0 + (1.0 - sy) * 0.72, 0.84, 1.24)
+        sy = clamp(1.0 + self.offset, 0.70, 1.19)
+        sx = clamp(1.0 + (1.0 - sy) * 0.74, 0.82, 1.28)
         return (sx, sy)
 
 
@@ -224,8 +266,27 @@ def spring_step_1d(
     return (next_pos, next_vel)
 
 
+@dataclass(frozen=True)
+class ThrowImpulse:
+    """松手甩动估算结果：包含初速度、同向甩动行程幅度与归一化力度（0~1）。"""
+
+    vx: float = 0.0
+    vy: float = 0.0
+    amplitude_px: float = 0.0
+    raw_speed: float = 0.0
+    intensity: float = 0.0
+
+    @property
+    def speed(self) -> float:
+        return math.hypot(self.vx, self.vy)
+
+    @property
+    def is_throw(self) -> bool:
+        return self.speed > 1.0
+
+
 class DragTrailEstimator:
-    """记录拖拽末段指针轨迹并估算松手抛掷初速，过滤高回报率鼠标微抖。"""
+    """记录拖拽末段指针轨迹并综合末段速度与甩动行程幅度估算抛掷冲量，过滤高回报率鼠标微抖与慢放误触。"""
 
     def __init__(self) -> None:
         self._samples: deque[tuple[float, float, float]] = deque()
@@ -239,14 +300,14 @@ class DragTrailEstimator:
         while len(self._samples) > 2 and self._samples[0][2] < cutoff:
             self._samples.popleft()
 
-    def estimate_release_velocity(self, now_mono: float) -> tuple[float, float]:
+    def estimate_release_impulse(self, now_mono: float) -> ThrowImpulse:
         if len(self._samples) < 2:
-            return (0.0, 0.0)
+            return ThrowImpulse()
 
         last_x, last_y, last_t = self._samples[-1]
         # 松手前短暂停顿视为温柔放下，不带残余甩出速度
         if (now_mono - last_t) > RELEASE_STALE_SEC:
-            return (0.0, 0.0)
+            return ThrowImpulse()
 
         window_start = last_t - RELEASE_WINDOW_SEC
         window = [s for s in self._samples if s[2] >= window_start]
@@ -256,31 +317,108 @@ class DragTrailEstimator:
         first_x, first_y, first_t = window[0]
         span = last_t - first_t
         if span < MIN_SPAN_SEC:
-            return (0.0, 0.0)
+            return ThrowImpulse()
 
         avg_vx = (last_x - first_x) / span
         avg_vy = (last_y - first_y) / span
         avg_speed = math.hypot(avg_vx, avg_vy)
 
-        # 计算有效分段峰值速度，弥补快甩集中在末段被窗口均值拉低的问题
+        # 按最小步长合并高回报率采样，计算指数近时加权速度（准确贴合甩手末段方向）与峰值速度
+        w_vx_sum = 0.0
+        w_vy_sum = 0.0
+        w_total = 0.0
         peak_speed = avg_speed
         anchor_x, anchor_y, anchor_t = window[0]
         for sx, sy, st in window[1:]:
             seg_dt = st - anchor_t
             if seg_dt < SEG_MIN_DT_SEC:
                 continue
-            seg_spd = math.hypot(sx - anchor_x, sy - anchor_y) / seg_dt
+            seg_vx = (sx - anchor_x) / seg_dt
+            seg_vy = (sy - anchor_y) / seg_dt
+            seg_spd = math.hypot(seg_vx, seg_vy)
             if seg_spd > peak_speed:
                 peak_speed = seg_spd
+            age = max(0.0, last_t - (anchor_t + st) * 0.5)
+            weight = math.exp(-age / 0.055) * seg_dt
+            w_vx_sum += seg_vx * weight
+            w_vy_sum += seg_vy * weight
+            w_total += weight
             anchor_x, anchor_y, anchor_t = sx, sy, st
 
-        raw_speed = avg_speed * (1.0 - PEAK_SPEED_WEIGHT) + peak_speed * PEAK_SPEED_WEIGHT
-        if raw_speed < THROW_DEAD_ZONE_SPEED or avg_speed <= 1e-3:
-            return (0.0, 0.0)
+        if w_total > 1e-6:
+            dir_vx = w_vx_sum / w_total
+            dir_vy = w_vy_sum / w_total
+            weighted_speed = math.hypot(dir_vx, dir_vy)
+        else:
+            dir_vx, dir_vy = avg_vx, avg_vy
+            weighted_speed = avg_speed
 
-        clamped_speed = soft_clamp_speed(raw_speed, MAX_THROW_SPEED)
-        scale = clamped_speed / avg_speed
-        return (avg_vx * scale, avg_vy * scale)
+        if weighted_speed <= 1e-3:
+            return ThrowImpulse()
+
+        # 校验末段收手速度：拖动很快但松手前明显刹停时视为“平稳放下”，避免误甩出
+        tail_cutoff = last_t - 0.044
+        tail_anchor = window[0]
+        for s in reversed(window[:-1]):
+            tail_anchor = s
+            if s[2] <= tail_cutoff:
+                break
+        tail_dt = last_t - tail_anchor[2]
+        if tail_dt >= SEG_MIN_DT_SEC:
+            terminal_speed = math.hypot(last_x - tail_anchor[0], last_y - tail_anchor[1]) / tail_dt
+            if terminal_speed < THROW_TERMINAL_MIN_SPEED:
+                return ThrowImpulse()
+
+        ux = dir_vx / weighted_speed
+        uy = dir_vy / weighted_speed
+
+        # 沿松手方向逆向累计连续同向甩动行程幅度（遇到反向蓄力或长停顿即截止）
+        samples = list(self._samples)
+        amplitude_px = 0.0
+        for idx in range(len(samples) - 1, 0, -1):
+            x1, y1, t1 = samples[idx]
+            x0, y0, t0 = samples[idx - 1]
+            if (t1 - t0) > 0.075:
+                break
+            proj = (x1 - x0) * ux + (y1 - y0) * uy
+            if proj < -4.0:
+                break
+            if proj > 0.0:
+                amplitude_px += proj
+
+        if amplitude_px < THROW_MIN_AMPLITUDE_PX:
+            return ThrowImpulse()
+
+        # 限制单段尖峰权重防传感器毛刺，再按甩动幅度动态放大（短抖轻弹、大摆臂强力甩飞）
+        capped_peak = min(peak_speed, max(weighted_speed * 1.9, avg_speed * 1.9))
+        base_speed = weighted_speed * (1.0 - PEAK_SPEED_WEIGHT) + capped_peak * PEAK_SPEED_WEIGHT
+        if base_speed < THROW_DEAD_ZONE_SPEED:
+            return ThrowImpulse()
+
+        # 渐进式起势与幅度缩放：小幅轻甩压低输出不炸飞，大幅大力甩动才释放完整速度
+        dead_ramp = 0.24 + 0.76 * smoothstep((base_speed - THROW_DEAD_ZONE_SPEED) / 480.0)
+        amp_norm = clamp(
+            (amplitude_px - THROW_MIN_AMPLITUDE_PX) / (THROW_AMPLITUDE_REF_PX * 1.85),
+            0.0,
+            1.0,
+        )
+        amp_gain = 0.50 + 0.50 * (amp_norm ** 1.2)
+        effective_raw = base_speed * dead_ramp * amp_gain
+        clamped_speed = soft_clamp_speed(effective_raw, MAX_THROW_SPEED)
+        vx = ux * clamped_speed
+        vy = uy * clamped_speed
+        intensity = throw_intensity_from_velocity(vx, vy, amplitude_px)
+        return ThrowImpulse(
+            vx=vx,
+            vy=vy,
+            amplitude_px=amplitude_px,
+            raw_speed=effective_raw,
+            intensity=intensity,
+        )
+
+    def estimate_release_velocity(self, now_mono: float) -> tuple[float, float]:
+        imp = self.estimate_release_impulse(now_mono)
+        return (imp.vx, imp.vy)
 
 
 @dataclass
@@ -302,6 +440,8 @@ class ThrowStepResult:
     at_rest: bool
     bounced_floor: bool = False
     bounced_wall_side: int = 0  # -1=左壁, 1=右壁, 2=顶边, 0=未碰壁
+    wall_impact_speed: float = 0.0
+    is_sliding_on_floor: bool = False
 
 
 def step_throw_physics(
@@ -316,12 +456,16 @@ def step_throw_physics(
     wall_restitution: float = WALL_RESTITUTION,
     floor_restitution: float = FLOOR_RESTITUTION,
     ground_friction: float = GROUND_FRICTION,
+    bounce_energy: float = 1.0,
+    air_drag: float = AIR_DRAG,
 ) -> ThrowStepResult:
-    """带子步积分的 2D 重力下落、侧壁反弹与落地摩擦步进。"""
+    """带子步积分的 2D 重力抛掷、力度联动多段弹性反弹与地面惯性滑行步进。"""
     step_dt = min(max(dt, 0.001), 0.05)
     est_disp = max(abs(state.vx) * step_dt, abs(state.vy) * step_dt + 0.5 * gravity * step_dt * step_dt)
     substeps = max(1, min(SUBSTEP_LIMIT, int(math.ceil(est_disp / SUBSTEP_MAX_PX))))
     sub_dt = step_dt / float(substeps)
+    energy = clamp(float(bounce_energy), 0.0, 1.20)
+    min_bounce_vy = FLOOR_BOUNCE_MIN_VY if energy >= 0.42 else GENTLE_DROP_BOUNCE_MIN_VY
 
     x = state.x
     y = state.y
@@ -331,52 +475,106 @@ def step_throw_physics(
     bounced_wall = False
     bounced_floor = False
     bounced_wall_side = 0
+    wall_impact_speed = 0.0
+    # 撞壁/触地弹跳发生在本帧中段子步时，保留当帧贴边/触地接触态（反弹速度已生效、下一帧离壁起跳），
+    # 防止高速下同帧反弹过远造成“未碰边就隔空回弹”的视觉失真。
+    hold_contact_x = False
+    hold_contact_y = False
 
     for _ in range(substeps):
         was_grounded = y >= floor_y - 0.5 and abs(vy) < 1.0
-        if not was_grounded:
+        if not was_grounded and not hold_contact_y:
             vy += gravity * sub_dt
+            if air_drag > 0.0:
+                drag_decay = math.exp(-air_drag * sub_dt)
+                if not hold_contact_x:
+                    vx *= drag_decay
+                vy *= drag_decay
 
-        x += vx * sub_dt
-        y += vy * sub_dt
+        if not hold_contact_x:
+            x += vx * sub_dt
+        if not hold_contact_y:
+            y += vy * sub_dt
 
-        # 左右边界反弹
-        if x < min_x:
+        # 左右边界反弹：弹性随撞壁速度与甩动力度克制联动，避免小幅发力弹成弹珠
+        if not hold_contact_x and x < min_x:
             x = min_x
             if vx < 0.0:
-                vx = -vx * wall_restitution
+                imp = abs(vx)
+                eff_wall_e = clamp(
+                    wall_restitution
+                    * (0.78 + 0.24 * min(1.0, imp / 1350.0))
+                    * clamp(energy, 0.55, 1.12),
+                    0.0,
+                    0.56,
+                )
+                vx = -vx * eff_wall_e
                 bounced_wall = True
                 bounced_wall_side = -1
-        elif x > max_x:
+                wall_impact_speed = max(wall_impact_speed, imp)
+                hold_contact_x = True
+        elif not hold_contact_x and x > max_x:
             x = max_x
             if vx > 0.0:
-                vx = -vx * wall_restitution
+                imp = abs(vx)
+                eff_wall_e = clamp(
+                    wall_restitution
+                    * (0.78 + 0.24 * min(1.0, imp / 1350.0))
+                    * clamp(energy, 0.55, 1.12),
+                    0.0,
+                    0.56,
+                )
+                vx = -vx * eff_wall_e
                 bounced_wall = True
                 bounced_wall_side = 1
+                wall_impact_speed = max(wall_impact_speed, imp)
+                hold_contact_x = True
 
         # 顶边碰撞
-        if y < min_y:
+        if not hold_contact_y and y < min_y:
             y = min_y
             if vy < 0.0:
-                vy = -vy * wall_restitution
+                imp = abs(vy)
+                eff_ceil_e = clamp(
+                    wall_restitution
+                    * (0.74 + 0.22 * min(1.0, imp / 1350.0))
+                    * clamp(energy, 0.55, 1.08),
+                    0.0,
+                    0.52,
+                )
+                vy = -vy * eff_ceil_e
                 bounced_wall = True
+                wall_impact_speed = max(wall_impact_speed, imp)
+                hold_contact_y = True
                 if bounced_wall_side == 0:
                     bounced_wall_side = 2
 
-        # 地面碰撞与触地衰减
-        if y >= floor_y:
+        # 地面碰撞：按冲击速度与甩动力度渐进衰减弹跳，收尾转入短促惯性滑行
+        if not hold_contact_y and y >= floor_y:
             y = floor_y
             if vy > 0.0:
                 if not was_grounded:
                     landed_impact_vy = max(landed_impact_vy, vy)
-                if vy >= FLOOR_BOUNCE_MIN_VY and abs(vx) > 90.0:
-                    # 仅在明显抛掷且高冲击时做一次轻弹，普通竖直松手直接柔落
-                    vy = -vy * floor_restitution
-                    bounced_floor = True
+                if vy >= min_bounce_vy and energy > 0.05:
+                    eff_floor_e = clamp(
+                        floor_restitution
+                        * (0.72 + 0.34 * min(1.0, vy / 1350.0))
+                        * energy,
+                        0.0,
+                        0.50,
+                    )
+                    rebound_vy = vy * eff_floor_e
+                    if rebound_vy >= 135.0:
+                        vy = -rebound_vy
+                        vx *= FLOOR_BOUNCE_TANGENT_KEEP
+                        bounced_floor = True
+                        hold_contact_y = True
+                    else:
+                        vy = 0.0
                 else:
                     vy = 0.0
-            # 触地切向摩擦指数衰减
-            if abs(vx) > 0.0:
+            # 触地切向摩擦指数衰减（仅在贴地滑行时生效，保留弹跳间水平惯性）
+            if not hold_contact_x and abs(vy) < 1.0 and abs(vx) > 0.0:
                 vx *= math.exp(-ground_friction * sub_dt)
                 if abs(vx) < REST_TANGENT_SPEED:
                     vx = 0.0
@@ -386,6 +584,7 @@ def step_throw_physics(
         y = floor_y
         vx = 0.0
         vy = 0.0
+    is_sliding_on_floor = (not at_rest) and y >= floor_y - 0.5 and abs(vy) < 1.0 and abs(vx) >= REST_TANGENT_SPEED
 
     return ThrowStepResult(
         x=x,
@@ -397,6 +596,8 @@ def step_throw_physics(
         at_rest=at_rest,
         bounced_floor=bounced_floor,
         bounced_wall_side=bounced_wall_side,
+        wall_impact_speed=wall_impact_speed,
+        is_sliding_on_floor=is_sliding_on_floor,
     )
 
 
@@ -958,6 +1159,53 @@ class BristleBurstController:
         )
 
 
+class InertialTiltSpring:
+    """二阶欠阻尼惯性倾角弹簧：承接撞壁反弹甩头、落地弹跳力矩与刹停点头惯性。"""
+
+    def __init__(self, omega: float = 14.5, zeta: float = 0.44, max_angle: float = 24.0) -> None:
+        self.omega = float(omega)
+        self.zeta = float(zeta)
+        self.max_angle = float(max_angle)
+        self.angle = 0.0
+        self.vel = 0.0
+
+    @property
+    def is_active(self) -> bool:
+        return abs(self.angle) > 0.04 or abs(self.vel) > 0.4
+
+    def reset(self) -> None:
+        self.angle = 0.0
+        self.vel = 0.0
+
+    def trigger(self, direction: float, peak_deg: float) -> None:
+        mag = clamp(abs(peak_deg), 0.0, self.max_angle)
+        if mag <= 0.05:
+            return
+        sign = -1.0 if direction < 0.0 else 1.0
+        # 复用欠阻尼峰值系数估算所需角速度冲量，保证不同阻尼下峰值直观可控
+        z = clamp(self.zeta, 0.1, 0.95)
+        peak_factor = math.exp(-z / math.sqrt(1.0 - z * z) * math.acos(z))
+        target_vel = sign * (mag * self.omega) / peak_factor
+        self.vel = clamp(self.vel * 0.40 + target_vel, -420.0, 420.0)
+
+    def step(self, dt: float) -> float:
+        step_dt = min(max(dt, 0.0), 0.05)
+        if step_dt > 0.0 and self.is_active:
+            substeps = max(1, min(8, int(math.ceil(step_dt * 240.0))))
+            sub_dt = step_dt / float(substeps)
+            w2 = self.omega * self.omega
+            damp = 2.0 * self.zeta * self.omega
+            for _ in range(substeps):
+                accel = -w2 * self.angle - damp * self.vel
+                self.vel += accel * sub_dt
+                self.angle += self.vel * sub_dt
+            self.angle = clamp(self.angle, -self.max_angle, self.max_angle)
+            if not self.is_active:
+                self.angle = 0.0
+                self.vel = 0.0
+        return self.angle
+
+
 @dataclass(frozen=True)
 class PoseMotionInput:
     """单帧姿态运动学计算所需的纯状态快照（无 Qt 窗口依赖）。"""
@@ -987,13 +1235,15 @@ class PoseMotionInput:
     walk_phase: Optional[float] = None
     walk_gait_blend: Optional[float] = None
     walk_speed_ratio: Optional[float] = None
+    throw_vy: float = 0.0
+    is_ground_sliding: bool = False
     snap: bool = False
 
 
 class PetMotionEngine:
     """桌宠统一运动学与次级物理引擎。
 
-    整合姿态指数阻尼、二阶果冻缩放弹簧、连戳歪头弹簧、炸毛突发曲线、
+    整合姿态指数阻尼、二阶果冻缩放弹簧、连戳歪头弹簧、抛掷惯性倾角弹簧、炸毛突发曲线、
     帧率无关拖拽倾角衰减、速度锁定行走状态机、步行骨架运动学与亚像素位移残差，输出单帧 TransformSnapshot。
     """
 
@@ -1002,8 +1252,10 @@ class PetMotionEngine:
         self.walk = WalkLocomotionController()
         self.squash_spring = SquashSpring()
         self.poke_tilt_spring = PokeTiltSpring()
+        self.throw_tilt_spring = InertialTiltSpring()
         self.bristle_burst = BristleBurstController()
         self.drag_tilt_vx = 0.0
+        self.drag_vel_y = 0.0
         self.subpixel_x = 0.0
         self.subpixel_y = 0.0
         self.chibi_kinematics = default_chibi_walk_kinematics()
@@ -1018,28 +1270,93 @@ class PetMotionEngine:
         self.subpixel_x = 0.0
         self.subpixel_y = 0.0
 
+    def push_drag_velocity(self, vx: float, vy: float) -> None:
+        """拖拽二维速度低通平滑，驱动角色横向甩倾与纵向牵拉惯性形变。"""
+        self.drag_tilt_vx = self.drag_tilt_vx * 0.72 + vx * 0.28
+        self.drag_vel_y = self.drag_vel_y * 0.72 + vy * 0.28
+
     def push_drag_velocity_x(self, vx: float) -> None:
-        """拖拽横向速度低通平滑，驱动角色随手势微倾。"""
+        """拖拽横向速度低通平滑（兼容旧调用），驱动角色随手势微倾。"""
         self.drag_tilt_vx = self.drag_tilt_vx * 0.72 + vx * 0.28
 
     def decay_drag_tilt(self, dt: float) -> None:
-        """使用帧率无关指数阻尼衰减拖拽倾角速度，替代旧版线性 (1 - dt * 12)。"""
+        """使用帧率无关指数阻尼衰减拖拽惯性速度，替代旧版线性 (1 - dt * 12)。"""
         if self.drag_tilt_vx != 0.0:
             self.drag_tilt_vx = damp_exp(self.drag_tilt_vx, 0.0, 12.0, dt)
             if abs(self.drag_tilt_vx) <= 1.0:
                 self.drag_tilt_vx = 0.0
+        if self.drag_vel_y != 0.0:
+            self.drag_vel_y = damp_exp(self.drag_vel_y, 0.0, 12.0, dt)
+            if abs(self.drag_vel_y) <= 1.0:
+                self.drag_vel_y = 0.0
 
     def trigger_poke(self, depth: float, direction: float) -> None:
         """连戳反馈：向缩放与歪头双弹簧注入连续冲量，连续点击零闪跳。"""
         self.squash_spring.trigger_squash(depth)
         self.poke_tilt_spring.trigger(direction, peak_deg=3.2)
 
+    def trigger_throw_launch(self, vx: float, vy: float, intensity: float) -> None:
+        """松手甩出瞬间按渐进力度注入离手拉伸与角动量，小幅轻甩保持柔和。"""
+        lvl = clamp(intensity, 0.0, 1.0)
+        if lvl <= 0.04:
+            return
+        lvl_p = lvl ** 1.35
+        self.squash_spring.trigger_stretch(0.015 + 0.085 * lvl_p)
+        if abs(vx) > 90.0:
+            self.throw_tilt_spring.trigger(1.0 if vx > 0.0 else -1.0, 1.2 + 6.8 * lvl_p)
+
+    def trigger_wall_rebound(self, side: int, impact_speed: float) -> None:
+        """撞击左右侧壁或顶边时按法向速度渐进缩放挤压形变与反向甩头回弹力矩。"""
+        lvl = clamp((abs(impact_speed) - 220.0) / 1500.0, 0.0, 1.0)
+        lvl_p = lvl ** 1.25
+        if side in (-1, 1):
+            # 侧壁水平受压在面积守恒下表现为纵向拉伸，并向反弹方向给出惯性摆角
+            self.squash_spring.trigger_stretch(0.022 + 0.095 * lvl_p)
+            self.throw_tilt_spring.trigger(-float(side), 2.0 + 10.0 * lvl_p)
+        elif side == 2:
+            self.squash_spring.trigger_squash(0.030 + 0.105 * lvl_p)
+            self.throw_tilt_spring.trigger(1.0 if self.drag_tilt_vx >= 0.0 else -1.0, 1.5 + 4.8 * lvl_p)
+
+    def trigger_floor_impact(
+        self,
+        impact_vy: float,
+        vx: float,
+        *,
+        bounced: bool,
+        intensity: float = 0.0,
+    ) -> float:
+        """触地弹跳或落稳瞬间按竖直冲击速度与甩动力度施加果冻形变与切向惯性倾角，返回下压深度。"""
+        base_depth = landing_squash_depth(impact_vy)
+        boost = 1.0 + 0.16 * clamp(intensity, 0.0, 1.0)
+        depth = clamp(base_depth * boost, SQUASH_MIN_DEPTH, 0.28)
+        if bounced:
+            self.squash_spring.trigger_bounce_rebound(depth)
+            if abs(vx) > 60.0:
+                torque_deg = clamp((abs(vx) / 1100.0) * (3.5 + 10.0 * (depth / 0.25)), 1.8, 12.0)
+                self.throw_tilt_spring.trigger(1.0 if vx > 0.0 else -1.0, torque_deg)
+        else:
+            self.squash_spring.trigger_squash(depth)
+            if abs(vx) > 120.0:
+                # 高速落地转入滑行时叠加轻微向后制动仰角
+                self.throw_tilt_spring.trigger(-1.0 if vx > 0.0 else 1.0, clamp(abs(vx) / 220.0, 1.5, 8.0))
+        return depth
+
+    def trigger_skid_brake_nod(self, last_vx: float) -> None:
+        """高速滑行完全刹停时补一个顺惯性方向的小幅前倾点头回正。"""
+        if abs(last_vx) > 55.0:
+            self.throw_tilt_spring.trigger(
+                1.0 if last_vx > 0.0 else -1.0,
+                clamp(abs(last_vx) / 240.0, 1.2, 6.5),
+            )
+
     def reset_transient_effects(self, *, clear_drag_tilt: bool = False) -> None:
         self.squash_spring.reset()
         self.poke_tilt_spring.reset()
+        self.throw_tilt_spring.reset()
         self.clear_subpixel_offset()
         if clear_drag_tilt:
             self.drag_tilt_vx = 0.0
+            self.drag_vel_y = 0.0
 
     def evaluate(self, state: PoseMotionInput) -> TransformSnapshot:
         """根据当前业务姿态快照推进所有阻尼/弹簧/骨骼状态并返回最终渲染变换。"""
@@ -1069,8 +1386,10 @@ class PetMotionEngine:
             if dock_rem > 0.001:
                 angle += side_sign * 8.0 * dock_rem
         elif state.is_dragging and not state.is_sync_working_locked:
-            angle = clamp(self.drag_tilt_vx * 0.009, -12.0, 12.0)
-            sy = 1.02
+            angle = clamp(self.drag_tilt_vx * 0.0095, -14.0, 14.0)
+            drag_stretch = clamp(-self.drag_vel_y * 0.000032, -0.040, 0.055)
+            sy = 1.02 + drag_stretch
+            sx = clamp(1.0 - drag_stretch * 0.58, 0.95, 1.04)
             if state.override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
                 if state.override_pose == PetState.REDHOT:
                     impulse_tx = (math.sin(t * 64.0) * 0.7 + math.cos(t * 98.0) * 0.3) * (5.6 * s)
@@ -1188,12 +1507,25 @@ class PetMotionEngine:
                 side_sign = 1.0 if state.docked_side == DockSide.LEFT else -1.0
                 angle = side_sign * 1.2 * math.sin(t * 1.2)
 
-        # 飞行抛掷期间按水平速度叠加坡度倾角，增强惯性立体感
-        if state.is_falling and abs(state.throw_vx) > 40.0:
-            angle += clamp(state.throw_vx * 0.009, -14.0, 14.0)
+        # 抛掷飞行与接地滑行惯性反馈：空中随速度俯仰拉伸，落地滑行时向后蹬地抗制动
+        if state.is_falling:
+            if state.is_ground_sliding:
+                angle += clamp(-state.throw_vx * 0.011, -11.0, 11.0)
+                skid_crouch = clamp(abs(state.throw_vx) / 4200.0, 0.0, 0.036)
+                sy *= 1.0 - skid_crouch
+                sx *= 1.0 + skid_crouch * 0.72
+            else:
+                if abs(state.throw_vx) > 30.0:
+                    vx_tilt = clamp(state.throw_vx * 0.010, -16.0, 16.0)
+                    arc_pitch = clamp(state.throw_vx * state.throw_vy * 1.6e-6, -4.5, 4.5)
+                    angle += clamp(vx_tilt + arc_pitch, -18.0, 18.0)
+                if abs(state.throw_vy) > 280.0:
+                    air_stretch = clamp((abs(state.throw_vy) - 280.0) / 2600.0 * 0.055, 0.0, 0.055)
+                    sy *= 1.0 + air_stretch
+                    sx *= 1.0 - air_stretch * 0.65
 
         # 基础姿态走帧率无关指数阻尼，抛掷飞行期提高收敛速度让撞墙倾角反转更干脆
-        damp_speed = 14.5 if state.is_falling else 7.5
+        damp_speed = 16.0 if state.is_falling else 7.5
         damped = self.damper.step(
             facing_sign=facing_sign,
             scale_x=sx,
@@ -1212,13 +1544,15 @@ class PetMotionEngine:
         final_tx = damped.trans_x + impulse_tx + self.subpixel_x
         final_ty = damped.trans_y + impulse_ty + self.subpixel_y
 
-        # 落地/弹跳/撞墙/戳击统一经由二阶果冻缩放弹簧与歪头弹簧叠加，全程 C1 连续无闪跳
+        # 落地/弹跳/撞墙/戳击统一经由二阶果冻缩放弹簧与惯性倾角弹簧叠加，全程 C1 连续无闪跳
         if self.squash_spring.is_active:
             ssx, ssy = self.squash_spring.step(state.dt)
             final_sx *= ssx
             final_sy *= ssy
         if self.poke_tilt_spring.is_active:
             final_angle += self.poke_tilt_spring.step(state.dt)
+        if self.throw_tilt_spring.is_active:
+            final_angle += self.throw_tilt_spring.step(state.dt)
 
         self.snapshot = TransformSnapshot(
             facing_sign=damped.facing_sign,
@@ -1355,6 +1689,35 @@ class ParticleSystem:
                 math.cos(ang) * spd,
                 -24.0 - random.random() * 18.0,
                 1.05,
+            )
+
+    def spawn_impact_burst(
+        self,
+        x: float,
+        y: float,
+        nx: float,
+        ny: float,
+        intensity: float,
+    ) -> None:
+        """按撞墙/落地冲击力度沿法向扇面迸发轻盈星尘粒子，强化力度手感。"""
+        lvl = clamp(intensity, 0.0, 1.0)
+        count = 2 if lvl < 0.55 else (3 if lvl < 0.85 else 4)
+        base_ang = math.atan2(ny, nx)
+        palette = ("#FDE047", "#38BDF8", "#C4B5FD", "#F9A8D4")
+        glyphs = ("✦", "✧", "⋆", "✦")
+        spread = 1.35
+        for i in range(count):
+            frac = (i / max(1, count - 1) - 0.5) if count > 1 else 0.0
+            ang = base_ang + frac * spread + (random.random() - 0.5) * 0.25
+            spd = (45.0 + 75.0 * lvl) * (0.78 + 0.42 * random.random())
+            self.spawn(
+                glyphs[i % len(glyphs)],
+                palette[i % len(palette)],
+                x,
+                y,
+                math.cos(ang) * spd,
+                math.sin(ang) * spd,
+                0.42 + 0.26 * lvl,
             )
 
     def step(self, dt: float) -> None:

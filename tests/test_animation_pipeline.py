@@ -215,10 +215,38 @@ class TestPetPhysics(unittest.TestCase):
         vx_still, vy_still = est.estimate_release_velocity(t0 + 5 * 0.016 + 0.30)
         self.assertEqual((vx_still, vy_still), (0.0, 0.0))
 
+        # 甩动幅度与力度应单调区分：短轻甩 < 中等抛掷 < 大幅大力甩飞；末段刹停与微抖均归零
+        def sample_impulse(points: list[tuple[float, float, float]]):
+            tr = DragTrailEstimator()
+            t = 20.0
+            for x, y, dt in points:
+                t += dt
+                tr.add_sample(x, y, t)
+            return tr.estimate_release_impulse(t + 0.01)
+
+        brake_imp = sample_impulse(
+            [(200.0 + i * 24.0, 300.0, 0.016) for i in range(9)]
+            + [(392.0 + i * 1.2, 300.0, 0.016) for i in range(1, 5)]
+        )
+        self.assertFalse(brake_imp.is_throw)
+        jitter_imp = sample_impulse([(400.0, 300.0, 0.0), (407.0, 298.0, 0.016), (414.0, 295.0, 0.016)])
+        self.assertFalse(jitter_imp.is_throw)
+
+        light_imp = sample_impulse([(400.0 + i * 11.0, 360.0 - i * 4.0, 0.016) for i in range(7)])
+        med_imp = sample_impulse([(400.0 + i * 22.0, 360.0 - i * 10.0, 0.016) for i in range(9)])
+        hard_imp = sample_impulse([(200.0 + i * 45.0, 420.0 - i * 20.0, 0.016) for i in range(11)])
+        self.assertTrue(light_imp.is_throw)
+        self.assertLess(light_imp.speed, med_imp.speed)
+        self.assertLess(med_imp.speed, hard_imp.speed)
+        self.assertLess(light_imp.intensity, med_imp.intensity)
+        self.assertLess(med_imp.intensity, hard_imp.intensity)
+        self.assertLess(light_imp.amplitude_px, hard_imp.amplitude_px)
+
     def test_throw_physics_wall_bounce_and_settle(self) -> None:
         state = ThrowBodyState(x=20.0, y=100.0, vx=-900.0, vy=-100.0)
         bounced = False
         landed = False
+        max_wall_imp = 0.0
         for _ in range(180):
             res = step_throw_physics(
                 state,
@@ -230,14 +258,100 @@ class TestPetPhysics(unittest.TestCase):
             )
             state = ThrowBodyState(res.x, res.y, res.vx, res.vy)
             bounced = bounced or res.bounced_wall
+            max_wall_imp = max(max_wall_imp, res.wall_impact_speed)
             if res.landed_impact_vy > 0.0:
                 landed = True
             if res.at_rest:
                 break
         self.assertTrue(bounced)
+        self.assertGreater(max_wall_imp, 700.0)
         self.assertTrue(landed)
         self.assertAlmostEqual(state.y, 300.0, delta=0.5)
         self.assertEqual(state.vx, 0.0)
+
+        # 力度联动弹跳与惯性反馈：大力下砸与大幅甩动比轻甩弹跳更高且触地压扁→回弹拉伸、滑行后仰
+        def run_bounce_stats(vx: float, vy: float, energy: float) -> tuple[int, float, bool]:
+            st = ThrowBodyState(x=300.0, y=160.0, vx=vx, vy=vy)
+            bounces = 0
+            peak_h = 0.0
+            in_b = False
+            saw_slide = False
+            for _ in range(260):
+                r = step_throw_physics(
+                    st,
+                    1.0 / 60.0,
+                    min_x=0.0,
+                    max_x=1200.0,
+                    min_y=0.0,
+                    floor_y=400.0,
+                    bounce_energy=energy,
+                )
+                st = ThrowBodyState(r.x, r.y, r.vx, r.vy)
+                if r.bounced_floor:
+                    bounces += 1
+                    in_b = True
+                elif in_b:
+                    peak_h = max(peak_h, 400.0 - r.y)
+                if r.is_sliding_on_floor:
+                    saw_slide = True
+                if r.at_rest:
+                    break
+            return (bounces, peak_h, saw_slide)
+
+        gentle_b, _, _ = run_bounce_stats(0.0, 0.0, 0.16)
+        self.assertEqual(gentle_b, 0)
+        small_b, small_h, small_slide = run_bounce_stats(320.0, -100.0, 0.25)
+        self.assertEqual(small_b, 0)
+        self.assertEqual(small_h, 0.0)
+        self.assertTrue(small_slide)
+        med_b, med_h, med_slide = run_bounce_stats(980.0, -320.0, 0.56)
+        hard_b, hard_h, hard_slide = run_bounce_stats(1800.0, -620.0, 1.12)
+        slam_b, slam_h, _ = run_bounce_stats(0.0, 1450.0, 0.95)
+        self.assertGreaterEqual(med_b, 1)
+        self.assertLess(med_h, 45.0)
+        self.assertGreater(hard_h, med_h * 2.0)
+        self.assertGreaterEqual(hard_b, med_b)
+        self.assertTrue(med_slide and hard_slide)
+        self.assertGreaterEqual(slam_b, 1)
+        self.assertGreater(slam_h, 80.0)
+        self.assertLess(slam_h, 190.0)
+
+        # 验证次级物理反馈：触地弹跳先压扁再回弹拉伸，地面滑行呈抗制动后仰角
+        eng = PetMotionEngine()
+        eng.trigger_floor_impact(1200.0, 600.0, bounced=True, intensity=0.8)
+        _, sy0 = eng.squash_spring.step(0.0)
+        self.assertLess(sy0, 0.96)
+        max_sy = sy0
+        for _ in range(20):
+            _, sy = eng.squash_spring.step(1.0 / 60.0)
+            max_sy = max(max_sy, sy)
+        self.assertGreater(max_sy, 1.03)
+
+        eng_slide = PetMotionEngine()
+        snap_slide = eng_slide.evaluate(
+            PoseMotionInput(
+                anim_time=1.0,
+                dt=0.25,
+                scale=1.0,
+                docked_side=DockSide.NONE,
+                current_state=PetState.IDLE,
+                override_pose=None,
+                is_dragging=False,
+                is_sync_working_locked=False,
+                is_walking=False,
+                walk_dir=1,
+                mouse_down=False,
+                is_falling=True,
+                throw_vx=650.0,
+                throw_vy=0.0,
+                is_ground_sliding=True,
+                is_sleeping=False,
+                is_dozing=False,
+                anti_gravity_mode=False,
+                is_animated_clip=False,
+            )
+        )
+        self.assertLess(snap_slide.angle, -2.0)
 
     def test_transform_damper_keeps_facing_sign_separate_from_scale(self) -> None:
         damper = TransformDamper()

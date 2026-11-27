@@ -94,9 +94,10 @@ from services.pet_physics import (
     PetMotionEngine,
     PoseMotionInput,
     ThrowBodyState,
+    ThrowImpulse,
     TransformSnapshot,
-    landing_squash_depth,
     step_throw_physics,
+    throw_intensity_from_velocity,
 )
 from services.settings_service import SettingsService
 from services.shared_menu import MENU_SEPARATOR, populate_shared_menu
@@ -773,6 +774,8 @@ class PetWindow(QWidget):
         self._is_falling = False
         self._throw_vx = 0.0
         self._fall_velocity_y = 0.0
+        self._throw_intensity = 0.0
+        self._is_ground_sliding = False
         self._throw_pos_x: Optional[float] = None
         self._throw_pos_y: Optional[float] = None
         self._walk_pos_x: Optional[float] = None
@@ -1559,6 +1562,8 @@ class PetWindow(QWidget):
         self._is_falling = False
         self._throw_vx = 0.0
         self._fall_velocity_y = 0.0
+        self._throw_intensity = 0.0
+        self._is_ground_sliding = False
         self._throw_pos_x = None
         self._throw_pos_y = None
         self._walk_pos_x = None
@@ -1939,18 +1944,25 @@ class PetWindow(QWidget):
             )
         return self._compute_bubble_default_pos(bubble_size, pet_x=pet_x, pet_y=pet_y)
 
-    def _actual_logical_window_x(self, target_ix: int) -> float:
-        """返回窗口落在整数逻辑坐标 target_ix 时对应的真实逻辑 X（消除 125%/150% 分数 DPI 奇偶物理像素锯齿）。"""
+    def _actual_logical_window_pos(self, target_ix: int, target_iy: int) -> tuple[float, float]:
+        """返回窗口落在整数逻辑坐标时对应的真实逻辑 (x, y)，消除 125%/150% 分数 DPI 奇偶物理像素锯齿。"""
         if os.name != "nt":
-            return float(target_ix)
+            return (float(target_ix), float(target_iy))
         dpr = max(1.0, float(self.devicePixelRatioF()))
         if abs(dpr - round(dpr)) < 1e-3:
-            return float(target_ix)
+            return (float(target_ix), float(target_iy))
         screen = self.screen()
-        sx0 = float(screen.geometry().x()) if screen is not None else 0.0
-        rel = (float(target_ix) - sx0) * dpr
-        phys = int(math.floor(rel + 0.5)) if rel >= 0.0 else -int(math.floor(-rel + 0.5))
-        return sx0 + float(phys) / dpr
+        sgeo = screen.geometry() if screen is not None else None
+        sx0 = float(sgeo.x()) if sgeo is not None else 0.0
+        sy0 = float(sgeo.y()) if sgeo is not None else 0.0
+        rel_x = (float(target_ix) - sx0) * dpr
+        rel_y = (float(target_iy) - sy0) * dpr
+        phys_x = int(math.floor(rel_x + 0.5)) if rel_x >= 0.0 else -int(math.floor(-rel_x + 0.5))
+        phys_y = int(math.floor(rel_y + 0.5)) if rel_y >= 0.0 else -int(math.floor(-rel_y + 0.5))
+        return (sx0 + float(phys_x) / dpr, sy0 + float(phys_y) / dpr)
+
+    def _actual_logical_window_x(self, target_ix: int) -> float:
+        return self._actual_logical_window_pos(target_ix, 0)[0]
 
     def _logical_window_pos(self) -> tuple[int, int]:
         """返回桌宠窗口最新逻辑坐标（兼容 Win32 原子位移后 Qt 尚未派发 QMoveEvent 的窗口期）。"""
@@ -2613,6 +2625,14 @@ class PetWindow(QWidget):
                 cur_x = self._throw_pos_x
                 cur_y = self._throw_pos_y
 
+            was_sliding = self._is_ground_sliding
+            prev_slide_vx = self._throw_vx
+            # 采用幂次渐进弹性档位：小幅发力保持柔和克制，大力大幅甩动再线性拉开弹跳高度
+            bounce_energy = (
+                0.20 + 0.98 * (self._throw_intensity ** 1.55)
+                if self._throw_intensity > 0.02
+                else 0.16
+            )
             res = step_throw_physics(
                 ThrowBodyState(
                     x=cur_x,
@@ -2625,9 +2645,11 @@ class PetWindow(QWidget):
                 max_x=max_x,
                 min_y=min_y,
                 floor_y=floor_top,
+                bounce_energy=bounce_energy,
             )
             self._throw_vx = res.vx
             self._fall_velocity_y = res.vy
+            self._is_ground_sliding = res.is_sliding_on_floor
             self._throw_pos_x = res.x
             self._throw_pos_y = res.y
 
@@ -2635,37 +2657,59 @@ class PetWindow(QWidget):
             target_iy = int(round(res.y))
             if target_ix != win_x or target_iy != win_y:
                 pending_move = (target_ix, target_iy)
-            # 将取整余数补偿进画布变换，消除轻弹顶点与低速滑行末段的整数像素步进感
+            # 将真实物理像素落点与连续坐标的余数补偿进画布变换，消除分数 DPI 下抛物线与滑行锯齿
             if res.at_rest:
                 self._motion_engine.clear_subpixel_offset()
             else:
-                self._motion_engine.set_subpixel_offset(res.x - target_ix, res.y - target_iy)
+                actual_x, actual_y = self._actual_logical_window_pos(target_ix, target_iy)
+                self._motion_engine.set_subpixel_offset(res.x - actual_x, res.y - actual_y)
 
             if res.bounced_wall:
-                if res.bounced_wall_side in (-1, 1):
-                    # 撞击侧壁时叠加轻幅横向受压/纵向舒展弹簧冲量，增强撞墙回弹干脆感
-                    self._motion_engine.squash_spring.trigger_stretch(0.055)
-                elif res.bounced_wall_side == 2:
-                    self._motion_engine.squash_spring.trigger_squash(0.065)
+                self._motion_engine.trigger_wall_rebound(res.bounced_wall_side, res.wall_impact_speed)
+                wall_lvl = max(0.0, min(1.0, (res.wall_impact_speed - 220.0) / 1400.0))
+                if res.wall_impact_speed >= 260.0:
+                    self._sound.play(PetSoundEffect.BOING, intensity=wall_lvl)
+                if res.wall_impact_speed >= 680.0 and self._settings.particles_enabled:
+                    srect = self._get_local_sprite_rect()
+                    if res.bounced_wall_side == -1:
+                        self._particle_system.spawn_impact_burst(
+                            srect.left() + 6.0, srect.center().y(), 1.0, -0.25, wall_lvl
+                        )
+                    elif res.bounced_wall_side == 1:
+                        self._particle_system.spawn_impact_burst(
+                            srect.right() - 6.0, srect.center().y(), -1.0, -0.25, wall_lvl
+                        )
+                    elif res.bounced_wall_side == 2:
+                        self._particle_system.spawn_impact_burst(
+                            srect.center().x(), srect.top() + 8.0, 0.0, 1.0, wall_lvl
+                        )
 
             if res.landed_impact_vy > 0.0:
-                depth = landing_squash_depth(res.landed_impact_vy)
-                if res.bounced_floor:
-                    # 高冲击首次触地并立刻起跳时仅给短促轻弹舒展，避免窗口上升却在半空持续下压打架
-                    self._motion_engine.squash_spring.trigger_stretch(min(0.075, depth * 0.42))
-                    self._sound.play(PetSoundEffect.BOING)
-                else:
-                    # 真正落稳地面时向二阶弹簧注入连续下压冲量，即使二次触地也不会硬重置闪跳
-                    self._motion_engine.squash_spring.trigger_squash(depth)
-                    if res.landed_impact_vy >= 160.0:
-                        self._sound.play(PetSoundEffect.BOING)
+                self._motion_engine.trigger_floor_impact(
+                    res.landed_impact_vy,
+                    res.vx,
+                    bounced=res.bounced_floor,
+                    intensity=self._throw_intensity,
+                )
+                floor_lvl = max(0.0, min(1.0, (res.landed_impact_vy - 200.0) / 1450.0))
+                if res.bounced_floor or res.landed_impact_vy >= 200.0:
+                    self._sound.play(PetSoundEffect.BOING, intensity=floor_lvl)
+                if res.landed_impact_vy >= 620.0 and self._settings.particles_enabled:
+                    srect = self._get_local_sprite_rect()
+                    self._particle_system.spawn_impact_burst(
+                        srect.center().x(), srect.bottom() - 4.0, 0.0, -1.0, floor_lvl
+                    )
                 if self._override_pose == PetState.DIZZY:
                     self._spawn_dizzy_particles(4)
 
             if res.at_rest:
+                if was_sliding:
+                    self._motion_engine.trigger_skid_brake_nod(prev_slide_vx)
                 self._is_falling = False
+                self._is_ground_sliding = False
                 self._throw_vx = 0.0
                 self._fall_velocity_y = 0.0
+                self._throw_intensity = 0.0
                 self._throw_pos_x = None
                 self._throw_pos_y = None
                 self._motion_engine.clear_subpixel_offset()
@@ -2867,6 +2911,8 @@ class PetWindow(QWidget):
             walk_phase=walk_ctrl.stride_phase if walk_active else None,
             walk_gait_blend=walk_ctrl.gait_blend if walk_active else None,
             walk_speed_ratio=walk_ctrl.speed_ratio if walk_active else None,
+            throw_vy=self._fall_velocity_y,
+            is_ground_sliding=self._is_ground_sliding,
             snap=snap,
         )
         self._final_transform = self._motion_engine.evaluate(motion_input)
@@ -3984,8 +4030,10 @@ class PetWindow(QWidget):
         self._drag_trail.clear()
         if not self._press_started_while_locked:
             self._is_falling = False
+            self._is_ground_sliding = False
             self._throw_vx = 0.0
             self._fall_velocity_y = 0.0
+            self._throw_intensity = 0.0
             self._throw_pos_x = None
             self._throw_pos_y = None
         self._is_sleeping = False
@@ -4079,8 +4127,10 @@ class PetWindow(QWidget):
         self._stop_walking(immediate=True)
         self._is_dragging = True
         self._is_falling = False
+        self._is_ground_sliding = False
         self._throw_vx = 0.0
         self._fall_velocity_y = 0.0
+        self._throw_intensity = 0.0
         self._throw_pos_x = None
         self._throw_pos_y = None
         self._drag_trail.clear()
@@ -4294,7 +4344,8 @@ class PetWindow(QWidget):
             int(round(self._win_start_top + dy)),
         )
         vx = step_x / dt
-        self._motion_engine.push_drag_velocity_x(vx)
+        vy = step_y / dt
+        self._motion_engine.push_drag_velocity(vx, vy)
         self._process_drag_shake_step(step_x, step_y, now_mono, prev_move_mono)
 
     @staticmethod
@@ -4331,7 +4382,8 @@ class PetWindow(QWidget):
 
     def _finish_drag_release(self, now_mono: float) -> None:
         self._is_dragging = False
-        release_vel = self._drag_trail.estimate_release_velocity(now_mono)
+        release_impulse = self._drag_trail.estimate_release_impulse(now_mono)
+        release_vel = (release_impulse.vx, release_impulse.vy)
         self._drag_trail.clear()
         last_shake_mono = max(
             self._shake_last_reversal_mono, self._shake_last_active_mono
@@ -4362,15 +4414,24 @@ class PetWindow(QWidget):
             # 同步工作期放行贴边吸附；未贴边时仅平稳回落并保持本轮固定忙碌动作，不触发眩晕或悬浮。
             self._try_edge_dock_or_gravity_drop(
                 release_vel=release_vel,
+                release_impulse=release_impulse,
                 refresh_resting=False,
                 sync_working=True,
             )
         elif bristled_on_release:
             self._trigger_dizzy_state(now_mono, particle_count=5)
-            self._clamp_and_apply_gravity_after_release(refresh_resting=False)
+            self._clamp_and_apply_gravity_after_release(
+                refresh_resting=False,
+                release_vel=release_vel,
+                release_impulse=release_impulse,
+            )
         elif not stopped_recovered and self._is_action_playback_locked():
-            # 未到炸毛的烦恼/鼓嘴或其他未播完锁定动作：松手保持播完不中断并正常落地
-            self._clamp_and_apply_gravity_after_release(refresh_resting=False)
+            # 未到炸毛的烦恼/鼓嘴或其他未播完锁定动作：松手保持播完不中断并继承甩动惯性落地
+            self._clamp_and_apply_gravity_after_release(
+                refresh_resting=False,
+                release_vel=release_vel,
+                release_impulse=release_impulse,
+            )
         else:
             self._is_sulk = False
             self._override_pose = None
@@ -4379,7 +4440,10 @@ class PetWindow(QWidget):
             self._override_locked = False
             self._pending_sulk_after_pose = False
             self._current_state = self._resolve_resting_state()
-            self._try_edge_dock_or_gravity_drop(release_vel=release_vel)
+            self._try_edge_dock_or_gravity_drop(
+                release_vel=release_vel,
+                release_impulse=release_impulse,
+            )
             self._restart_ai_timer()
 
         self._reset_drag_shake_tracking()
@@ -4507,8 +4571,9 @@ class PetWindow(QWidget):
         *,
         refresh_resting: bool = False,
         release_vel: tuple[float, float] = (0.0, 0.0),
+        release_impulse: Optional[ThrowImpulse] = None,
     ) -> None:
-        """拖拽松手后保证角色留在工作区内，并按设置触发重力下落或轻抛惯性反弹。"""
+        """拖拽松手后保证角色留在工作区内，并按甩动幅度与力度触发重力抛掷、弹性反弹与惯性反馈。"""
         # 先切换到松手后的目标贴图再测可见边界，避免拿拖拽态 FLOAT 尺寸夹紧静态 IDLE 导致边缘错位
         if refresh_resting:
             self._current_state = self._resolve_resting_state()
@@ -4528,14 +4593,25 @@ class PetWindow(QWidget):
             and self._settings.gravity_enabled
             and (above_floor or has_throw)
         ):
+            intensity = (
+                release_impulse.intensity
+                if release_impulse is not None and release_impulse.is_throw
+                else throw_intensity_from_velocity(rvx, rvy)
+            )
             self._throw_vx = rvx
             self._fall_velocity_y = rvy
+            self._throw_intensity = intensity if has_throw else 0.0
+            self._is_ground_sliding = False
             self._throw_pos_x = float(self.x())
             self._throw_pos_y = float(self.y())
             self._is_falling = True
+            if has_throw:
+                self._motion_engine.trigger_throw_launch(rvx, rvy, self._throw_intensity)
         else:
             self._throw_vx = 0.0
             self._fall_velocity_y = 0.0
+            self._throw_intensity = 0.0
+            self._is_ground_sliding = False
             self._throw_pos_x = None
             self._throw_pos_y = None
             self._clamp_inside_nearest_work_area()
@@ -4546,6 +4622,7 @@ class PetWindow(QWidget):
         self,
         *,
         release_vel: tuple[float, float] = (0.0, 0.0),
+        release_impulse: Optional[ThrowImpulse] = None,
         refresh_resting: bool = True,
         sync_working: bool = False,
     ) -> None:
@@ -4612,6 +4689,7 @@ class PetWindow(QWidget):
         self._clamp_and_apply_gravity_after_release(
             refresh_resting=refresh_resting,
             release_vel=(0.0, 0.0) if sync_working else release_vel,
+            release_impulse=None if sync_working else release_impulse,
         )
 
     # ==================== Speech Bubble & Inline Gemini Chat ====================
