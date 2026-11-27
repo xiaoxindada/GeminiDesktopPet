@@ -147,11 +147,15 @@ class WalkRigAssets:
     chibi_arm_r: Optional[QPixmap] = None
     chibi_leg_l: Optional[QPixmap] = None
     chibi_leg_r: Optional[QPixmap] = None
+    chibi_tail: Optional[QPixmap] = None
     std_body: Optional[QPixmap] = None
     std_front_thigh: Optional[QPixmap] = None
     std_front_shin: Optional[QPixmap] = None
     std_back_thigh: Optional[QPixmap] = None
     std_back_shin: Optional[QPixmap] = None
+    std_front_arm: Optional[QPixmap] = None
+    std_back_arm: Optional[QPixmap] = None
+    std_tail: Optional[QPixmap] = None
 
     @property
     def chibi_complete(self) -> bool:
@@ -315,9 +319,81 @@ class SpriteManager:
                     meta = self._metadata_for_key(k, PetStyleMode.CHIBI)
                     tasks.append((PetStyleMode.CHIBI, k, path, meta.render_scale))
 
+        # 优先在后台预缩当前画风的 WalkRig 部件，消除首次启动散步时的 15~25ms 首帧缩图尖峰
+        walkrig_tasks: list[tuple[str, int, int]] = []
+        if style_mode == PetStyleMode.STANDARD:
+            rig_rh = float(target_h)
+            rig_rw = rig_rh * (337.0 / 977.0)
+            rig_pw = max(1, int(round(rig_rw * eff_dpr)))
+            rig_ph = max(1, int(round(rig_rh * eff_dpr)))
+            for fname in (
+                "std_body.png",
+                "std_thigh.png",
+                "std_shin.png",
+                "std_thigh_back.png",
+                "std_shin_back.png",
+                "std_arm.png",
+                "std_arm_back.png",
+                "std_tail.png",
+            ):
+                p = os.path.join(self._walkrig_dir, fname)
+                if os.path.isfile(p):
+                    walkrig_tasks.append((p, rig_pw, rig_ph))
+        else:
+            rig_rh = float(target_h)
+            rig_rw = rig_rh * (555.0 / 640.0)
+            rig_pw = max(1, int(round(rig_rw * eff_dpr)))
+            rig_ph = max(1, int(round(rig_rh * eff_dpr)))
+            for fname in (
+                "chibi_body.png",
+                "chibi_arm_l.png",
+                "chibi_arm_r.png",
+                "chibi_leg_l.png",
+                "chibi_leg_r.png",
+                "chibi_tail.png",
+            ):
+                p = os.path.join(self._walkrig_dir, fname)
+                if os.path.isfile(p):
+                    walkrig_tasks.append((p, rig_pw, rig_ph))
+
         cache_max_h = max(900, int(round(float(target_h) * eff_dpr * 1.6)))
 
         def _worker() -> None:
+            for rig_path, rig_pw, rig_ph in walkrig_tasks:
+                if self._preload_stop.is_set() or self._preload_generation != gen:
+                    return
+                norm_path = os.path.normcase(os.path.abspath(rig_path))
+                decoded = QImage(rig_path)
+                if decoded.isNull():
+                    continue
+                with self._preload_lock:
+                    rig_metrics = self._predecoded_metrics_by_path.get(norm_path)
+                if rig_metrics is None:
+                    rig_metrics = analyze_qimage_metrics(decoded)
+                    with self._preload_lock:
+                        self._predecoded_metrics_by_path[norm_path] = rig_metrics
+                # 按紧致非透明包围盒与 draw_pixmap_uniform 同比例预缩图，确保首步行走 100% 命中缓存
+                src = rig_metrics.content_rect
+                ratio = min(rig_pw / max(1.0, float(decoded.width())), rig_ph / max(1.0, float(decoded.height())))
+                sub_pw = max(1, int(round(src.width() * ratio)))
+                sub_ph = max(1, int(round(src.height() * ratio)))
+                if src.width() > sub_pw or src.height() > sub_ph:
+                    down_key = (norm_path, src.x(), src.y(), src.width(), src.height(), sub_pw, sub_ph)
+                    with _predecoded_downscale_lock:
+                        already = down_key in _predecoded_downscale_images
+                    if not already:
+                        full_rect = QRect(0, 0, decoded.width(), decoded.height())
+                        premul = decoded.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                        if src != full_rect:
+                            premul = premul.copy(src)
+                        scaled_img = premul.scaled(
+                            sub_pw,
+                            sub_ph,
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        _store_predecoded_downscale(norm_path, src, sub_pw, sub_ph, scaled_img)
+
             for mode, key, path, render_scale in tasks:
                 if self._preload_stop.is_set() or self._preload_generation != gen:
                     return
@@ -460,11 +536,15 @@ class SpriteManager:
             chibi_arm_r=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_arm_r.png")),
             chibi_leg_l=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_leg_l.png")),
             chibi_leg_r=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_leg_r.png")),
+            chibi_tail=self._load_pixmap(os.path.join(self._walkrig_dir, "chibi_tail.png")),
             std_body=self._load_pixmap(os.path.join(self._walkrig_dir, "std_body.png")),
             std_front_thigh=self._load_pixmap(os.path.join(self._walkrig_dir, "std_thigh.png")),
             std_front_shin=self._load_pixmap(os.path.join(self._walkrig_dir, "std_shin.png")),
             std_back_thigh=self._load_pixmap(os.path.join(self._walkrig_dir, "std_thigh_back.png")),
             std_back_shin=self._load_pixmap(os.path.join(self._walkrig_dir, "std_shin_back.png")),
+            std_front_arm=self._load_pixmap(os.path.join(self._walkrig_dir, "std_arm.png")),
+            std_back_arm=self._load_pixmap(os.path.join(self._walkrig_dir, "std_arm_back.png")),
+            std_tail=self._load_pixmap(os.path.join(self._walkrig_dir, "std_tail.png")),
         )
         self._ensure_base_poses()
 
@@ -595,19 +675,23 @@ class SpriteManager:
     def _ensure_base_poses(self) -> None:
         rig = self.walk_rig
         if self._fallback is None and rig.chibi_complete:
-            self._fallback = self._compose(
-                (rig.chibi_arm_l, rig.chibi_leg_r, rig.chibi_leg_l, rig.chibi_body, rig.chibi_arm_r)
-            )
+            chibi_parts = [rig.chibi_arm_l, rig.chibi_leg_r, rig.chibi_leg_l, rig.chibi_body, rig.chibi_arm_r]
+            if rig.chibi_tail is not None:
+                chibi_parts.insert(0, rig.chibi_tail)
+            self._fallback = self._compose(tuple(chibi_parts))
         if self._standard_fallback is None and rig.standard_complete:
-            self._standard_fallback = self._compose(
-                (
-                    rig.std_back_thigh or rig.std_front_thigh,
-                    rig.std_back_shin or rig.std_front_shin,
-                    rig.std_front_thigh,
-                    rig.std_front_shin,
-                    rig.std_body,
-                )
-            )
+            std_parts = [
+                rig.std_back_thigh or rig.std_front_thigh,
+                rig.std_back_shin or rig.std_front_shin,
+                rig.std_front_thigh,
+                rig.std_front_shin,
+            ]
+            if rig.std_tail is not None:
+                std_parts.append(rig.std_tail)
+            std_parts.append(rig.std_body)
+            if rig.std_front_arm is not None:
+                std_parts.append(rig.std_front_arm)
+            self._standard_fallback = self._compose(tuple(std_parts))
         # 单风格资源包也保持原版形象，允许后续只提供一张基础图。
         self._fallback = self._fallback or self._standard_fallback
         self._standard_fallback = self._standard_fallback or self._fallback

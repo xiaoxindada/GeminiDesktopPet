@@ -34,6 +34,10 @@ from services.pet_physics import (
     ThrowBodyState,
     TransformDamper,
     TransformSnapshot,
+    WalkLocomotionController,
+    WalkLocomotionState,
+    compute_chibi_walk_kinematics,
+    compute_std_walk_kinematics,
     landing_squash_depth,
     spring_step_1d,
     squash_scale_xy,
@@ -249,6 +253,91 @@ class TestPetPhysics(unittest.TestCase):
         self.assertEqual(held.facing_sign, 1.0)
         self.assertAlmostEqual(held.angle, mid.angle, delta=1e-6)
         self.assertAlmostEqual(held.trans_y, mid.trans_y, delta=1e-6)
+
+    def test_walk_locomotion_controller_and_grounded_gait(self) -> None:
+        ctrl = WalkLocomotionController()
+        # 靠近左边界启动时应优先向右开阔区迈步
+        chosen = ctrl.start(None, x=20.0, min_x=0.0, max_x=800.0, scale=1.0, pace_factor=1.0)
+        self.assertEqual(chosen, 1)
+        self.assertEqual(ctrl.state, WalkLocomotionState.WALKING)
+
+        # 巡航加速后应达到协调的自然步行节奏（标准立绘约 90 px/s、约 1.07 周期/秒）且相位与速度正相关
+        x = 120.0
+        phase_total = 0.0
+        prev_phase = ctrl.stride_phase
+        for _ in range(60):  # 1.0s @ 60fps
+            res = ctrl.step(1.0 / 60.0, x=x, min_x=0.0, max_x=800.0, scale=1.0, is_standard=True)
+            x = res.x
+            delta_p = (res.stride_phase - prev_phase) % (2.0 * math.pi)
+            phase_total += delta_p
+            prev_phase = res.stride_phase
+        self.assertGreater(res.velocity_x, 80.0)
+        self.assertLess(res.velocity_x, 105.0)
+        self.assertGreater(phase_total / (2.0 * math.pi), 0.90)
+        self.assertLess(phase_total / (2.0 * math.pi), 1.25)
+
+        # 接近右边界时进入柔和减速转身，而非 1 帧硬翻转
+        turned = False
+        saw_turning = False
+        x = 760.0
+        for _ in range(75):
+            res = ctrl.step(1.0 / 60.0, x=x, min_x=0.0, max_x=800.0, scale=1.0, is_standard=True)
+            x = res.x
+            if ctrl.state == WalkLocomotionState.TURNING:
+                saw_turning = True
+            if res.direction == -1 and res.velocity_x < -15.0:
+                turned = True
+                break
+        self.assertTrue(saw_turning)
+        self.assertTrue(turned)
+
+        # 请求优雅收步应平滑减速并在归正后触发 finished_stop
+        ctrl.request_stop()
+        stopped = False
+        for _ in range(55):
+            res = ctrl.step(1.0 / 60.0, x=x, min_x=0.0, max_x=800.0, scale=1.0, is_standard=True)
+            x = res.x
+            if res.finished_stop:
+                stopped = True
+                break
+        self.assertTrue(stopped)
+        self.assertFalse(ctrl.is_active)
+
+        # 标准立绘 C∞ 平滑步态：摆动期柔和折膝、对侧摆臂与平滑无折角质心起伏
+        k_contact = compute_std_walk_kinematics(0.0, 1.0, 1.0, 1.0)
+        k_pass = compute_std_walk_kinematics(math.pi * 0.42, 1.0, 1.0, 1.0)
+        self.assertGreater(k_contact["front_hip"], 14.0)
+        self.assertLess(k_contact["front_arm_rot"], -10.0)  # 左腿前迈时左臂向后摆
+        self.assertGreater(k_contact["back_arm_rot"], 15.0)  # 右臂向前探
+        self.assertLess(k_pass["back_knee"], -30.0)
+        # 尾巴应随步态周期柔和摆动
+        std_tail_vals = [
+            compute_std_walk_kinematics(2.0 * math.pi * i / 16.0, 1.0, 1.0, 1.0)["tail_rot"]
+            for i in range(16)
+        ]
+        self.assertGreater(max(std_tail_vals) - min(std_tail_vals), 12.0)
+        # 连续采样整周期验证 hip_ty 无突跳（消除“噔噔感”）
+        prev_ty = compute_std_walk_kinematics(0.0, 1.0, 1.0, 1.0)["hip_ty"]
+        max_step_ty = 0.0
+        for i in range(1, 65):
+            cur_ty = compute_std_walk_kinematics(2.0 * math.pi * i / 64.0, 1.0, 1.0, 1.0)["hip_ty"]
+            max_step_ty = max(max_step_ty, abs(cur_ty - prev_ty))
+            prev_ty = cur_ty
+        self.assertLess(max_step_ty, 0.4)
+
+        # Q 版步态：前后半步均能对称打开并带柔和起伏、骨盆位移、对侧摆臂与猫尾摆动
+        k_c1 = compute_chibi_walk_kinematics(math.pi * 0.5, 1.0, 1.0, 1.0)
+        k_c2 = compute_chibi_walk_kinematics(math.pi * 1.5, 1.0, 1.0, 1.0)
+        self.assertGreater(k_c1["leg_l_rot"], 10.0)
+        self.assertGreater(k_c2["leg_r_rot"], 20.0)
+        self.assertLess(k_c2["leg_r_tx"], -7.0)
+        self.assertLess(k_c1["arm_l_rot"], -15.0)
+        self.assertGreater(k_c1["arm_r_rot"], 15.0)
+        chibi_tail_vals = [
+            compute_chibi_walk_kinematics(2.0 * math.pi * i / 16.0, 1.0, 1.0, 1.0)["tail_rot"]
+            for i in range(16)
+        ]
+        self.assertGreater(max(chibi_tail_vals) - min(chibi_tail_vals), 16.0)
 
 
 class TestActionClipAndStagePipeline(unittest.TestCase):
@@ -883,7 +972,6 @@ class TestActionClipAndStagePipeline(unittest.TestCase):
                         pet.close()
         finally:
             mgr.dispose()
-
 
     def test_background_warm_render_cache_predecodes_and_primes_metrics(self) -> None:
         # 验证后台线程预解码高分辨率标准立绘后会生成紧致图像、预填重心缓存并预缩图

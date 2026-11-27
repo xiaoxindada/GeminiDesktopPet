@@ -40,7 +40,7 @@ def _cached_ui_font(size: int, *, pixel: bool = False) -> QFont:
 
 
 def draw_pixmap_uniform(painter: QPainter, pixmap: Optional[QPixmap], target: QRectF) -> None:
-    """按原始宽高比将 QPixmap 等比缩放并居中绘制到目标矩形内。"""
+    """按原始宽高比将 QPixmap 等比缩放并居中绘制，并自动裁去大面积空透明边以降低 CPU 旋转混合开销。"""
     if pixmap is None or pixmap.isNull() or target.width() <= 0 or target.height() <= 0:
         return
     pw = float(pixmap.width())
@@ -52,6 +52,16 @@ def draw_pixmap_uniform(painter: QPainter, pixmap: Optional[QPixmap], target: QR
     dh = ph * ratio
     dx = target.x() + (target.width() - dw) * 0.5
     dy = target.y() + (target.height() - dh) * 0.5
+    src = analyze_pixmap_metrics(pixmap).content_rect
+    if src.width() < pixmap.width() or src.height() < pixmap.height():
+        sub_target = QRectF(
+            dx + src.x() * ratio,
+            dy + src.y() * ratio,
+            src.width() * ratio,
+            src.height() * ratio,
+        )
+        draw_pixmap_smooth(painter, pixmap, sub_target, src)
+        return
     draw_pixmap_smooth(painter, pixmap, QRectF(dx, dy, dw, dh))
 
 
@@ -366,21 +376,39 @@ class PetStageRenderer:
         rx, ry = rect.x(), rect.y()
         local_rect = QRectF(0.0, 0.0, rw, rh)
 
-        def draw_part(pm: Optional[QPixmap], px: float, py: float, angle: float, ty: float = 0.0) -> None:
+        def draw_part(
+            pm: Optional[QPixmap],
+            px: float,
+            py: float,
+            angle: float,
+            ty: float = 0.0,
+            tx: float = 0.0,
+        ) -> None:
             if pm is None:
                 return
             painter.save()
-            painter.translate(rx + px * rw, ry + py * rh + ty)
+            painter.translate(rx + px * rw + tx, ry + py * rh + ty)
             painter.rotate(angle)
             painter.translate(-px * rw, -py * rh)
             draw_pixmap_uniform(painter, pm, local_rect)
             painter.restore()
 
-        draw_part(rig.chibi_arm_l, 0.3250, 0.5083, k["arm_l_rot"])
-        draw_part(rig.chibi_leg_r, 0.5172, 0.7233, k["leg_r_rot"], k["leg_r_ty"])
-        draw_part(rig.chibi_leg_l, 0.3538, 0.7233, k["leg_l_rot"], k["leg_l_ty"])
+        arm_ty = k.get("arm_ty", 0.0)
+        if rig.chibi_tail is not None:
+            painter.save()
+            painter.translate(rx + 0.48 * rw, ry + 0.56 * rh + k["body_ty"])
+            painter.rotate(k["body_rot"])
+            painter.translate(-0.48 * rw, -0.56 * rh)
+            painter.translate(0.648 * rw, 0.750 * rh)
+            painter.rotate(k.get("tail_rot", 0.0))
+            painter.translate(-0.648 * rw, -0.750 * rh)
+            draw_pixmap_uniform(painter, rig.chibi_tail, local_rect)
+            painter.restore()
+        draw_part(rig.chibi_arm_l, 0.3250, 0.5083, k["arm_l_rot"], arm_ty)
+        draw_part(rig.chibi_leg_r, 0.5172, 0.7233, k["leg_r_rot"], k["leg_r_ty"], k.get("leg_r_tx", 0.0))
+        draw_part(rig.chibi_leg_l, 0.3538, 0.7233, k["leg_l_rot"], k["leg_l_ty"], k.get("leg_l_tx", 0.0))
         draw_part(rig.chibi_body, 0.48, 0.56, k["body_rot"], k["body_ty"])
-        draw_part(rig.chibi_arm_r, 0.5643, 0.5483, k["arm_r_rot"])
+        draw_part(rig.chibi_arm_r, 0.5643, 0.5483, k["arm_r_rot"], arm_ty)
 
     @staticmethod
     def _paint_std_walk_rig(
@@ -392,6 +420,8 @@ class PetStageRenderer:
         rw, rh = rect.width(), rect.height()
         rx, ry = rect.x(), rect.y()
         local_rect = QRectF(0.0, 0.0, rw, rh)
+        hip_tx = k.get("hip_tx", 0.0)
+        hip_ty = k.get("hip_ty", 0.0)
 
         def draw_leg(
             thigh: Optional[QPixmap],
@@ -400,7 +430,7 @@ class PetStageRenderer:
             knee_deg: float,
         ) -> None:
             painter.save()
-            painter.translate(rx + 0.3086 * rw, ry + 0.5578 * rh)
+            painter.translate(rx + 0.3086 * rw + hip_tx, ry + 0.5578 * rh + hip_ty)
             painter.rotate(hip_deg)
             painter.translate(-0.3086 * rw, -0.5578 * rh)
             draw_pixmap_uniform(painter, thigh, local_rect)
@@ -413,6 +443,18 @@ class PetStageRenderer:
             painter.restore()
             painter.restore()
 
+        # 后侧手臂绘制在最底层，挂接在躯干变换内保证肩部随前倾/起伏不脱节
+        if rig.std_back_arm is not None:
+            painter.save()
+            painter.translate(rx + 0.5 * rw + hip_tx, ry + 0.46 * rh + k["body_ty"])
+            painter.rotate(k["body_rot"])
+            painter.translate(-0.5 * rw, -0.46 * rh)
+            painter.translate(0.295 * rw, 0.242 * rh)
+            painter.rotate(k.get("back_arm_rot", 0.0))
+            painter.translate(-0.347 * rw, -0.242 * rh)
+            draw_pixmap_uniform(painter, rig.std_back_arm, local_rect)
+            painter.restore()
+
         draw_leg(
             rig.std_back_thigh or rig.std_front_thigh,
             rig.std_back_shin or rig.std_front_shin,
@@ -422,10 +464,25 @@ class PetStageRenderer:
         draw_leg(rig.std_front_thigh, rig.std_front_shin, k["front_hip"], k["front_knee"])
         if rig.std_body is not None:
             painter.save()
-            painter.translate(rx + 0.5 * rw, ry + 0.46 * rh + k["body_ty"])
+            painter.translate(rx + 0.5 * rw + hip_tx, ry + 0.46 * rh + k["body_ty"])
             painter.rotate(k["body_rot"])
             painter.translate(-0.5 * rw, -0.46 * rh)
+            # 尾巴绘于躯干/衣摆之后并继承躯干前倾起伏，根部稳藏在衣摆下无缝摇摆
+            if rig.std_tail is not None:
+                painter.save()
+                painter.translate(0.525 * rw, 0.538 * rh)
+                painter.rotate(k.get("tail_rot", 0.0))
+                painter.translate(-0.525 * rw, -0.538 * rh)
+                draw_pixmap_uniform(painter, rig.std_tail, local_rect)
+                painter.restore()
             draw_pixmap_uniform(painter, rig.std_body, local_rect)
+            if rig.std_front_arm is not None:
+                painter.save()
+                painter.translate(0.347 * rw, 0.242 * rh)
+                painter.rotate(k.get("front_arm_rot", 0.0))
+                painter.translate(-0.347 * rw, -0.242 * rh)
+                draw_pixmap_uniform(painter, rig.std_front_arm, local_rect)
+                painter.restore()
             painter.restore()
 
     @classmethod

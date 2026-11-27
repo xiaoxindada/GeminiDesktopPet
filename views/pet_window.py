@@ -1563,6 +1563,7 @@ class PetWindow(QWidget):
         self._throw_pos_y = None
         self._walk_pos_x = None
         self._is_walking = False
+        self._motion_engine.walk.cancel()
         self._set_high_res_timer_enabled(False)
         self._motion_engine.reset_transient_effects(clear_drag_tilt=True)
         self._motion_engine.bristle_burst.reset()
@@ -1729,7 +1730,7 @@ class PetWindow(QWidget):
 
         pinned = not self._settings.auto_walk
         if pinned and self._is_walking:
-            self._is_walking = False
+            self._stop_walking(immediate=True)
             self._restart_ai_timer()
 
         # 同步右键菜单勾选状态与气泡展示
@@ -2363,7 +2364,7 @@ class PetWindow(QWidget):
                     self._reanchor_docked_position()
             return
         self._mark_pet_user_activity()
-        self._is_walking = False
+        self._stop_walking(immediate=True)
         self._is_sleeping = state in (
             PetState.SLEEPING,
             PetState.EDGE_LEFT_SLEEP,
@@ -2475,7 +2476,7 @@ class PetWindow(QWidget):
         if self._waiting_chat_workers and not self._is_sync_working_locked():
             # 模型正在回复期间锁定展示“思考中”形象，防止长耗时思考请求被超时定时器打断
             if self._override_pose != PetState.THINKING:
-                self._is_walking = False
+                self._stop_walking(immediate=True)
                 self._is_sleeping = False
                 self._override_pose = PetState.THINKING
                 self._override_is_autonomous = False
@@ -2689,39 +2690,69 @@ class PetWindow(QWidget):
             if max_left < min_left:
                 min_left = max_left = (min_x + max_x) * 0.5
 
-            move_scale = walk_blend
+            win_x, win_y = self._logical_window_pos()
+            cur_walk_x = float(win_x)
+            if self._walk_pos_x is not None and abs(self._walk_pos_x - cur_walk_x) <= 1.5:
+                cur_walk_x = self._walk_pos_x
+
+            scale_now = self._effective_scale()
+            walk_ctrl = self._motion_engine.walk
+            if not walk_ctrl.is_active:
+                walk_ctrl.start(
+                    self._walk_dir,
+                    x=cur_walk_x,
+                    min_x=min_left,
+                    max_x=max_left,
+                    scale=scale_now,
+                )
+
+            move_window_scale = 1.0
             if (
                 self._active_clip is not None
                 and self._active_clip.is_animated
                 and not self._use_chibi_walk_rig
                 and not self._use_std_walk_rig
             ):
+                # 透明动态步行素材按 move_start_ratio / move_stop_ratio 前后摇窗口控制位移，防止滑步
                 meta = self._active_clip.metadata
                 dur = self._active_clip.duration_sec
                 if dur > 0.0 and (meta.move_start_ratio > 0.0 or meta.move_stop_ratio < 1.0):
                     phase = (self._clip_elapsed_sec % dur) / dur
                     if phase < meta.move_start_ratio or phase > meta.move_stop_ratio:
-                        move_scale = 0.0
+                        move_window_scale = 0.0
 
-            win_x, win_y = self._logical_window_pos()
-            cur_walk_x = float(win_x)
-            if self._walk_pos_x is not None and abs(self._walk_pos_x - cur_walk_x) <= 1.5:
-                cur_walk_x = self._walk_pos_x
-            speed = 60.0 * self._effective_scale() * move_scale
-            next_left = cur_walk_x + self._walk_dir * speed * dt
-            if next_left <= min_left:
-                next_left = min_left
-                self._walk_dir = 1
-            elif next_left >= max_left:
-                next_left = max_left
-                self._walk_dir = -1
-            self._walk_pos_x = next_left
-            walk_ix = int(round(next_left))
+            walk_res = walk_ctrl.step(
+                dt,
+                x=cur_walk_x,
+                min_x=min_left,
+                max_x=max_left,
+                scale=scale_now,
+                is_standard=(self._settings.style_mode == PetStyleMode.STANDARD),
+                move_window_scale=move_window_scale,
+            )
+            self._walk_dir = walk_res.direction
+            self._transform_damper.walk_blend = walk_res.gait_blend
+            self._walk_pos_x = walk_res.x
+            walk_ix = int(round(walk_res.x))
             if walk_ix != win_x:
                 pending_move = (walk_ix, win_y)
-            actual_x = self._actual_logical_window_x(walk_ix)
-            self._motion_engine.set_subpixel_offset(next_left - actual_x, 0.0)
+            if walk_res.finished_stop:
+                self._is_walking = False
+                self._walk_pos_x = None
+                self._motion_engine.clear_subpixel_offset()
+                self._settings.last_left = float(walk_ix)
+                self._schedule_settings_save()
+                self._override_pose = None
+                self._override_is_autonomous = False
+                self._current_state = self._resolve_resting_state()
+                self._refresh_sprite_visual()
+                self._sync_ai_timer_interval()
+            else:
+                actual_x = self._actual_logical_window_x(walk_ix)
+                self._motion_engine.set_subpixel_offset(walk_res.x - actual_x, 0.0)
         elif not was_falling_this_tick:
+            if not self._is_walking and self._motion_engine.walk.is_active:
+                self._motion_engine.walk.cancel()
             self._walk_pos_x = None
             self._motion_engine.clear_subpixel_offset()
 
@@ -2806,6 +2837,8 @@ class PetWindow(QWidget):
             and not self._use_chibi_walk_rig
             and not self._use_std_walk_rig
         )
+        walk_ctrl = self._motion_engine.walk
+        walk_active = walk_ctrl.is_active and self._is_walking
         motion_input = PoseMotionInput(
             anim_time=self._anim_time,
             dt=dt,
@@ -2831,6 +2864,9 @@ class PetWindow(QWidget):
             use_chibi_walk_rig=self._use_chibi_walk_rig,
             std_rig_complete=rig.standard_complete,
             chibi_rig_complete=rig.chibi_complete,
+            walk_phase=walk_ctrl.stride_phase if walk_active else None,
+            walk_gait_blend=walk_ctrl.gait_blend if walk_active else None,
+            walk_speed_ratio=walk_ctrl.speed_ratio if walk_active else None,
             snap=snap,
         )
         self._final_transform = self._motion_engine.evaluate(motion_input)
@@ -3140,6 +3176,55 @@ class PetWindow(QWidget):
         if self._ai_timer.isActive():
             self._ai_timer.start()
 
+    def _start_walking(self, direction: Optional[int] = None) -> None:
+        """统一进入速度锁定漫步：靠近屏幕边缘时自动朝开阔侧迈步并平滑起跑。"""
+        _, _, min_x, max_x, _, _ = self._visible_sprite_work_bounds()
+        min_left = min_x + 8.0
+        max_left = max_x - 8.0
+        if max_left < min_left:
+            min_left = max_left = (min_x + max_x) * 0.5
+        chosen = self._motion_engine.walk.start(
+            direction,
+            x=float(self.x()),
+            min_x=min_left,
+            max_x=max_left,
+            scale=self._effective_scale(),
+        )
+        self._override_pose = None
+        self._override_is_autonomous = False
+        self._override_is_sync = False
+        self._pending_sulk_after_pose = False
+        self._is_sleeping = False
+        self._is_walking = True
+        self._walk_dir = chosen
+        self._walk_pos_x = float(self.x())
+        self._current_state = PetState.RUNNING
+        self._refresh_sprite_visual()
+        self._update_sprite_transforms()
+        self._stage_canvas.update()
+        self._sync_ai_timer_interval()
+
+    def _stop_walking(self, *, immediate: bool = True) -> None:
+        """停止行走：交互打断时立即归零，自主漫步结束时触发平滑收步减速。"""
+        if immediate:
+            self._motion_engine.walk.cancel()
+            self._is_walking = False
+            self._walk_pos_x = None
+            self._motion_engine.clear_subpixel_offset()
+        elif self._is_walking:
+            if self._motion_engine.walk.is_active:
+                self._motion_engine.walk.request_stop()
+            else:
+                self._is_walking = False
+                self._walk_pos_x = None
+                self._override_pose = None
+                self._override_is_autonomous = False
+                self._current_state = self._resolve_resting_state()
+                self._refresh_sprite_visual()
+                self._update_sprite_transforms()
+                self._stage_canvas.update()
+                self._sync_ai_timer_interval()
+
     def _set_temporary_pose(
         self,
         state: PetState,
@@ -3150,7 +3235,7 @@ class PetWindow(QWidget):
         pending_sulk: bool = False,
         locked: bool = False,
     ) -> None:
-        self._is_walking = False
+        self._stop_walking(immediate=True)
         self._is_sleeping = state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP)
         self._override_pose = state
         self._override_is_autonomous = False
@@ -3173,7 +3258,7 @@ class PetWindow(QWidget):
         duration_sec: float = 4.2,
     ) -> None:
         """设置持续到下一次自动决策的闲置动作，避免动作切换间隙闪回默认待机。"""
-        self._is_walking = False
+        self._stop_walking(immediate=True)
         self._is_sleeping = False
         self._override_pose = state
         self._override_is_autonomous = True
@@ -3278,17 +3363,7 @@ class PetWindow(QWidget):
         if docked != DockSide.NONE:
             self._set_temporary_pose(pose, prof.bubble_duration_sec, bubble_msg)
         elif pose == PetState.RUNNING:
-            self._override_pose = None
-            self._override_is_autonomous = False
-            self._override_is_sync = False
-            self._pending_sulk_after_pose = False
-            self._is_sleeping = False
-            self._is_walking = True
-            self._walk_dir = 1 if random.randint(0, 1) == 0 else -1
-            self._current_state = PetState.RUNNING
-            self._refresh_sprite_visual()
-            self._update_sprite_transforms()
-            self._stage_canvas.update()
+            self._start_walking()
             if bubble_msg:
                 self.show_bubble(bubble_msg, prof.bubble_duration_sec)
         else:
@@ -3320,7 +3395,7 @@ class PetWindow(QWidget):
 
         # 打盹模式：保持原地睡觉待机，不漫步、不做随机动作也不闲聊
         if self._settings.doze_mode:
-            self._is_walking = False
+            self._stop_walking(immediate=True)
             self._override_pose = None
             self._override_is_autonomous = False
             self._override_is_sync = False
@@ -3348,14 +3423,8 @@ class PetWindow(QWidget):
             return
 
         if self._is_walking:
-            self._is_walking = False
-            self._override_pose = None
-            self._override_is_autonomous = False
-            self._current_state = self._resolve_resting_state()
-            self._refresh_sprite_visual()
-            self._update_sprite_transforms()
-            self._stage_canvas.update()
-            self._sync_ai_timer_interval()
+            # 自主漫步结束时触发平滑收步减速，由帧循环落稳后切回待机
+            self._stop_walking(immediate=False)
             return
 
         # 仅在打盹模式下入睡，关闭时不再随机打盹
@@ -3367,15 +3436,7 @@ class PetWindow(QWidget):
         float_cutoff = quirk_cutoff + prof.ai_float_prob
 
         if self._settings.auto_walk and not self._settings.anti_gravity_mode and roll < walk_cutoff:
-            self._override_pose = None
-            self._override_is_autonomous = False
-            self._is_walking = True
-            self._walk_dir = 1 if random.randint(0, 1) == 0 else -1
-            self._current_state = PetState.RUNNING
-            self._refresh_sprite_visual()
-            self._update_sprite_transforms()
-            self._stage_canvas.update()
-            self._sync_ai_timer_interval()
+            self._start_walking()
         elif roll < quirk_cutoff:
             quirks = [
                 PetState.IDLE2,
@@ -3990,7 +4051,7 @@ class PetWindow(QWidget):
             self._press_is_double_click = False
             self._is_dragging = False
             self._is_shaking = False
-            self._is_walking = False
+            self._stop_walking(immediate=True)
             if self._stage_canvas.mouseGrabber() is self._stage_canvas:
                 self._stage_canvas.releaseMouse()
             self.open_quota_requested.emit()
@@ -4015,8 +4076,7 @@ class PetWindow(QWidget):
         self._quota_double_click_timer.stop()
         self._press_is_double_click = False
         self._motion_engine.reset_transient_effects()
-        self._is_walking = False
-        self._walk_pos_x = None
+        self._stop_walking(immediate=True)
         self._is_dragging = True
         self._is_falling = False
         self._throw_vx = 0.0
@@ -4348,7 +4408,7 @@ class PetWindow(QWidget):
         if not self._is_dragging:
             self._reset_drag_shake_tracking()
             was_walking = self._is_walking
-            self._is_walking = False
+            self._stop_walking(immediate=True)
             # 当前交互动作尚未播完（或按下时仍处于锁定状态）及同步工作期，点击不中断或偷跑触发动作
             if (
                 press_started_while_locked
