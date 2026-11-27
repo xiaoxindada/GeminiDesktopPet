@@ -34,6 +34,8 @@ _HWND_TOPMOST = -1
 _HWND_NOTOPMOST = -2
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
+_SWP_NOZORDER = 0x0004
+_SWP_NOACTIVATE = 0x0010
 _SWP_SHOWWINDOW = 0x0040
 _SW_SHOW = 5
 _SW_RESTORE = 9
@@ -41,6 +43,11 @@ _SW_RESTORE = 9
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+_winmm = ctypes.WinDLL("winmm", use_last_error=True)
+_winmm.timeBeginPeriod.argtypes = [wintypes.UINT]
+_winmm.timeBeginPeriod.restype = wintypes.UINT
+_winmm.timeEndPeriod.argtypes = [wintypes.UINT]
+_winmm.timeEndPeriod.restype = wintypes.UINT
 
 
 _kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
@@ -78,6 +85,23 @@ _user32.SetWindowPos.argtypes = [
     wintypes.UINT,
 ]
 _user32.SetWindowPos.restype = wintypes.BOOL
+_user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+_user32.GetWindowRect.restype = wintypes.BOOL
+_user32.BeginDeferWindowPos.argtypes = [ctypes.c_int]
+_user32.BeginDeferWindowPos.restype = ctypes.c_void_p
+_user32.DeferWindowPos.argtypes = [
+    ctypes.c_void_p,
+    wintypes.HWND,
+    wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.UINT,
+]
+_user32.DeferWindowPos.restype = ctypes.c_void_p
+_user32.EndDeferWindowPos.argtypes = [ctypes.c_void_p]
+_user32.EndDeferWindowPos.restype = wintypes.BOOL
 _kernel32.GetCurrentThreadId.argtypes = []
 _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 _user32.GetForegroundWindow.argtypes = []
@@ -192,6 +216,72 @@ def ensure_app_user_model_id(app_id: str = "GeminiDesktopPet") -> None:
         _shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
+
+
+def begin_high_res_timer(period_ms: int = 1) -> bool:
+    """在动画运动期按需请求 Windows 1ms 多媒体时钟精度，消除 15.6ms 唤醒抖动。"""
+    if os.name != "nt":
+        return False
+    try:
+        return int(_winmm.timeBeginPeriod(max(1, int(period_ms)))) == 0
+    except Exception:
+        return False
+
+
+def end_high_res_timer(period_ms: int = 1) -> None:
+    """释放与 begin_high_res_timer 成对的高精度时钟请求，待机时零额外功耗。"""
+    if os.name != "nt":
+        return
+    try:
+        _winmm.timeEndPeriod(max(1, int(period_ms)))
+    except Exception:
+        pass
+
+
+def get_window_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
+    """读取 Win32 窗口当前物理屏幕矩形 (left, top, right, bottom)。"""
+    if os.name != "nt" or not hwnd:
+        return None
+    try:
+        rect = wintypes.RECT()
+        if _user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+    except Exception:
+        pass
+    return None
+
+
+def move_windows_atomically(moves: Iterable[tuple[int, int, int]]) -> bool:
+    """用 BeginDeferWindowPos/EndDeferWindowPos 在单次 DWM 事务内同步移动多个顶层窗口。
+
+    moves 每项为 (hwnd, phys_x, phys_y)，用于桌宠与独立气泡窗口同帧位移，消除双窗错拍拉扯。
+    """
+    if os.name != "nt":
+        return False
+    items = [(int(hwnd), int(x), int(y)) for hwnd, x, y in moves if hwnd]
+    if not items:
+        return False
+    try:
+        hdwp = _user32.BeginDeferWindowPos(len(items))
+        if not hdwp:
+            return False
+        flags = _SWP_NOSIZE | _SWP_NOZORDER | _SWP_NOACTIVATE
+        for hwnd, px, py in items:
+            hdwp = _user32.DeferWindowPos(
+                hdwp,
+                wintypes.HWND(hwnd),
+                wintypes.HWND(0),
+                px,
+                py,
+                0,
+                0,
+                flags,
+            )
+            if not hdwp:
+                return False
+        return bool(_user32.EndDeferWindowPos(hdwp))
+    except Exception:
+        return False
 
 
 def bring_window_to_front(hwnd: int) -> None:

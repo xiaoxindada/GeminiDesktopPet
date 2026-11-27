@@ -5,14 +5,12 @@ from __future__ import annotations
 from enum import Enum
 import io
 import math
-import os
 import struct
 import threading
 import time
+from typing import Optional
 import wave
 import winsound
-
-from models.app_version import get_user_config_dir
 
 _SAMPLE_RATE = 22050
 
@@ -79,13 +77,17 @@ def _synthesize_sweep(start_freq: float, end_freq: float, dur: float, amp: float
 
 
 class SoundService:
-    """合成并用 winsound 异步播放猫娘互动音效，自动防抖避免重叠爆音。"""
+    """合成并用后台音频线程异步播放猫娘互动音效，避免主线程触碰磁盘或阻塞渲染帧。"""
 
     def __init__(self) -> None:
         self.enabled: bool = True
         self._disposed = False
         self._last_play_monotonic = 0.0
         self._lock = threading.Lock()
+        self._play_event = threading.Event()
+        self._pending_wav: Optional[bytes] = None
+        # 持有当前播放中的内存 WAV 引用，防止 SND_MEMORY | SND_ASYNC 播放期间缓冲区被回收
+        self._active_wav_ref: Optional[bytes] = None
         self._wav_bytes: dict[PetSoundEffect, bytes] = {
             PetSoundEffect.CHIME: _synthesize_notes([(784, 0.06, 0.16), (1046.5, 0.09, 0.14)]),
             PetSoundEffect.PURR: _synthesize_purr(),
@@ -95,59 +97,56 @@ class SoundService:
             PetSoundEffect.BOING: _synthesize_sweep(340, 620, 0.11, 0.16),
             PetSoundEffect.ANGRY: _synthesize_sweep(480, 220, 0.12, 0.18),
         }
-        self._wav_files: dict[PetSoundEffect, str] = {}
-        try:
-            cache_dir = os.path.join(str(get_user_config_dir()), "sounds")
-            os.makedirs(cache_dir, exist_ok=True)
-            for eff, raw in self._wav_bytes.items():
-                fp_path = os.path.join(cache_dir, f"{eff.value}.wav")
-                if not os.path.exists(fp_path) or os.path.getsize(fp_path) != len(raw):
-                    with open(fp_path, "wb") as fp:
-                        fp.write(raw)
-                self._wav_files[eff] = fp_path
-        except Exception:
-            pass
+        self._worker = threading.Thread(
+            target=self._audio_worker_loop,
+            name="GeminiDesktopPetSoundWorker",
+            daemon=True,
+        )
+        self._worker.start()
 
     def play(self, effect: PetSoundEffect) -> None:
         if not self.enabled or self._disposed:
             return
         now = time.monotonic()
+        raw = self._wav_bytes.get(effect)
+        if not raw:
+            return
         with self._lock:
-            if now - self._last_play_monotonic < 0.14:
+            if self._disposed or (now - self._last_play_monotonic) < 0.14:
                 return
             self._last_play_monotonic = now
+            self._pending_wav = raw
+        self._play_event.set()
 
-        wav_path = self._wav_files.get(effect)
-        if wav_path and os.path.exists(wav_path):
+    def _audio_worker_loop(self) -> None:
+        while not self._disposed:
+            self._play_event.wait()
+            self._play_event.clear()
+            if self._disposed:
+                break
+            with self._lock:
+                raw = self._pending_wav
+                self._pending_wav = None
+                self._active_wav_ref = raw
+            if not raw or self._disposed:
+                continue
             try:
                 winsound.PlaySound(
-                    wav_path,
-                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                    raw,
+                    winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
                 )
-                return
             except Exception:
                 pass
 
-        raw = self._wav_bytes.get(effect)
-        if raw:
-            threading.Thread(
-                target=self._play_memory_sync,
-                args=(raw,),
-                daemon=True,
-                name="SoundFallback",
-            ).start()
-
-    def _play_memory_sync(self, raw: bytes) -> None:
-        if self._disposed:
-            return
-        try:
-            winsound.PlaySound(raw, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
-        except Exception:
-            pass
-
     def dispose(self) -> None:
-        self._disposed = True
+        with self._lock:
+            self._disposed = True
+            self._pending_wav = None
+        self._play_event.set()
         try:
             winsound.PlaySound(None, winsound.SND_PURGE)
         except Exception:
             pass
+        if self._worker.is_alive() and self._worker is not threading.current_thread():
+            self._worker.join(timeout=0.25)
+        self._active_wav_ref = None

@@ -21,6 +21,8 @@ from services.action_clip import (
     AnimatedWebpClip,
     StaticSpriteClip,
     analyze_pixmap_metrics,
+    analyze_qimage_metrics,
+    prime_pixmap_metrics,
 )
 from services.gemini_chat_service import GeminiChatService
 from services.pet_physics import (
@@ -881,6 +883,54 @@ class TestActionClipAndStagePipeline(unittest.TestCase):
                         pet.close()
         finally:
             mgr.dispose()
+
+
+    def test_background_warm_render_cache_predecodes_and_primes_metrics(self) -> None:
+        # 验证后台线程预解码高分辨率标准立绘后会生成紧致图像、预填重心缓存并预缩图
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Assets"
+            sprites_dir = root / "Sprites"
+            std_dir = root / "Standard"
+            sprites_dir.mkdir(parents=True)
+            std_dir.mkdir(parents=True)
+
+            _write_solid_png(sprites_dir / "idle.png", (64, 64), (16, 8, 32, 52), QColor(100, 100, 255, 255))
+            _write_solid_png(std_dir / "standee.png", (200, 320), (40, 20, 100, 280), QColor(140, 100, 255, 255))
+            _write_solid_png(std_dir / "surprised.png", (480, 1200), (120, 80, 200, 1040), QColor(255, 160, 120, 255))
+
+            mgr = SpriteManager(assets_root=str(root))
+            try:
+                mgr.preload_all()
+                mgr.warm_render_cache(PetStyleMode.STANDARD, sprite_height_px=300.0, dpr=1.5)
+                thread = mgr._preload_thread
+                self.assertIsNotNone(thread)
+                assert thread is not None
+                thread.join(timeout=3.0)
+                self.assertFalse(thread.is_alive())
+                self.assertIn("surprised", mgr._predecoded_standard)
+
+                # 主线程首次获取 surprised 应直接消费后台预解码结果，且紧致高度受上限约束
+                clip = mgr.get_clip(PetState.SURPRISED, PetStyleMode.STANDARD)
+                self.assertIsNotNone(clip)
+                assert clip is not None
+                pm = clip.preview_pixmap()
+                self.assertIsNotNone(pm)
+                assert pm is not None
+                self.assertLessEqual(pm.height(), 900)
+                self.assertNotIn("surprised", mgr._predecoded_standard)
+
+                # analyze_qimage_metrics + prime_pixmap_metrics 应与主线程分析一致
+                img = QImage(80, 80, QImage.Format.Format_ARGB32)
+                img.fill(QColor(0, 0, 0, 0))
+                painter = QPainter(img)
+                painter.fillRect(10, 10, 30, 60, QColor(90, 160, 250, 255))
+                painter.end()
+                expected = analyze_qimage_metrics(img)
+                probe_pm = QPixmap.fromImage(img)
+                prime_pixmap_metrics(probe_pm, expected)
+                self.assertEqual(analyze_pixmap_metrics(probe_pm), expected)
+            finally:
+                mgr.dispose()
 
 
 if __name__ == "__main__":

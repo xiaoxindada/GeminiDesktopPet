@@ -109,12 +109,23 @@ from services.stage_renderer import (
     compute_local_sprite_rect,
 )
 from services.system_monitor_service import SystemMetrics, SystemMonitorService
+from services.win32_ipc import (
+    begin_high_res_timer,
+    end_high_res_timer,
+    get_window_rect,
+    move_windows_atomically,
+)
 from themes import STARLIGHT_MENU_QSS
 
 
 # Win32 tool-window style helper.
 _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x00000080
+_TOOL_WINDOW_STYLED_HWNDS: set[int] = set()
+_UI_FONT_FALLBACK_WARMED = False
+_DEFAULT_BUBBLE_TEXT_QSS = (
+    "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
+)
 
 # 反重力播报：采集间隔、续写刷新的最小间隔（秒）与积压上限。
 # 采集和刷新都压在百毫秒级，靠「只解尾部步骤」把开销hold住，延迟才像实时。
@@ -208,7 +219,7 @@ def _is_primary_mouse_button_held() -> bool:
 
 
 def _ensure_tool_window_ex_style(hwnd: int) -> None:
-    if os.name != "nt" or not hwnd:
+    if os.name != "nt" or not hwnd or hwnd in _TOOL_WINDOW_STYLED_HWNDS:
         return
     try:
         user32 = ctypes.windll.user32
@@ -219,6 +230,7 @@ def _ensure_tool_window_ex_style(hwnd: int) -> None:
                 _GWL_EXSTYLE,
                 ex_style | _WS_EX_TOOLWINDOW,
             )
+        _TOOL_WINDOW_STYLED_HWNDS.add(hwnd)
     except Exception:
         pass
 
@@ -671,7 +683,16 @@ class PetWindow(QWidget):
         self._last_tick_perf = time.perf_counter()
         self._frame_target_period_s = 1.0 / 60.0
         self._frame_next_deadline_perf: Optional[float] = None
-        self._last_bubble_reposition_mono = 0.0
+        self._frame_loop_active = False
+        self._high_res_timer_active = False
+        self._applied_window_opacity: Optional[float] = None
+        self._bubble_text_style_applied = _DEFAULT_BUBBLE_TEXT_QSS
+        self._bubble_min_applied: Optional[tuple[int, int]] = None
+        self._bubble_max_applied: Optional[tuple[int, int]] = None
+        self._suppress_bubble_reposition = False
+        self._atomic_pet_sync: Optional[tuple[int, int, int, int]] = None
+        self._atomic_bub_sync: Optional[tuple[int, int, int, int]] = None
+        self._last_visual_bounds_emit_mono = 0.0
 
         # Sprite & behavioral state
         self._current_state = PetState.IDLE
@@ -1090,9 +1111,7 @@ class PetWindow(QWidget):
         self._bubble_text_lbl.setCursor(Qt.CursorShape.ArrowCursor)
         self._bubble_text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._bubble_text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self._bubble_text_lbl.setStyleSheet(
-            "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
-        )
+        self._bubble_text_lbl.setStyleSheet(_DEFAULT_BUBBLE_TEXT_QSS)
         self._bubble_content_layout.addWidget(self._bubble_text_lbl)
 
         self._chat_messages_panel = QWidget(self._bubble_content)
@@ -1190,6 +1209,21 @@ class PetWindow(QWidget):
 
 
         self._speech_bubble.setVisible(False)
+        self._warm_bubble_ui_fonts()
+
+    def _warm_bubble_ui_fonts(self) -> None:
+        """启动展示前预热气泡样式与 ✦/♥ 符号回退字体，消除首次显示或开启气泡时 ~270ms 主线程阻塞。"""
+        global _UI_FONT_FALLBACK_WARMED
+        if _UI_FONT_FALLBACK_WARMED:
+            return
+        _UI_FONT_FALLBACK_WARMED = True
+        try:
+            self._bubble_header_widget.ensurePolished()
+            _ = self._bubble_header_widget.sizeHint()
+            self._bubble_text_lbl.ensurePolished()
+            _ = QFontMetrics(self._bubble_text_lbl.font()).horizontalAdvance("Aa中文✦♥✨💬✕▾☰")
+        except Exception:
+            pass
 
     def _build_context_menu(self) -> None:
         # 桌面菜单与托盘菜单共用同一批 QAction，状态天然同步，不再维护两套实现。
@@ -1334,8 +1368,8 @@ class PetWindow(QWidget):
     def _build_timers(self) -> None:
         self._frame_timer = QTimer(self)
         self._frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._frame_timer.setInterval(16)
-        self._frame_timer.timeout.connect(self._frame_timer_tick)
+        self._frame_timer.setSingleShot(True)
+        self._frame_timer.timeout.connect(self._on_frame_timer_timeout)
 
         self._ai_timer = QTimer(self)
         self._ai_timer.setInterval(self._effective_ai_interval_ms())
@@ -1391,9 +1425,21 @@ class PetWindow(QWidget):
             hz = hz / float(divisor)
         self._frame_target_period_s = 1.0 / max(48.0, min(120.0, hz))
 
-    def _pace_next_frame_tick(self, tick_start_perf: float) -> None:
-        """按目标刷新周期用误差累加器微调下一次定时器间隔，消除固定 16ms 在 60Hz 屏上的拍频掉帧。"""
-        if not self._frame_timer.isActive():
+    def _set_high_res_timer_enabled(self, enabled: bool) -> None:
+        """仅在行走/抛掷/拖拽等连续位移期开启 1ms 时钟，待机或隐藏时立即释放。"""
+        want = bool(enabled)
+        if want == self._high_res_timer_active:
+            return
+        if want:
+            if begin_high_res_timer(1):
+                self._high_res_timer_active = True
+        else:
+            self._high_res_timer_active = False
+            end_high_res_timer(1)
+
+    def _pace_next_frame_tick(self, tick_start_perf: float, *, from_timer: bool = True) -> None:
+        """用单发 deadline 累加器精确调度下一帧，避免重复型 QTimer 频繁 setInterval 触发 23ms 拍频抖动。"""
+        if not from_timer or not self._frame_loop_active or self._closing_handled:
             self._frame_next_deadline_perf = None
             return
         period = self._frame_target_period_s
@@ -1405,7 +1451,7 @@ class PetWindow(QWidget):
             if self._frame_next_deadline_perf < now - period:
                 self._frame_next_deadline_perf = now + period
         delay_ms = max(1, min(33, int(round((self._frame_next_deadline_perf - now) * 1000.0))))
-        self._frame_timer.setInterval(delay_ms)
+        self._frame_timer.start(delay_ms)
 
     # ==================== Lifecycle Events ====================
 
@@ -1423,13 +1469,15 @@ class PetWindow(QWidget):
             else:
                 now = datetime.now()
                 greet_state = CharacterLore.get_time_greeting_state(now)
-                self._set_temporary_pose(
-                    greet_state,
-                    5.5,
-                    CharacterLore.pick_line_for_state(greet_state),
-                )
+                greet_line = CharacterLore.pick_line_for_state(greet_state)
+                # 首帧立即展示问候动作，将首次气泡窗冷创建延后一拍以避免阻塞窗口弹出与起步帧
+                self._set_temporary_pose(greet_state, 5.5, None)
                 self._sound.play(PetSoundEffect.SPARKLE)
                 self._spawn_star_burst(self.width() * 0.5, self.height() * 0.65, 8)
+                QTimer.singleShot(
+                    0,
+                    lambda st=greet_state, msg=greet_line: self._reveal_startup_greeting_bubble(st, msg),
+                )
 
             self._sync_frame_target_period()
             self._last_tick_utc = datetime.now(timezone.utc)
@@ -1437,8 +1485,8 @@ class PetWindow(QWidget):
             self._last_tick_perf = time.perf_counter()
             self._frame_next_deadline_perf = None
             self._mark_pet_user_activity()
-            self._frame_timer.setInterval(max(1, int(round(self._frame_target_period_s * 1000.0))))
-            self._frame_timer.start()
+            self._frame_loop_active = True
+            self._frame_timer.start(max(1, int(round(self._frame_target_period_s * 1000.0))))
             self._ai_timer.start()
             self._monitor_timer.start()
             self._idle_speech_timer.start()
@@ -1448,6 +1496,17 @@ class PetWindow(QWidget):
         else:
             self._sync_frame_target_period()
             self._apply_win32_extended_styles()
+
+    def _reveal_startup_greeting_bubble(self, greet_state: PetState, message: str) -> None:
+        if (
+            self._closing_handled
+            or not self.isVisible()
+            or self._override_pose != greet_state
+            or self._is_chat_open
+            or self._sync_bubble_active
+        ):
+            return
+        self.show_bubble(message, 5.5)
 
     def closeEvent(self, event) -> None:
         if hasattr(self, "_settings_save_timer"):
@@ -1462,7 +1521,9 @@ class PetWindow(QWidget):
             except OSError as exc:
                 AppLogger.error("PetWindow", "退出时保存桌宠位置失败", exc)
 
+        self._frame_loop_active = False
         self._frame_timer.stop()
+        self._set_high_res_timer_enabled(False)
         self._ai_timer.stop()
         self._bubble_timer.stop()
         self._monitor_timer.stop()
@@ -1481,8 +1542,11 @@ class PetWindow(QWidget):
         ):
             self._chat_models_discovery_worker.wait(400)
         if getattr(self, "_ui_ready", False):
+            self._ui_ready = False
+            _TOOL_WINDOW_STYLED_HWNDS.discard(int(self._speech_bubble.winId()))
             self._speech_bubble.close()
             self._speech_bubble.deleteLater()
+        _TOOL_WINDOW_STYLED_HWNDS.discard(int(self.winId()))
         super().closeEvent(event)
 
     def hideEvent(self, event) -> None:
@@ -1498,6 +1562,8 @@ class PetWindow(QWidget):
         self._throw_pos_x = None
         self._throw_pos_y = None
         self._walk_pos_x = None
+        self._is_walking = False
+        self._set_high_res_timer_enabled(False)
         self._motion_engine.reset_transient_effects(clear_drag_tilt=True)
         self._motion_engine.bristle_burst.reset()
         self._particle_system.clear()
@@ -1516,8 +1582,14 @@ class PetWindow(QWidget):
         super().hideEvent(event)
 
     def moveEvent(self, event) -> None:
+        self._atomic_pet_sync = None
+        self._atomic_bub_sync = None
         super().moveEvent(event)
-        if getattr(self, "_ui_ready", False):
+        if (
+            getattr(self, "_ui_ready", False)
+            and not getattr(self, "_closing_handled", False)
+            and not self._suppress_bubble_reposition
+        ):
             self._reposition_speech_bubble_on_move()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
@@ -1649,8 +1721,10 @@ class PetWindow(QWidget):
         s = self._effective_scale()
         sprite_h = self._sprite_height_px()
         opacity = self._effective_opacity()
-        self.setWindowOpacity(opacity)
-        self._speech_bubble.setWindowOpacity(opacity)
+        if self._applied_window_opacity != opacity:
+            self._applied_window_opacity = opacity
+            self.setWindowOpacity(opacity)
+            self._speech_bubble.setWindowOpacity(opacity)
         self._sound.enabled = bool(self._settings.sound_enabled)
 
         pinned = not self._settings.auto_walk
@@ -1663,18 +1737,23 @@ class PetWindow(QWidget):
         self._sync_context_menu_checks()
         new_w = max(360, int(round(380.0 * s)))
         new_h = max(380, int(round(sprite_h + 200.0)))
+        size_changed = self.width() != new_w or self.height() != new_h
 
-        self.setFixedSize(new_w, new_h)
-        self._stage_canvas.setGeometry(0, 0, new_w, new_h)
+        if size_changed:
+            self.setFixedSize(new_w, new_h)
+            self._stage_canvas.setGeometry(0, 0, new_w, new_h)
 
         if old_bottom is not None:
             if self._settings.docked_side == DockSide.NONE:
-                self.move(self.x(), int(round(old_bottom - new_h)))
-                self._clamp_inside_nearest_work_area()
+                if size_changed:
+                    self.move(self.x(), int(round(old_bottom - new_h)))
+                    self._clamp_inside_nearest_work_area()
             else:
                 self._reanchor_docked_position()
 
-        self._bond_badge_lbl.setText(f" · ♥ {self._settings.favorability}")
+        bond_text = f" · ♥ {self._settings.favorability}"
+        if self._bond_badge_lbl.text() != bond_text:
+            self._bond_badge_lbl.setText(bond_text)
         bubble_enabled_now = bool(self._settings.show_speech_bubble)
         if bubble_enabled_now != self._speech_bubble_enabled_applied:
             self._speech_bubble_enabled_applied = bubble_enabled_now
@@ -1690,7 +1769,6 @@ class PetWindow(QWidget):
         ):
             self._hide_speech_bubble()
 
-        self._update_dock_alignment()
         self._apply_win32_extended_styles()
         self._sprites.warm_render_cache(
             self._settings.style_mode,
@@ -1815,11 +1893,25 @@ class PetWindow(QWidget):
         min_h = self._bubble_min_size()[1]
         return QSize(size.width(), max(min_h, min(available, size.height())))
 
-    def _compute_bubble_default_pos(self, bubble_size: QSize) -> QPoint:
+    def _compute_bubble_default_pos(
+        self,
+        bubble_size: QSize,
+        *,
+        pet_x: Optional[int] = None,
+        pet_y: Optional[int] = None,
+    ) -> QPoint:
         gap = 8
         bw = bubble_size.width()
         bh = bubble_size.height()
-        sprite_rect = self.get_visual_sprite_bounds()
+        local = self._get_local_sprite_rect()
+        px = self.x() if pet_x is None else pet_x
+        py = self.y() if pet_y is None else pet_y
+        sprite_rect = QRect(
+            int(round(px + local.x())),
+            int(round(py + local.y())),
+            max(1, int(round(local.width()))),
+            max(1, int(round(local.height()))),
+        )
         anchor_rect = sprite_rect
 
         if self._settings.docked_side == DockSide.LEFT:
@@ -1839,6 +1931,153 @@ class PetWindow(QWidget):
         target_y = max(area.top() + 6, min(target_y, area.bottom() + 1 - bh - 6))
         return QPoint(target_x, target_y)
 
+    def _compute_bubble_pos_for_pet(self, pet_x: int, pet_y: int, bubble_size: QSize) -> QPoint:
+        if self._bubble_custom_offset is not None:
+            return self._clamp_bubble_pos_to_screen(
+                QPoint(pet_x, pet_y) + self._bubble_custom_offset, bubble_size
+            )
+        return self._compute_bubble_default_pos(bubble_size, pet_x=pet_x, pet_y=pet_y)
+
+    def _actual_logical_window_x(self, target_ix: int) -> float:
+        """返回窗口落在整数逻辑坐标 target_ix 时对应的真实逻辑 X（消除 125%/150% 分数 DPI 奇偶物理像素锯齿）。"""
+        if os.name != "nt":
+            return float(target_ix)
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        if abs(dpr - round(dpr)) < 1e-3:
+            return float(target_ix)
+        screen = self.screen()
+        sx0 = float(screen.geometry().x()) if screen is not None else 0.0
+        rel = (float(target_ix) - sx0) * dpr
+        phys = int(math.floor(rel + 0.5)) if rel >= 0.0 else -int(math.floor(-rel + 0.5))
+        return sx0 + float(phys) / dpr
+
+    def _logical_window_pos(self) -> tuple[int, int]:
+        """返回桌宠窗口最新逻辑坐标（兼容 Win32 原子位移后 Qt 尚未派发 QMoveEvent 的窗口期）。"""
+        sync = self._atomic_pet_sync
+        if sync is not None:
+            return (sync[2], sync[3])
+        return (self.x(), self.y())
+
+    def _move_pet_and_bubble(self, target_x: int, target_y: int) -> None:
+        """同步移动桌宠与可见独立气泡：同屏下通过 Win32 DeferWindowPos 原子提交，消除双窗错拍与掉帧拉扯。"""
+        bubble_visible = (
+            getattr(self, "_ui_ready", False)
+            and self._speech_bubble.isVisible()
+            and not self._speech_bubble.is_resizing()
+        )
+        if not bubble_visible:
+            self._atomic_pet_sync = None
+            self._atomic_bub_sync = None
+            if target_x != self.x() or target_y != self.y():
+                self.move(target_x, target_y)
+            return
+
+        bsize = self._speech_bubble.size()
+        bub_target = self._compute_bubble_pos_for_pet(target_x, target_y, bsize)
+
+        # 两个窗口起止位置均在同一屏幕内时，用按屏原点差分的物理增量走单次 DWM 原子事务，
+        # 既消除 1.25x/1.5x 分数 DPI 下的舍入累积漂移，又在跨屏移动时自动回退给 Qt 原生处理
+        pet_screen = self.screen()
+        bub_screen = self._speech_bubble.screen()
+        target_pet_screen = QGuiApplication.screenAt(
+            QPoint(target_x + self.width() // 2, target_y + self.height() // 2)
+        )
+        target_bub_screen = QGuiApplication.screenAt(
+            QPoint(bub_target.x() + bsize.width() // 2, bub_target.y() + bsize.height() // 2)
+        )
+        moved_atomically = False
+        if (
+            os.name == "nt"
+            and self.isVisible()
+            and pet_screen is not None
+            and pet_screen is bub_screen
+            and (target_pet_screen is None or target_pet_screen is pet_screen)
+            and (target_bub_screen is None or target_bub_screen is pet_screen)
+        ):
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            pet_hwnd = int(self.winId())
+            bub_hwnd = int(self._speech_bubble.winId())
+            pet_rect = get_window_rect(pet_hwnd)
+            bub_rect = get_window_rect(bub_hwnd)
+            if pet_rect is not None and bub_rect is not None:
+                # 若同一事件循环拍内已原子移动过且 Qt 尚未派发 QMoveEvent，沿用上次记录的真实逻辑坐标防重复叠加
+                if (
+                    self._atomic_pet_sync is not None
+                    and abs(pet_rect[0] - self._atomic_pet_sync[0]) <= 1
+                    and abs(pet_rect[1] - self._atomic_pet_sync[1]) <= 1
+                ):
+                    cur_x, cur_y = self._atomic_pet_sync[2], self._atomic_pet_sync[3]
+                else:
+                    self._atomic_pet_sync = None
+                    cur_x, cur_y = self.x(), self.y()
+                if (
+                    self._atomic_bub_sync is not None
+                    and abs(bub_rect[0] - self._atomic_bub_sync[0]) <= 1
+                    and abs(bub_rect[1] - self._atomic_bub_sync[1]) <= 1
+                ):
+                    bub_cur_x, bub_cur_y = self._atomic_bub_sync[2], self._atomic_bub_sync[3]
+                else:
+                    self._atomic_bub_sync = None
+                    bub_cur_x, bub_cur_y = self._speech_bubble.x(), self._speech_bubble.y()
+
+                if (
+                    target_x == cur_x
+                    and target_y == cur_y
+                    and bub_target.x() == bub_cur_x
+                    and bub_target.y() == bub_cur_y
+                ):
+                    return
+
+                # 使用与 Qt qRound 一致的半入舍入（floor(v + 0.5)），避免 1.5x 分数 DPI 下与 Python 银行家舍入错差 1px
+                def _qround(v: float) -> int:
+                    return int(math.floor(v + 0.5)) if v >= 0.0 else -int(math.floor(-v + 0.5))
+
+                sgeo = pet_screen.geometry()
+                sx0, sy0 = sgeo.x(), sgeo.y()
+                pet_dx_px = _qround((target_x - sx0) * dpr) - _qround((cur_x - sx0) * dpr)
+                pet_dy_px = _qround((target_y - sy0) * dpr) - _qround((cur_y - sy0) * dpr)
+                new_pet_px = pet_rect[0] + pet_dx_px
+                new_pet_py = pet_rect[1] + pet_dy_px
+                moves: list[tuple[int, int, int]] = []
+                if target_x != cur_x or target_y != cur_y:
+                    moves.append((pet_hwnd, new_pet_px, new_pet_py))
+                new_bub_px, new_bub_py = bub_rect[0], bub_rect[1]
+                bub_moved = bub_target.x() != bub_cur_x or bub_target.y() != bub_cur_y
+                if bub_moved:
+                    bub_dx_px = _qround((bub_target.x() - sx0) * dpr) - _qround((bub_cur_x - sx0) * dpr)
+                    bub_dy_px = _qround((bub_target.y() - sy0) * dpr) - _qround((bub_cur_y - sy0) * dpr)
+                    new_bub_px = bub_rect[0] + bub_dx_px
+                    new_bub_py = bub_rect[1] + bub_dy_px
+                    moves.append((bub_hwnd, new_bub_px, new_bub_py))
+                if moves:
+                    self._suppress_bubble_reposition = True
+                    try:
+                        moved_atomically = move_windows_atomically(moves)
+                    finally:
+                        self._suppress_bubble_reposition = False
+                    if moved_atomically:
+                        if target_x != cur_x or target_y != cur_y:
+                            self._atomic_pet_sync = (new_pet_px, new_pet_py, target_x, target_y)
+                        if bub_moved:
+                            self._atomic_bub_sync = (new_bub_px, new_bub_py, bub_target.x(), bub_target.y())
+
+        if not moved_atomically:
+            self._atomic_pet_sync = None
+            self._atomic_bub_sync = None
+            self._suppress_bubble_reposition = True
+            try:
+                if target_x != self.x() or target_y != self.y():
+                    self.move(target_x, target_y)
+                if self._speech_bubble.pos() != bub_target:
+                    self._speech_bubble.move(bub_target)
+            finally:
+                self._suppress_bubble_reposition = False
+
+        now_mono = time.monotonic()
+        if (now_mono - self._last_visual_bounds_emit_mono) >= 0.05:
+            self._last_visual_bounds_emit_mono = now_mono
+            self.visual_bounds_changed.emit()
+
     def _clamp_bubble_pos_to_screen(self, pos: QPoint, size: QSize) -> QPoint:
         area = self._get_work_area(pos.x() + size.width() * 0.5, pos.y() + size.height() * 0.5)
         cx = max(area.left() + 6, min(pos.x(), area.right() + 1 - size.width() - 6))
@@ -1850,19 +2089,11 @@ class PetWindow(QWidget):
         self.visual_bounds_changed.emit()
 
     def _reposition_speech_bubble_on_move(self, *, force: bool = False) -> None:
+        del force
         if not self._speech_bubble.isVisible() or self._speech_bubble.is_resizing():
             return
-        # 抛掷高速飞行/弹跳期间适度节流独立气泡窗跟位，避免每帧同步移动两个分层透明窗拖慢主循环
-        if self._is_falling and not force:
-            now_mono = time.monotonic()
-            if (now_mono - self._last_bubble_reposition_mono) < 0.032:
-                return
-            self._last_bubble_reposition_mono = now_mono
         bsize = self._speech_bubble.size()
-        if self._bubble_custom_offset is not None:
-            pos = self._clamp_bubble_pos_to_screen(self.pos() + self._bubble_custom_offset, bsize)
-        else:
-            pos = self._compute_bubble_default_pos(bsize)
+        pos = self._compute_bubble_pos_for_pet(self.x(), self.y(), bsize)
         if self._speech_bubble.pos() != pos:
             self._speech_bubble.move(pos)
             self.visual_bounds_changed.emit()
@@ -1887,31 +2118,37 @@ class PetWindow(QWidget):
             self._bubble_timer.stop()
             self._bubble_timer.start(2500)
 
+    def _set_bubble_text_style(self, qss: str) -> None:
+        """样式表未变化时跳过 setStyleSheet，避免每次弹气泡强制重解析 QSS 与全量布局失效。"""
+        if qss != self._bubble_text_style_applied:
+            self._bubble_text_style_applied = qss
+            self._bubble_text_lbl.setStyleSheet(qss)
+
     def _relayout_stage_top(self, *, reveal_bubble: bool = False) -> None:
-        if (reveal_bubble or self._speech_bubble.isVisible()) and not self._speech_bubble.is_resizing():
-            min_w, min_h = self._bubble_min_size()
-            max_w, max_h = self._bubble_max_size(
+        was_visible = self._speech_bubble.isVisible()
+        if (reveal_bubble or was_visible) and not self._speech_bubble.is_resizing():
+            min_sz = self._bubble_min_size()
+            max_sz = self._bubble_max_size(
                 self.x() + self.width() * 0.5, self.y() + self.height() * 0.5
             )
-            self._speech_bubble.setMinimumSize(min_w, min_h)
-            self._speech_bubble.setMaximumSize(max_w, max_h)
+            if self._bubble_min_applied != min_sz:
+                self._bubble_min_applied = min_sz
+                self._speech_bubble.setMinimumSize(min_sz[0], min_sz[1])
+            if self._bubble_max_applied != max_sz:
+                self._bubble_max_applied = max_sz
+                self._speech_bubble.setMaximumSize(max_sz[0], max_sz[1])
             target_size = self._compute_bubble_target_size()
             # 用户手动调整过尺寸/位置时保留其选择，仅默认摆放时按可用空间收缩。
             if self._bubble_custom_offset is None:
                 target_size = self._fit_bubble_size_to_placement(target_size)
             if self._speech_bubble.size() != target_size:
                 self._speech_bubble.resize(target_size)
-            if self._bubble_custom_offset is not None:
-                target_pos = self._clamp_bubble_pos_to_screen(
-                    self.pos() + self._bubble_custom_offset, target_size
-                )
-            else:
-                target_pos = self._compute_bubble_default_pos(target_size)
+            target_pos = self._compute_bubble_pos_for_pet(self.x(), self.y(), target_size)
             if self._speech_bubble.pos() != target_pos:
                 self._speech_bubble.move(target_pos)
-            if reveal_bubble:
+            if reveal_bubble and not was_visible:
                 self._speech_bubble.show()
-            self._speech_bubble.raise_()
+                self._speech_bubble.raise_()
             # 重新排版气泡后，保持已打开的聊天菜单处于气泡前方。
             menu = getattr(self, "_chat_model_menu", None)
             if menu is not None and menu.isVisible():
@@ -2165,7 +2402,11 @@ class PetWindow(QWidget):
 
     # ==================== 60fps Loop & Kinematics ====================
 
-    def _frame_timer_tick(self) -> None:
+    def _on_frame_timer_timeout(self) -> None:
+        self._frame_timer_tick(_from_timer=True)
+
+    def _frame_timer_tick(self, *, _from_timer: bool = False) -> None:
+        from_timer = _from_timer
         now = datetime.now(timezone.utc)
         now_perf = time.perf_counter()
         if self._last_tick_utc != self._last_tick_utc_recorded:
@@ -2359,8 +2600,9 @@ class PetWindow(QWidget):
             was_falling_this_tick = True
             self._walk_pos_x = None
             _, _, min_x, max_x, min_y, floor_top = self._visible_sprite_work_bounds()
-            cur_x = float(self.x())
-            cur_y = float(self.y())
+            win_x, win_y = self._logical_window_pos()
+            cur_x = float(win_x)
+            cur_y = float(win_y)
             if (
                 self._throw_pos_x is not None
                 and self._throw_pos_y is not None
@@ -2390,7 +2632,7 @@ class PetWindow(QWidget):
 
             target_ix = int(round(res.x))
             target_iy = int(round(res.y))
-            if target_ix != self.x() or target_iy != self.y():
+            if target_ix != win_x or target_iy != win_y:
                 pending_move = (target_ix, target_iy)
             # 将取整余数补偿进画布变换，消除轻弹顶点与低速滑行末段的整数像素步进感
             if res.at_rest:
@@ -2433,7 +2675,7 @@ class PetWindow(QWidget):
                 self._refresh_sprite_visual()
                 self._restart_ai_timer()
 
-        # Autonomous horizontal walk along taskbar (with smooth ease-in/out & clip move-window sync)
+        # Autonomous horizontal walk along taskbar (velocity-locked locomotion state machine)
         if (
             self._is_walking
             and not self._mouse_down
@@ -2454,7 +2696,6 @@ class PetWindow(QWidget):
                 and not self._use_chibi_walk_rig
                 and not self._use_std_walk_rig
             ):
-                # 透明动态步行素材按 move_start_ratio / move_stop_ratio 前后摇窗口控制位移，防止滑步
                 meta = self._active_clip.metadata
                 dur = self._active_clip.duration_sec
                 if dur > 0.0 and (meta.move_start_ratio > 0.0 or meta.move_stop_ratio < 1.0):
@@ -2462,7 +2703,8 @@ class PetWindow(QWidget):
                     if phase < meta.move_start_ratio or phase > meta.move_stop_ratio:
                         move_scale = 0.0
 
-            cur_walk_x = float(self.x())
+            win_x, win_y = self._logical_window_pos()
+            cur_walk_x = float(win_x)
             if self._walk_pos_x is not None and abs(self._walk_pos_x - cur_walk_x) <= 1.5:
                 cur_walk_x = self._walk_pos_x
             speed = 60.0 * self._effective_scale() * move_scale
@@ -2475,26 +2717,30 @@ class PetWindow(QWidget):
                 self._walk_dir = -1
             self._walk_pos_x = next_left
             walk_ix = int(round(next_left))
-            if walk_ix != self.x():
-                pending_move = (walk_ix, self.y())
-            self._motion_engine.set_subpixel_offset(next_left - walk_ix, 0.0)
+            if walk_ix != win_x:
+                pending_move = (walk_ix, win_y)
+            actual_x = self._actual_logical_window_x(walk_ix)
+            self._motion_engine.set_subpixel_offset(next_left - actual_x, 0.0)
         elif not was_falling_this_tick:
             self._walk_pos_x = None
             self._motion_engine.clear_subpixel_offset()
 
-        # 先完成本帧变换与粒子物理推进，再紧邻执行窗口移动与画布刷新，避免位移与挤压/倾角跨帧撕裂
+        # 先完成本帧变换与粒子物理推进，再紧邻执行双窗原子位移与画布刷新，避免位移、气泡与挤压/倾角跨帧撕裂
         self._update_sprite_transforms(dt)
         self._particle_system.step(dt)
         if pending_move is not None:
-            self.move(pending_move[0], pending_move[1])
+            self._move_pet_and_bubble(pending_move[0], pending_move[1])
             if was_falling_this_tick and not self._is_falling:
-                self._reposition_speech_bubble_on_move(force=True)
-        if pending_move is not None and was_falling_this_tick and self.isVisible():
-            # 抛掷弹跳位移帧同步重绘，让 SetWindowPos 与 UpdateLayeredWindow 背靠背提交，消除错拍抖动
+                self.visual_bounds_changed.emit()
+        if pending_move is not None and (was_falling_this_tick or self._is_walking) and self.isVisible():
+            # 位移帧同步重绘，让 SetWindowPos/DeferWindowPos 与带亚像素补偿的 UpdateLayeredWindow 同帧提交，消除微抖
             self._stage_canvas.repaint()
         else:
             self._stage_canvas.update()
-        self._pace_next_frame_tick(now_perf)
+        self._set_high_res_timer_enabled(
+            self.isVisible() and (self._is_walking or self._is_falling or self._is_dragging)
+        )
+        self._pace_next_frame_tick(now_perf, from_timer=from_timer)
 
     def _emit_ambient_particles(self) -> None:
         """按当前姿态周期/概率生成怒气、晕眩、思考、漂浮与打盹 Zzz 氛围粒子。"""
@@ -3983,7 +4229,7 @@ class PetWindow(QWidget):
         self._last_move_mono = now_mono
         self._drag_trail.add_sample(cur_g.x(), cur_g.y(), now_mono)
 
-        self.move(
+        self._move_pet_and_bubble(
             int(round(self._win_start_left + dx)),
             int(round(self._win_start_top + dy)),
         )
@@ -5132,9 +5378,7 @@ class PetWindow(QWidget):
         self._chat.reset_conversation()
         self._chat_input.clear()
         self._chat_messages_panel.setVisible(False)
-        self._bubble_text_lbl.setStyleSheet(
-            "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
-        )
+        self._set_bubble_text_style(_DEFAULT_BUBBLE_TEXT_QSS)
         self._bubble_text_lbl.setText(notice)
         self._bubble_text_lbl.setVisible(True)
         self._update_chat_save_path()
@@ -5781,9 +6025,7 @@ class PetWindow(QWidget):
                 self._append_chat_turn(role="system", sender="", text=message)
             else:
                 self._chat_messages_panel.setVisible(False)
-                self._bubble_text_lbl.setStyleSheet(
-                    "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
-                )
+                self._set_bubble_text_style(_DEFAULT_BUBBLE_TEXT_QSS)
                 self._bubble_text_lbl.setVisible(True)
                 self._bubble_text_lbl.setText(message)
             self._sync_chat_controls()
@@ -5815,10 +6057,9 @@ class PetWindow(QWidget):
         if not self._chat_messages_panel.isHidden():
             self._chat_messages_panel.setVisible(False)
         if not already_showing_sync or self._bubble_text_lbl.isHidden():
-            self._bubble_text_lbl.setStyleSheet(
-                "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
-            )
-            self._bubble_text_lbl.setVisible(True)
+            self._set_bubble_text_style(_DEFAULT_BUBBLE_TEXT_QSS)
+            if self._bubble_text_lbl.isHidden():
+                self._bubble_text_lbl.setVisible(True)
         text_changed = self._bubble_text_lbl.text() != message
         if text_changed:
             bar = self._bubble_scroll.verticalScrollBar()
@@ -5925,16 +6166,14 @@ class PetWindow(QWidget):
                 # 保留当前提示文字，普通欢迎文字不应继承错误提示的红色。
                 is_error_notice = self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用")
                 color = "#FCA5A5" if is_error_notice else "#F6F3FF"
-                self._bubble_text_lbl.setStyleSheet(
+                self._set_bubble_text_style(
                     f"color: {color}; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
                 )
             elif not self._ag_viewing_sync and (
                 not self._speech_bubble.isVisible()
                 or self._bubble_text_lbl.text().startswith("⚠️ API Key 不可用")
             ):
-                self._bubble_text_lbl.setStyleSheet(
-                    "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
-                )
+                self._set_bubble_text_style(_DEFAULT_BUBBLE_TEXT_QSS)
                 self._bubble_text_lbl.setText("想聊什么呀喵？输入文字或指令试试✦")
         self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         self._speech_bubble.setVisible(True)
@@ -5949,9 +6188,11 @@ class PetWindow(QWidget):
 
     def set_speech_bubble_enabled(self, enabled: bool) -> None:
         self._mark_pet_user_activity()
-        self._settings.show_speech_bubble = enabled
-        self.apply_settings_to_window()
-        if enabled:
+        enabled_bool = bool(enabled)
+        self._settings.show_speech_bubble = enabled_bool
+        self._speech_bubble_enabled_applied = enabled_bool
+        self._sync_context_menu_checks()
+        if enabled_bool:
             self.show_bubble("已开启宠物对话气泡，会自动陪你聊天喵✦", 4.0, force=True)
         elif not self._is_chat_open and not self._ag_mirror_active and not self._sync_bubble_active:
             self._sync_chat_controls()

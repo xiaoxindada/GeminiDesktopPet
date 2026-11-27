@@ -22,7 +22,7 @@ from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRect, QSize, Qt
 from PySide6.QtGui import QBitmap, QImage, QImageReader, QPixmap, QRegion
 
 
-_METRICS_CACHE_MAX = 256
+_METRICS_CACHE_MAX = 384
 _ANIM_CACHE_MAX_CLIPS = 4
 _ANIM_MAX_DECODE_HEIGHT = 512
 _DEFAULT_FRAME_DELAY_MS = 42  # ~24fps
@@ -151,6 +151,44 @@ def _tight_alpha_bounds(alpha_img: QImage) -> QRect:
     return QRect(left, top, right - left + 1, bottom - top + 1)
 
 
+def analyze_qimage_metrics(image: Optional[QImage]) -> SpriteMetrics:
+    """线程安全地从 QImage 计算紧致 Alpha 包围盒与视觉重心 X（可在后台线程运行）。"""
+    if image is None or image.isNull():
+        return SpriteMetrics(QRect(0, 0, 1, 1), 0.5)
+    full_bounds = QRect(0, 0, image.width(), image.height())
+    bounds = full_bounds
+    anchor_x = 0.5
+    try:
+        alpha_img = (
+            image
+            if image.format() == QImage.Format.Format_Alpha8
+            else image.convertToFormat(QImage.Format.Format_Alpha8)
+        )
+        tight = _tight_alpha_bounds(alpha_img)
+        if not tight.isEmpty():
+            # 保留 2px 抗锯齿余量，防止发丝/半透明边缘被裁切
+            bounds = tight.adjusted(-2, -2, 2, 2).intersected(full_bounds)
+        anchor_x = _compute_anchor_x_from_image(alpha_img.copy(bounds))
+    except Exception:
+        pass
+    return SpriteMetrics(bounds, anchor_x)
+
+
+def prime_pixmap_metrics(pixmap: Optional[QPixmap], metrics: SpriteMetrics) -> None:
+    """将后台线程预计算好的 SpriteMetrics 注册到主线程缓存，消除首次切图分析开销。"""
+    if pixmap is None or pixmap.isNull():
+        return
+    full_rect = QRect(0, 0, pixmap.width(), pixmap.height())
+    # 防御性校验：仅接受与当前 pixmap 尺寸一致的包围盒，防止紧致缓存图被原图尺寸覆盖
+    if not full_rect.contains(metrics.content_rect):
+        return
+    key = int(pixmap.cacheKey())
+    _metrics_cache[key] = metrics
+    _metrics_cache.move_to_end(key)
+    while len(_metrics_cache) > _METRICS_CACHE_MAX:
+        _metrics_cache.popitem(last=False)
+
+
 def analyze_pixmap_metrics(pixmap: Optional[QPixmap]) -> SpriteMetrics:
     """计算贴图紧致 Alpha 包围盒与视觉重心 X（躯干至脚底区间的透明像素中位数）。
 
@@ -166,21 +204,7 @@ def analyze_pixmap_metrics(pixmap: Optional[QPixmap]) -> SpriteMetrics:
         _metrics_cache.move_to_end(key)
         return cached
 
-    full_bounds = QRect(0, 0, pixmap.width(), pixmap.height())
-    bounds = full_bounds
-    anchor_x = 0.5
-
-    try:
-        alpha_img = pixmap.toImage().convertToFormat(QImage.Format.Format_Alpha8)
-        tight = _tight_alpha_bounds(alpha_img)
-        if not tight.isEmpty():
-            # 保留 2px 抗锯齿余量，防止发丝/半透明边缘被裁切
-            bounds = tight.adjusted(-2, -2, 2, 2).intersected(full_bounds)
-        anchor_x = _compute_anchor_x_from_image(alpha_img.copy(bounds))
-    except Exception:
-        pass
-
-    result = SpriteMetrics(bounds, anchor_x)
+    result = analyze_qimage_metrics(pixmap.toImage())
     _metrics_cache[key] = result
     while len(_metrics_cache) > _METRICS_CACHE_MAX:
         _metrics_cache.popitem(last=False)
