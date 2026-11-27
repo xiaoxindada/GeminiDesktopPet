@@ -146,7 +146,13 @@ class PetApplicationCoordinator(QObject):
         self._chat = GeminiChatService()
         self._quota_service = AntigravityQuotaService()
         self._update_service = UpdateService()
-        self._watcher = AntigravityWatcherService()
+        self._watcher = AntigravityWatcherService(
+            enabled_flags_provider=lambda: (
+                bool(self._settings.follow_antigravity),
+                bool(self._settings.follow_gemini_app),
+                bool(self._settings.follow_antigravity_cli),
+            )
+        )
 
         # 子窗口引用缓存
         self._quota_win: Optional[QuotaWindow] = None

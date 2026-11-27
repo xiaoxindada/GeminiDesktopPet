@@ -150,6 +150,70 @@ class FollowedAppProbe:
         return AppActivitySnapshot(bool(pids), pids, set(pids))
 
     @staticmethod
+    def sample_all_activities(
+        *,
+        check_antigravity: bool = True,
+        check_gemini: bool = True,
+        check_cli: bool = True,
+    ) -> tuple[AppActivitySnapshot, AppActivitySnapshot, AppActivitySnapshot]:
+        """合并单次进程快照与单次窗口枚举，同时采样三个联动目标，避免重复系统调用。"""
+        empty = AppActivitySnapshot(False, set(), set())
+        if not (check_antigravity or check_gemini or check_cli):
+            return (
+                AppActivitySnapshot(False, set(), set()),
+                AppActivitySnapshot(False, set(), set()),
+                AppActivitySnapshot(False, set(), set()),
+            )
+
+        try:
+            entries = _snapshot_process_entries()
+        except Exception:
+            return (
+                FollowedAppProbe.sample_antigravity_activity() if check_antigravity else AppActivitySnapshot(False, set(), set()),
+                FollowedAppProbe.sample_gemini_activity() if check_gemini else AppActivitySnapshot(False, set(), set()),
+                FollowedAppProbe.sample_antigravity_cli_activity() if check_cli else AppActivitySnapshot(False, set(), set()),
+            )
+
+        visible_pids = (
+            _collect_visible_main_window_pids()
+            if (check_antigravity or check_gemini)
+            else set()
+        )
+        ag_target = (f"{ANTIGRAVITY_PROCESS_NAME.lower()}.exe", ANTIGRAVITY_PROCESS_NAME.lower())
+        gem_target = (f"{GEMINI_PROCESS_NAME.lower()}.exe", GEMINI_PROCESS_NAME.lower())
+
+        ag_probes: list[ProcessProbeInfo] = []
+        gem_probes: list[ProcessProbeInfo] = []
+        cli_pids: set[int] = set()
+
+        for pid, exe_name, threads in entries:
+            pname = exe_name.lower()
+            if check_antigravity and pname in ag_target:
+                ag_probes.append(ProcessProbeInfo(pid, pid in visible_pids, threads))
+            elif check_gemini and pname in gem_target:
+                gem_probes.append(ProcessProbeInfo(pid, pid in visible_pids, threads))
+            elif check_cli and pname in {"agy", "agy.exe"}:
+                cli_pids.add(pid)
+
+        ag_snap = (
+            FollowedAppProbe.build_snapshot_from_probes(ag_probes)
+            if check_antigravity
+            else AppActivitySnapshot(False, set(), set())
+        )
+        gem_snap = (
+            FollowedAppProbe.build_snapshot_from_probes(gem_probes)
+            if check_gemini
+            else AppActivitySnapshot(False, set(), set())
+        )
+        if check_cli:
+            cli_pids = {pid for pid in cli_pids if not FollowedAppProbe._is_cli_quota_query(pid)}
+            cli_snap = AppActivitySnapshot(bool(cli_pids), cli_pids, set(cli_pids))
+        else:
+            cli_snap = AppActivitySnapshot(False, set(), set())
+        del empty
+        return ag_snap, gem_snap, cli_snap
+
+    @staticmethod
     def _is_cli_quota_query(pid: int) -> bool:
         try:
             args = psutil.Process(pid).cmdline()[1:]
