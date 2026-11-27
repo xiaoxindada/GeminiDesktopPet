@@ -1134,6 +1134,32 @@ class TestActionClipAndStagePipeline(unittest.TestCase):
             finally:
                 mgr.dispose()
 
+    def test_sound_service_plays_memory_wav_without_winsound_async_error(self) -> None:
+        # 回归验证：常驻内存缓冲区通过 winmm.PlaySoundW 异步播放成功，且回退路径不使用 SND_MEMORY|SND_ASYNC
+        from services.sound_service import PetSoundEffect, _SND_ASYNC, _SND_MEMORY
+
+        svc = SoundService()
+        try:
+            self.assertIsNotNone(svc._play_sound_w)
+            for eff in PetSoundEffect:
+                ok = svc._play_item((svc._wav_bytes[eff], svc._wav_buffers[eff]))
+                self.assertTrue(ok, f"effect {eff} failed to play via memory async buffer")
+            for idx, raw in enumerate(svc._boing_tiers):
+                ok = svc._play_item((raw, svc._boing_tier_buffers[idx]))
+                self.assertTrue(ok, f"boing tier {idx} failed to play")
+
+            # 验证 winmm 不可用时回退到同步 winsound.PlaySound（不带 SND_ASYNC）
+            svc._play_sound_w = None
+            with patch("services.sound_service.winsound.PlaySound") as mock_play:
+                ok = svc._play_item((svc._wav_bytes[PetSoundEffect.CHIME], None))
+                self.assertTrue(ok)
+                mock_play.assert_called_once()
+                _, flags = mock_play.call_args.args
+                self.assertTrue(flags & _SND_MEMORY)
+                self.assertFalse(flags & _SND_ASYNC)
+        finally:
+            svc.dispose()
+
 
 if __name__ == "__main__":
     unittest.main()

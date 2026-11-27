@@ -2,17 +2,34 @@
 
 from __future__ import annotations
 
+import ctypes
 from enum import Enum
 import io
 import math
 import struct
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 import wave
 import winsound
 
 _SAMPLE_RATE = 22050
+_SND_ASYNC = getattr(winsound, "SND_ASYNC", 0x0001)
+_SND_NODEFAULT = getattr(winsound, "SND_NODEFAULT", 0x0002)
+_SND_MEMORY = getattr(winsound, "SND_MEMORY", 0x0004)
+_SND_PURGE = getattr(winsound, "SND_PURGE", 0x0040)
+
+
+def _load_winmm_playsound() -> Any:
+    """加载独立 winmm.PlaySoundW 函数句柄，用于常驻内存缓冲区的异步播放。"""
+    try:
+        winmm = ctypes.WinDLL("winmm")
+        fn = winmm.PlaySoundW
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+        fn.restype = ctypes.c_int
+        return fn
+    except Exception:
+        return None
 
 
 class PetSoundEffect(str, Enum):
@@ -84,10 +101,11 @@ class SoundService:
         self._disposed = False
         self._last_play_monotonic = 0.0
         self._lock = threading.Lock()
+        # 独立保护 Win32 播放与释放清理的互斥锁，避免与主线程 play() 竞争
+        self._playback_lock = threading.Lock()
         self._play_event = threading.Event()
-        self._pending_wav: Optional[bytes] = None
-        # 持有当前播放中的内存 WAV 引用，防止 SND_MEMORY | SND_ASYNC 播放期间缓冲区被回收
-        self._active_wav_ref: Optional[bytes] = None
+        self._pending_item: Optional[tuple[bytes, Any]] = None
+        self._play_sound_w = _load_winmm_playsound()
         self._wav_bytes: dict[PetSoundEffect, bytes] = {
             PetSoundEffect.CHIME: _synthesize_notes([(784, 0.06, 0.16), (1046.5, 0.09, 0.14)]),
             PetSoundEffect.PURR: _synthesize_purr(),
@@ -103,6 +121,16 @@ class SoundService:
             self._wav_bytes[PetSoundEffect.BOING],
             _synthesize_sweep(390, 760, 0.125, 0.21),
         )
+        # 预分配常驻 C 内存缓冲区并在整个生命周期保持强引用，供 winmm.PlaySoundW 安全异步读取
+        self._wav_buffers: dict[PetSoundEffect, Any] = {
+            eff: ctypes.create_string_buffer(raw, len(raw))
+            for eff, raw in self._wav_bytes.items()
+        }
+        self._boing_tier_buffers: tuple[Any, Any, Any] = (
+            ctypes.create_string_buffer(self._boing_tiers[0], len(self._boing_tiers[0])),
+            self._wav_buffers[PetSoundEffect.BOING],
+            ctypes.create_string_buffer(self._boing_tiers[2], len(self._boing_tiers[2])),
+        )
         self._worker = threading.Thread(
             target=self._audio_worker_loop,
             name="GeminiDesktopPetSoundWorker",
@@ -116,17 +144,57 @@ class SoundService:
         now = time.monotonic()
         if effect == PetSoundEffect.BOING and intensity is not None:
             lvl = max(0.0, min(1.0, float(intensity)))
-            raw = self._boing_tiers[0 if lvl < 0.35 else (1 if lvl < 0.72 else 2)]
+            tier_idx = 0 if lvl < 0.35 else (1 if lvl < 0.72 else 2)
+            raw = self._boing_tiers[tier_idx]
+            c_buf = self._boing_tier_buffers[tier_idx] if tier_idx < len(self._boing_tier_buffers) else None
         else:
             raw = self._wav_bytes.get(effect)
+            c_buf = self._wav_buffers.get(effect)
         if not raw:
             return
         with self._lock:
             if self._disposed or (now - self._last_play_monotonic) < 0.14:
                 return
             self._last_play_monotonic = now
-            self._pending_wav = raw
+            self._pending_item = (raw, c_buf)
         self._play_event.set()
+
+    def _play_item(self, item: tuple[bytes, Any]) -> bool:
+        """播放内存 WAV；CPython winsound 禁止 SND_MEMORY|SND_ASYNC，优先直调 winmm.PlaySoundW。"""
+        raw, c_buf = item
+        with self._playback_lock:
+            if self._disposed:
+                return False
+            if self._play_sound_w is not None and c_buf is not None:
+                try:
+                    ok = bool(
+                        self._play_sound_w(
+                            ctypes.addressof(c_buf),
+                            None,
+                            _SND_MEMORY | _SND_ASYNC | _SND_NODEFAULT,
+                        )
+                    )
+                    if ok:
+                        return True
+                except Exception:
+                    pass
+            try:
+                winsound.PlaySound(raw, _SND_MEMORY | _SND_NODEFAULT)
+                return True
+            except Exception:
+                return False
+
+    def _purge_playback(self) -> None:
+        if self._play_sound_w is not None:
+            try:
+                self._play_sound_w(None, None, 0)
+                return
+            except Exception:
+                pass
+        try:
+            winsound.PlaySound(None, _SND_PURGE)
+        except Exception:
+            pass
 
     def _audio_worker_loop(self) -> None:
         while not self._disposed:
@@ -135,28 +203,23 @@ class SoundService:
             if self._disposed:
                 break
             with self._lock:
-                raw = self._pending_wav
-                self._pending_wav = None
-                self._active_wav_ref = raw
-            if not raw or self._disposed:
+                item = self._pending_item
+                self._pending_item = None
+            if not item or self._disposed:
                 continue
-            try:
-                winsound.PlaySound(
-                    raw,
-                    winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
-                )
-            except Exception:
-                pass
+            self._play_item(item)
 
     def dispose(self) -> None:
         with self._lock:
             self._disposed = True
-            self._pending_wav = None
+            self._pending_item = None
         self._play_event.set()
-        try:
-            winsound.PlaySound(None, winsound.SND_PURGE)
-        except Exception:
-            pass
+        # 先中断可能正在执行的回退同步播放，避免 join 等待过久
+        self._purge_playback()
         if self._worker.is_alive() and self._worker is not threading.current_thread():
-            self._worker.join(timeout=0.25)
-        self._active_wav_ref = None
+            self._worker.join(timeout=0.5)
+        # 确保音频线程已退出且异步播放完全停止后再释放常驻内存缓冲区
+        with self._playback_lock:
+            self._purge_playback()
+            self._wav_buffers.clear()
+            self._boing_tier_buffers = ()
