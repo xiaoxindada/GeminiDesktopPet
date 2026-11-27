@@ -134,6 +134,11 @@ class SpriteManager:
             "edge_left_peek",
             "edge_right",
             "edge_right_peek",
+            "busy_left",
+            "busy_right",
+            "swamped_left",
+            "swamped_right",
+            "hum",
         ):
             pix = self._load_pixmap(os.path.join(self._standard_dir, f"{std_key}.png"))
             if pix is not None:

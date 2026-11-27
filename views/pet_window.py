@@ -7,6 +7,7 @@ import math
 import os
 from collections import deque
 import random
+import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -106,6 +107,16 @@ _SYNC_REPLACE_INTERVAL = 0.12
 _SYNC_QUEUE_LIMIT = 10
 _SYNC_HEARTBEAT_SEC = 60.0
 _SYNC_BUBBLE_IDLE_MS = 3000
+# 反重力播报联动动作：每轮新对话随机选定前 4 个忙碌动作之一并在完成前固定，完成后切开心（hum）动作；
+# Q 版与标准立绘共用同一组 PetState，由 SpriteManager 按当前形象加载对应贴图。
+_SYNC_BUSY_POSES: tuple[PetState, ...] = (
+    PetState.BUSY_LEFT,
+    PetState.BUSY_RIGHT,
+    PetState.SWAMPED_LEFT,
+    PetState.SWAMPED_RIGHT,
+)
+_SYNC_DONE_POSE = PetState.HUM
+_SYNC_DONE_POSE_DURATION_S = 4.5
 
 # 无操作随机台词：定时器检测周期（毫秒），具体间隔由当前角色档案的气泡活跃程度决定
 _IDLE_SPEECH_CHECK_MS = 1000
@@ -556,6 +567,7 @@ class PetWindow(QWidget):
     settings_synced = Signal()
     visual_bounds_changed = Signal()
     exit_requested = Signal()
+    _ag_silent_connect_ready = Signal(object)
 
     def __init__(
         self,
@@ -602,13 +614,25 @@ class PetWindow(QWidget):
         self._ag_playback: deque[SyncEvent] = deque()
         self._ag_last_shown = 0.0
         self._ag_last_replace = 0.0
+        self._ag_pending_replace: Optional[SyncEvent] = None
+        self._ag_current_source_id = ""
         self._sync_thinking_visible = False
         self._sync_thinking_pinned = False
         self._sync_bubble_active = False
         self._sync_waiting_for_reply = False
-        # 心跳：按时间写日志，确认轮询是否真的在跑。
+        self._sync_busy_active = False
+        self._sync_turn_pose: Optional[PetState] = None
+        self._sync_last_busy_pose: Optional[PetState] = None
+        self._sync_working_sessions: set[str] = set()
+        # 心跳：按时间写日志，确认轮询是否真的在跑；SQLite 与文件扫描在后台线程执行，主线程仅消费内存队列。
         self._ag_dbg_ticks = 0
         self._ag_dbg_last = time.monotonic()
+        self._ag_poll_stop = threading.Event()
+        self._ag_poll_thread: Optional[threading.Thread] = None
+        self._ag_reconnect_inflight = False
+        self._ag_silent_connect_ready.connect(
+            self._on_ag_silent_connect_ready, Qt.ConnectionType.QueuedConnection
+        )
         self._ag_sync_timer = QTimer(self)
         self._ag_sync_timer.setInterval(_SYNC_POLL_MS)
         self._ag_sync_timer.timeout.connect(self._refresh_antigravity_sync)
@@ -640,6 +664,8 @@ class PetWindow(QWidget):
         self._override_pose: Optional[PetState] = None
         # 区分自动闲置动作与交互临时动作：自动动作持续到下次决策直接衔接，不提前回落默认待机
         self._override_is_autonomous = False
+        # 区分反重力同步联动动作与交互动作，避免同步动作污染连戳/摇晃或误回收正常动作
+        self._override_is_sync = False
         # 仅烦恼/鼓嘴/炸毛/眩晕/生气(5秒)播放期锁定，避免随机闲聊命中 PUFFED 误锁交互
         self._override_locked = False
         # 炸毛（REDHOT）或眩晕（DIZZY）结束后衔接闹脾气（SULK）的待续标志
@@ -1383,6 +1409,7 @@ class PetWindow(QWidget):
         self._idle_speech_timer.stop()
         self._quota_double_click_timer.stop()
         self._ag_sync_timer.stop()
+        self._stop_ag_poll_thread()
         for worker in list(self._active_chat_workers):
             if worker.isRunning():
                 worker.wait(400)
@@ -1409,6 +1436,8 @@ class PetWindow(QWidget):
         if getattr(self, "_ui_ready", False):
             self._is_chat_open = False
             self._is_forced_bubble_active = False
+            self._ag_pending_replace = None
+            self._clear_sync_pose_state(release_pose=True)
             self._sync_chat_controls()
             self._hide_speech_bubble()
         super().hideEvent(event)
@@ -1959,6 +1988,9 @@ class PetWindow(QWidget):
         if not self.isVisible():
             self.show()
 
+        if self._is_sync_working_locked():
+            return
+
         force_wake = bool(custom_message and custom_message.strip())
         if self._settings.docked_side != DockSide.NONE:
             self._reanchor_docked_position()
@@ -1988,6 +2020,15 @@ class PetWindow(QWidget):
 
     def preview_state(self, state: PetState, style: Optional[PetStyleMode] = None) -> None:
         """从动作图鉴演示指定动作，若同时切换形象则先锁定目标动作，避免闪回默认立绘。"""
+        if self._is_sync_working_locked():
+            if style is not None and self._settings.style_mode != style:
+                self._settings.style_mode = style
+                self._settings_service.save(self._settings)
+                self.apply_settings_to_window()
+                self.settings_synced.emit()
+                if self._settings.docked_side != DockSide.NONE:
+                    self._reanchor_docked_position()
+            return
         self._mark_pet_user_activity()
         self._is_walking = False
         self._is_sleeping = state in (
@@ -1997,6 +2038,7 @@ class PetWindow(QWidget):
         )
         self._override_pose = state
         self._override_is_autonomous = False
+        self._override_is_sync = False
         self._override_locked = False
         self._pending_sulk_after_pose = False
         self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=4.5)
@@ -2041,13 +2083,14 @@ class PetWindow(QWidget):
             if abs(self._drag_tilt_vx) <= 1.0:
                 self._drag_tilt_vx = 0.0
 
-        if self._waiting_chat_workers:
+        if self._waiting_chat_workers and not self._is_sync_working_locked():
             # 模型正在回复期间锁定展示“思考中”形象，防止长耗时思考请求被超时定时器打断
             if self._override_pose != PetState.THINKING:
                 self._is_walking = False
                 self._is_sleeping = False
                 self._override_pose = PetState.THINKING
                 self._override_is_autonomous = False
+                self._override_is_sync = False
                 self._override_locked = False
                 self._pending_sulk_after_pose = False
                 self._refresh_sprite_visual()
@@ -2062,6 +2105,7 @@ class PetWindow(QWidget):
             self._reset_drag_shake_tracking()
             self._override_pose = PetState.FLOAT
             self._override_is_autonomous = False
+            self._override_is_sync = False
             self._override_locked = False
             if not self._is_sulk:
                 self._pending_sulk_after_pose = False
@@ -2079,6 +2123,7 @@ class PetWindow(QWidget):
             and now >= self._override_until_utc
         ):
             finished_pose = self._override_pose
+            was_sync_pose = self._override_is_sync
             if self._is_dragging:
                 now_mono = time.monotonic()
                 # 当前阶段动作刚播完且仍在持续摇晃时，在同一帧顺阶推进 烦恼 -> 鼓嘴 -> 炸毛
@@ -2091,6 +2136,7 @@ class PetWindow(QWidget):
                     if self._override_pose != PetState.FLOAT:
                         self._override_pose = PetState.FLOAT
                         self._override_is_autonomous = False
+                        self._override_is_sync = False
                         self._override_locked = False
                         if finished_pose == PetState.SULK and self._is_sulk:
                             self._is_sulk = False
@@ -2110,16 +2156,17 @@ class PetWindow(QWidget):
                 self._pending_sulk_after_pose = False
                 self._override_pose = None
                 self._override_is_autonomous = False
+                self._override_is_sync = False
                 self._override_locked = False
-                if finished_pose == PetState.ANNOYED and self._poke_count > 0:
+                if finished_pose == PetState.ANNOYED and not was_sync_pose and self._poke_count > 0:
                     # 连戳触发的烦恼播完后保留短暂怒气记忆，再次戳身体时顺阶进入鼓嘴
                     self._poke_stage = 1
                     self._poke_stage_until_mono = time.monotonic() + _POKE_STAGE_MEMORY_S
-                elif finished_pose == PetState.PUFFED and self._poke_count > 0:
+                elif finished_pose == PetState.PUFFED and not was_sync_pose and self._poke_count > 0:
                     # 连戳触发的鼓嘴播完后保留短暂怒气记忆，再次戳身体时顺阶爆发炸毛
                     self._poke_stage = 2
                     self._poke_stage_until_mono = time.monotonic() + _POKE_STAGE_MEMORY_S
-                else:
+                elif not was_sync_pose:
                     self._poke_count = 0
                     self._poke_stage = 0
                     self._poke_stage_until_mono = 0.0
@@ -2137,6 +2184,15 @@ class PetWindow(QWidget):
         ):
             # 兜底清除无对应闹脾气姿态的残留标记，避免状态卡死
             self._is_sulk = False
+
+        # 反重力实时同步进行中：在当前轮次未完成前保持本轮随机选定的忙碌动作固定，不中途切回待机或换动作。
+        if (
+            self._sync_busy_active
+            and self._sync_turn_pose is not None
+            and self._can_apply_sync_pose()
+            and (self._override_pose is None or self._override_is_autonomous)
+        ):
+            self._apply_sync_pose(self._sync_turn_pose, None)
 
         # Gravity fall physics
         if (
@@ -2212,7 +2268,7 @@ class PetWindow(QWidget):
             angle = (1.0 if self._settings.docked_side == DockSide.LEFT else -1.0) * 0.8 * math.sin(
                 self._anim_time * 2.1
             )
-        elif self._is_dragging:
+        elif self._is_dragging and not self._is_sync_working_locked():
             angle = max(-16.0, min(16.0, self._drag_tilt_vx * 0.012))
             sy = 1.02
             if self._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT):
@@ -2761,6 +2817,7 @@ class PetWindow(QWidget):
         self._is_sleeping = state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP)
         self._override_pose = state
         self._override_is_autonomous = False
+        self._override_is_sync = False
         self._override_locked = locked
         self._pending_sulk_after_pose = pending_sulk
         self._override_until_utc = datetime.now(timezone.utc) + timedelta(seconds=duration_sec)
@@ -2783,6 +2840,7 @@ class PetWindow(QWidget):
         self._is_sleeping = False
         self._override_pose = state
         self._override_is_autonomous = True
+        self._override_is_sync = False
         self._override_locked = False
         self._pending_sulk_after_pose = False
         self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
@@ -2835,7 +2893,9 @@ class PetWindow(QWidget):
             or self._sync_bubble_active
             or self._sync_thinking_pinned
             or self._sync_waiting_for_reply
+            or self._sync_busy_active
             or bool(self._ag_playback)
+            or self._ag_pending_replace is not None
             or self._is_forced_bubble_active
             or self._speech_bubble.isVisible()
             or self._context_menu.isVisible()
@@ -2883,6 +2943,7 @@ class PetWindow(QWidget):
         elif pose == PetState.RUNNING:
             self._override_pose = None
             self._override_is_autonomous = False
+            self._override_is_sync = False
             self._pending_sulk_after_pose = False
             self._is_sleeping = False
             self._is_walking = True
@@ -2913,6 +2974,7 @@ class PetWindow(QWidget):
             or self._is_dragging
             or self._is_falling
             or (self._override_pose is not None and not self._override_is_autonomous)
+            or self._sync_busy_active
             or self._is_sulk
             or self._is_chat_open
             or (self._idle_speech_bubble_active and self._speech_bubble.isVisible())
@@ -2924,6 +2986,7 @@ class PetWindow(QWidget):
             self._is_walking = False
             self._override_pose = None
             self._override_is_autonomous = False
+            self._override_is_sync = False
             self._current_state = self._resolve_resting_state()
             self._refresh_sprite_visual()
             self._update_sprite_transforms()
@@ -3006,6 +3069,7 @@ class PetWindow(QWidget):
             or self._is_dragging
             or self._is_sulk
             or self._is_action_playback_locked()
+            or self._is_sync_working_locked()
         ):
             return
 
@@ -3067,9 +3131,20 @@ class PetWindow(QWidget):
             and datetime.now(timezone.utc) < self._override_until_utc
         )
 
+    def _is_sync_working_locked(self) -> bool:
+        """反重力同步工作进行中屏蔽除查看额度外的交互动作，直至本轮完成释放。"""
+        return (
+            self._sync_busy_active
+            and self._sync_turn_pose is not None
+            and not self._settings.doze_mode
+            and not (self._is_chat_open and not self._ag_viewing_sync)
+        )
+
     def _is_drag_float_allowed(self, now_mono: Optional[float] = None) -> bool:
         """判断当前拖拽是否应展示正常反重力悬浮反馈（完全炸毛停晃满 2 秒恢复 FLOAT，锁定/摇晃活跃期禁切）。"""
         now = time.monotonic() if now_mono is None else now_mono
+        if self._is_sync_working_locked():
+            return False
         if self._is_shaking and self._override_pose == PetState.REDHOT:
             if (
                 self._shake_last_active_mono > 0.0
@@ -3293,7 +3368,9 @@ class PetWindow(QWidget):
         now_mono: float,
         prev_move_mono: float,
     ) -> bool:
-        # 正在播放眩晕/生气等非摇晃锁定动作期间，不被拖拽摇晃中途打断
+        # 同步工作期或正在播放眩晕/生气等非摇晃锁定动作期间，不被拖拽摇晃中途打断
+        if self._is_sync_working_locked():
+            return False
         if self._is_action_playback_locked() and self._override_pose not in (
             PetState.ANNOYED,
             PetState.PUFFED,
@@ -3475,6 +3552,7 @@ class PetWindow(QWidget):
         )
         continuing_shake = (
             self._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT)
+            and not self._override_is_sync
             and datetime.now(timezone.utc) < self._override_until_utc
             and last_shake_mono > 0.0
             and (now_mono - last_shake_mono) <= _SHAKE_RELEASE_GRACE_S
@@ -3545,9 +3623,10 @@ class PetWindow(QWidget):
         )
         head_ratio = self._head_click_ratio()
 
-        # 贴边或常态下双击头部直接呼出额度；双击身体或闹脾气期间转入点击释放统一判定，防连戳误开额度
+        # 贴边、同步工作期或常态下双击头部直接呼出额度；双击身体或闹脾气期间转入点击释放统一判定，防连戳误开额度
         direct_quota = (
             self._settings.docked_side != DockSide.NONE
+            or self._is_sync_working_locked()
             or (rel_y <= head_ratio and not self._is_sulk)
         )
         if direct_quota:
@@ -3594,11 +3673,23 @@ class PetWindow(QWidget):
                     self._pending_sulk_after_pose = False
                 if self._is_drag_float_allowed(now_mono):
                     self._override_pose = PetState.FLOAT
+                    self._override_is_sync = False
                     self._override_locked = False
                     self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                 if self._settings.docked_side != DockSide.NONE:
                     old_local_rect = self._get_local_sprite_rect()
                     self._settings.docked_side = DockSide.NONE
+                    # 同步工作期间从侧边拖回桌面时立即恢复本轮固定忙碌动作
+                    if (
+                        self._is_sync_working_locked()
+                        and self._override_pose is None
+                        and self._sync_turn_pose is not None
+                    ):
+                        self._override_pose = self._sync_turn_pose
+                        self._override_is_autonomous = False
+                        self._override_is_sync = True
+                        self._override_locked = False
+                        self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
                     self._current_state = self._resolve_resting_state()
                     self._refresh_sprite_visual()
                     # 从贴边半身切换到居中完整立绘时补偿窗口横向偏移，避免角色瞬移脱离鼠标。
@@ -3636,11 +3727,15 @@ class PetWindow(QWidget):
                 self._process_drag_shake_step(step_x, step_y, now_mono, prev_move_mono)
             return
 
-        # 悬停头部抚摸检测（按画风适配头部区域占比；锁定动作播放期间不积累或触发摸头）
+        # 悬停头部抚摸检测（按画风适配头部区域占比；同步工作期及锁定动作播放期间不积累或触发摸头）
         hit_h = sprite_rect.height()
         if self._settings.docked_side == DockSide.NONE and hit_h > 20.0:
             now_mono = time.monotonic()
-            if now_mono < self._pat_hover_blocked_until_mono or self._is_action_playback_locked():
+            if (
+                now_mono < self._pat_hover_blocked_until_mono
+                or self._is_action_playback_locked()
+                or self._is_sync_working_locked()
+            ):
                 self._pat_travel = 0.0
                 self._last_pat_local = QPointF(local_pos.x(), local_pos.y())
                 return
@@ -3693,7 +3788,11 @@ class PetWindow(QWidget):
         is_double_click: bool,
     ) -> None:
         """处理点击身体交互：单点闲聊，连戳按阶段播完递进 烦恼 -> 鼓嘴 -> 炸毛 -> 闹脾气。"""
-        if self._waiting_chat_workers or self._is_action_playback_locked():
+        if (
+            self._waiting_chat_workers
+            or self._is_action_playback_locked()
+            or self._is_sync_working_locked()
+        ):
             return
 
         self._poke_recoil_dir = -1.0 if local_pos.x() >= sprite_rect.center().x() else 1.0
@@ -3784,8 +3883,12 @@ class PetWindow(QWidget):
             self._drag_tilt_vx = 0.0
             was_walking = self._is_walking
             self._is_walking = False
-            # 当前交互动作尚未播完（或按下时仍处于锁定状态）时，点击不中断或偷跑触发动作
-            if press_started_while_locked or self._is_action_playback_locked():
+            # 当前交互动作尚未播完（或按下时仍处于锁定状态）及同步工作期，点击不中断或偷跑触发动作
+            if (
+                press_started_while_locked
+                or self._is_action_playback_locked()
+                or self._is_sync_working_locked()
+            ):
                 return
             local_pos = event.position()
             sprite_rect = self._get_local_sprite_rect()
@@ -3843,7 +3946,10 @@ class PetWindow(QWidget):
             )
         )
 
-        if bristled_on_release:
+        if self._is_sync_working_locked():
+            # 同步工作期放行贴边吸附；未贴边时平稳落回并保持本轮固定忙碌动作。
+            self._try_edge_dock_or_gravity_drop(refresh_resting=False, sync_working=True)
+        elif bristled_on_release:
             self._trigger_dizzy_state(now_mono, particle_count=5)
             self._clamp_and_apply_gravity_after_release(refresh_resting=False)
         elif not stopped_recovered and self._is_action_playback_locked():
@@ -3853,6 +3959,7 @@ class PetWindow(QWidget):
             self._is_sulk = False
             self._override_pose = None
             self._override_is_autonomous = False
+            self._override_is_sync = False
             self._override_locked = False
             self._pending_sulk_after_pose = False
             self._current_state = self._resolve_resting_state()
@@ -3878,8 +3985,8 @@ class PetWindow(QWidget):
             )
 
     def trigger_pat(self) -> None:
-        # 烦恼/鼓嘴/炸毛/眩晕/生气(5秒)播放期间禁止被摸头中途打断
-        if self._is_action_playback_locked():
+        # 烦恼/鼓嘴/炸毛/眩晕/生气(5秒)及反重力同步工作期禁止被摸头中途打断
+        if self._is_action_playback_locked() or self._is_sync_working_locked():
             return
         self._mark_pet_user_activity()
         self._quota_double_click_timer.stop()
@@ -3949,7 +4056,12 @@ class PetWindow(QWidget):
         self._refresh_sprite_visual()
         self._stage_canvas.update()
 
-    def _try_edge_dock_or_gravity_drop(self) -> None:
+    def _try_edge_dock_or_gravity_drop(
+        self,
+        *,
+        refresh_resting: bool = True,
+        sync_working: bool = False,
+    ) -> None:
         area = self._get_work_area(self.x() + self.width() * 0.5, self.y() + self.height() * 0.5)
         sprite_rect = self._get_local_sprite_rect()
         sprite_w = sprite_rect.width() if sprite_rect.width() > 10 else 180.0 * self._effective_scale()
@@ -3961,31 +4073,45 @@ class PetWindow(QWidget):
         # 按角色可见边界判定贴边，避免窗口透明留白触边导致刚拖出侧边栏就被误吸回。
         if self._settings.edge_dock_enabled and sprite_left <= area.left() + snap_margin:
             self._settings.docked_side = DockSide.LEFT
+            if sync_working and self._override_is_sync:
+                self._override_pose = None
+                self._override_is_autonomous = False
+                self._override_is_sync = False
+                self._override_locked = False
             self.move(area.left(), max(area.top(), min(max_y, self.y())))
-            self._update_dock_alignment()
             self._current_state = (
                 self._resolve_resting_state() if self._settings.doze_mode else PetState.EDGE_LEFT_PEEK
             )
             self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._update_dock_alignment()
             self._stage_canvas.update()
-            self.show_bubble(CharacterLore.pick_line("edge"), 3.5)
+            if not sync_working:
+                self.show_bubble(CharacterLore.pick_line("edge"), 3.5)
             self._sound.play(PetSoundEffect.CHIME)
             return
 
         if self._settings.edge_dock_enabled and sprite_right >= area.right() + 1 - snap_margin:
             self._settings.docked_side = DockSide.RIGHT
+            if sync_working and self._override_is_sync:
+                self._override_pose = None
+                self._override_is_autonomous = False
+                self._override_is_sync = False
+                self._override_locked = False
             self.move(area.right() + 1 - self.width(), max(area.top(), min(max_y, self.y())))
-            self._update_dock_alignment()
             self._current_state = (
                 self._resolve_resting_state() if self._settings.doze_mode else PetState.EDGE_RIGHT_PEEK
             )
             self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._update_dock_alignment()
             self._stage_canvas.update()
-            self.show_bubble(CharacterLore.pick_line("edge"), 3.5)
+            if not sync_working:
+                self.show_bubble(CharacterLore.pick_line("edge"), 3.5)
             self._sound.play(PetSoundEffect.CHIME)
             return
 
-        self._clamp_and_apply_gravity_after_release(refresh_resting=True)
+        self._clamp_and_apply_gravity_after_release(refresh_resting=refresh_resting)
 
     # ==================== Speech Bubble & Inline Gemini Chat ====================
 
@@ -4877,6 +5003,105 @@ class PetWindow(QWidget):
     def _on_menu_sync_chat(self, checked: bool) -> None:
         self.set_antigravity_sync_enabled(checked)
 
+    def _start_ag_poll_thread(self) -> None:
+        """在后台守护线程周期性执行会话库扫描与增量 SQLite 读取，彻底移出 GUI 主线程。"""
+        if self._ag_poll_thread is not None and self._ag_poll_thread.is_alive():
+            return
+        self._ag_poll_stop.clear()
+        interval_sec = max(0.05, float(_SYNC_POLL_MS) / 1000.0)
+
+        def _loop() -> None:
+            while not self._ag_poll_stop.wait(interval_sec):
+                if not self._ag_mirror_active:
+                    continue
+                try:
+                    self._ag_collector.poll()
+                except Exception as exc:
+                    AppLogger.error("ChatSync", "反重力后台采集失败", exc)
+
+        self._ag_poll_thread = threading.Thread(
+            target=_loop,
+            name="GeminiDesktopPetChatSyncPoll",
+            daemon=True,
+        )
+        self._ag_poll_thread.start()
+
+    def _stop_ag_poll_thread(self) -> None:
+        self._ag_poll_stop.set()
+        thread = self._ag_poll_thread
+        self._ag_poll_thread = None
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.35)
+
+    def _probe_antigravity_sync_async(self) -> None:
+        """后台静默探测可用会话，避免未连接时每 10 秒在主线程全目录扫库造成掉帧。"""
+        if self._ag_reconnect_inflight or self._ag_mirror_active:
+            return
+        self._ag_reconnect_inflight = True
+
+        def _worker() -> None:
+            conversation = None
+            try:
+                conversation = self._ag_sync_service.latest_conversation()
+            except Exception as exc:
+                AppLogger.warn("ChatSync", f"后台探测反重力会话失败：{exc}")
+            self._ag_silent_connect_ready.emit(conversation)
+
+        threading.Thread(
+            target=_worker,
+            name="GeminiDesktopPetChatSyncProbe",
+            daemon=True,
+        ).start()
+
+    def _on_ag_silent_connect_ready(self, conversation: object) -> None:
+        self._ag_reconnect_inflight = False
+        if (
+            self._closing_handled
+            or self._ag_mirror_active
+            or not self._settings.chat_sync_enabled
+            or conversation is None
+            or not getattr(conversation, "messages", None)
+        ):
+            return
+        self._bind_antigravity_conversation(conversation, silent=True)
+
+    def _bind_antigravity_conversation(self, conversation, *, silent: bool) -> None:
+        self._ag_mirror_active = True
+        self._ag_current_source_id = conversation.source_id
+        self._ag_collector.reset()
+        self._ag_collector.watch(conversation)
+        self._ag_playback.clear()
+        self._ag_last_shown = 0.0
+        self._ag_last_replace = 0.0
+        self._ag_pending_replace = None
+        self._clear_sync_pose_state(release_pose=False)
+        self._ag_dbg_ticks = 0
+        self._ag_dbg_last = time.monotonic()
+        # 首拉只记基线：已有的历史不重放，只播之后的新内容；若此时已有并发会话正在运行则同步进入工作态。
+        self._ag_baseline = self._ag_sync_state.counters()
+        initial_working = set(self._ag_collector.working_ids)
+        if initial_working:
+            self._apply_sync_working_snapshot(
+                initial_working, completed=False, has_pending_events=False
+            )
+        self._start_ag_poll_thread()
+        if self._is_chat_open:
+            self._ag_sync_session_id = f"sync:{uuid.uuid4().hex}"
+            self._ag_sync_events.clear()
+            if silent:
+                # 后台静默重连到可同步对话时仅刷新会话列表并继续收消息，不自动跳转。
+                self._refresh_chat_sessions()
+            elif self._waiting_chat_workers:
+                self._ag_pending_handoff = True
+            else:
+                self._show_sync_chat_session()
+        if not silent and not self._is_chat_open:
+            self.show_bubble("Antigravity 对话播报已开启喵～新消息会出现在这里", 4.0)
+        AppLogger.info(
+            "ChatSync",
+            f"开始播报：{conversation.source_id[:8]}, 基线={len(conversation.messages)}",
+        )
+
     def start_antigravity_sync(self, *, silent: bool = False) -> None:
         """开启反重力对话播报：新消息直接显示在桌宠气泡里。
 
@@ -4892,36 +5117,14 @@ class PetWindow(QWidget):
                         self.show_bubble("等待可同步的 Antigravity 对话喵～", 3.5)
                     AppLogger.warn("ChatSync", "尚无可同步的反重力对话，稍后重试")
                 return
-            self._ag_mirror_active = True
-            self._ag_collector.reset()
-            self._ag_collector.watch(conversation)
-            self._ag_playback.clear()
-            self._ag_last_shown = 0.0
-            self._ag_last_replace = 0.0
-            self._ag_dbg_ticks = 0
-            self._ag_dbg_last = time.monotonic()
-            # 首拉只记基线：已有的历史不重放，只播之后的新内容。
-            self._ag_baseline = self._ag_sync_state.counters()
-            if self._is_chat_open:
-                self._ag_sync_session_id = f"sync:{uuid.uuid4().hex}"
-                self._ag_sync_events.clear()
-                if silent:
-                    # 后台静默重连到可同步对话时仅刷新会话列表并继续收消息，不自动跳转。
-                    self._refresh_chat_sessions()
-                elif self._waiting_chat_workers:
-                    self._ag_pending_handoff = True
-                else:
-                    self._show_sync_chat_session()
-            if not silent and not self._is_chat_open:
-                self.show_bubble("Antigravity 对话播报已开启喵～新消息会出现在这里", 4.0)
-            AppLogger.info(
-                "ChatSync",
-                f"开始播报：{conversation.source_id[:8]}, 基线={len(conversation.messages)}",
-            )
+            self._bind_antigravity_conversation(conversation, silent=silent)
         except Exception as exc:
             self._ag_mirror_active = False
+            self._stop_ag_poll_thread()
             self._ag_collector.reset()
             self._ag_playback.clear()
+            self._ag_pending_replace = None
+            self._clear_sync_pose_state(release_pose=True)
             self._ag_baseline = {}
             self._ag_sync_session_id = None
             self._ag_sync_events.clear()
@@ -4937,10 +5140,14 @@ class PetWindow(QWidget):
         self._sync_thinking_pinned = False
         self._sync_thinking_visible = False
         self._ag_mirror_active = False
+        self._stop_ag_poll_thread()
+        self._ag_current_source_id = ""
         self._ag_collector.reset()
         self._ag_playback.clear()
         self._ag_baseline = {}
         self._ag_last_replace = 0.0
+        self._ag_pending_replace = None
+        self._clear_sync_pose_state(release_pose=True)
         self._ag_sync_session_id = None
         self._ag_sync_events.clear()
         self._ag_pending_handoff = False
@@ -4955,19 +5162,25 @@ class PetWindow(QWidget):
             self.show_bubble("已停止 Antigravity 播报喵～", 3.0)
 
     def _auto_resume_antigravity_sync(self) -> None:
-        """启动时恢复上次的播报开关：静默开启，不覆盖问候气泡。"""
+        """启动时恢复上次的播报开关：后台探测会话，不阻塞主渲染循环也不覆盖问候气泡。"""
         if self._ag_mirror_active or not self._settings.chat_sync_enabled:
             return
         self._ag_next_retry_at = time.monotonic() + 10.0
-        self.start_antigravity_sync(silent=True)
+        self._probe_antigravity_sync_async()
 
     def _refresh_antigravity_sync(self) -> None:
-        """十几拍一次的状态采集：读库 → 取差量 → 播队列。"""
+        """主线程轻量消费循环：仅读内存差量并播放气泡队列，所有扫盘与 SQLite 读取均在后台线程完成。"""
         if not self._ag_mirror_active:
             now = time.monotonic()
-            if self.isVisible() and self._settings.chat_sync_enabled and now >= self._ag_next_retry_at:
+            if (
+                self.isVisible()
+                and self._settings.chat_sync_enabled
+                and not self._is_falling
+                and not self._is_dragging
+                and now >= self._ag_next_retry_at
+            ):
                 self._ag_next_retry_at = now + 10.0
-                self.start_antigravity_sync(silent=True)
+                self._probe_antigravity_sync_async()
             return
         self._ag_dbg_ticks += 1
         now = time.monotonic()
@@ -4980,47 +5193,106 @@ class PetWindow(QWidget):
                 f"{self._ag_collector.stats}",
             )
         try:
-            self._ag_collector.poll()
             self._consume_antigravity_changes()
             self._play_antigravity_queue()
+            # 兜底一致性巡检：队列已播完且采集器已绑定实库并确认无工作流程时，自动回归常态防止卡死。
+            if (
+                self._sync_busy_active
+                and self._ag_collector.is_watching
+                and not self._ag_playback
+                and self._ag_pending_replace is None
+                and not self._ag_collector.working_ids
+            ):
+                self._apply_sync_working_snapshot(
+                    set(), completed=False, has_pending_events=False
+                )
         except Exception as exc:
             AppLogger.error("ChatSync", "反重力播报刷新失败", exc)
 
     def _consume_antigravity_changes(self) -> None:
-        """读状态差量：续写就地刷新，新消息进播放队列。"""
-        for name, data in self._ag_sync_state.take_since(self._ag_baseline):
-            if name == "status":
-                if data.get("switched"):
-                    if self._sync_bubble_active:
-                        self._sync_waiting_for_reply = False
-                        self._restart_sync_bubble_timeout()
-                    self.show_bubble(f"✦ 已切换到新的 Antigravity 对话：{data.get('title', '')}", 3.0)
-                continue
-            items = (data.get("items") or []) if isinstance(data, dict) else []
-            if not items:
-                continue
-            if data.get("replace"):
-                newest = items[-1]
-                if self._ag_playback:
-                    # 队列末条就是这条消息，换成最新文本，保持播放顺序。
-                    self._ag_playback[-1] = newest
-                elif not self._is_chat_open or self._ag_sync_session_id is not None:
-                    # 续写刷新走气泡；聊天面板开着时每条都追加系统行，会堆重复卡片。
-                    now = time.monotonic()
-                    if not self._ag_last_replace or now - self._ag_last_replace >= _SYNC_REPLACE_INTERVAL:
-                        self._ag_last_replace = now
-                        self._show_sync_event(newest)
-                continue
-            self._ag_playback.extend(items)
-            # 积压时丢最旧的，气泡追最新内容而不是慢慢补历史。
-            while len(self._ag_playback) > _SYNC_QUEUE_LIMIT:
-                self._ag_playback.popleft()
+        """读状态差量：汇总多会话工作状态、续写就地刷新、新消息进播放队列。"""
+        changes = dict(self._ag_sync_state.take_since(self._ag_baseline))
+        if not changes:
+            return
+
+        status_data = changes.get("status")
+        work_data = changes.get("work")
+        events_data = changes.get("events")
+        has_new_events = bool(
+            isinstance(events_data, dict) and (events_data.get("items") or [])
+        )
+
+        if isinstance(status_data, dict):
+            self._ag_current_source_id = str(status_data.get("source_id") or "")
+
+        if isinstance(work_data, dict):
+            active_ids = {
+                str(sid) for sid in (work_data.get("active_ids") or ()) if str(sid)
+            }
+            self._apply_sync_working_snapshot(
+                active_ids,
+                completed=bool(work_data.get("completed")),
+                has_pending_events=has_new_events
+                or bool(self._ag_playback)
+                or self._ag_pending_replace is not None,
+            )
+
+        if isinstance(status_data, dict) and status_data.get("switched"):
+            self._ag_pending_replace = None
+            if not self._sync_working_sessions:
+                self._clear_sync_pose_state(release_pose=True)
+            if self._sync_bubble_active:
+                self._sync_waiting_for_reply = False
+                self._restart_sync_bubble_timeout()
+            self.show_bubble(
+                f"✦ 已切换到新的 Antigravity 对话：{status_data.get('title', '')}", 3.0
+            )
+
+        if not isinstance(events_data, dict):
+            return
+        items = events_data.get("items") or []
+        if not items:
+            return
+        if events_data.get("replace"):
+            newest = items[-1]
+            if self._ag_playback:
+                # 队列末条就是这条消息，换成最新文本，保持播放顺序。
+                self._ag_playback[-1] = newest
+                self._ag_pending_replace = None
+            elif not self._is_chat_open or self._ag_sync_session_id is not None:
+                # 续写刷新走气泡；聊天面板开着时每条都追加系统行，会堆重复卡片。
+                now = time.monotonic()
+                if not self._ag_last_replace or now - self._ag_last_replace >= _SYNC_REPLACE_INTERVAL:
+                    self._ag_last_replace = now
+                    self._ag_pending_replace = None
+                    self._show_sync_event(newest)
+                else:
+                    # 节流窗口内的末次续写先暂存，避免节流后丢失最终刷新内容。
+                    self._ag_pending_replace = newest
+            return
+        if self._ag_pending_replace is not None and not self._ag_playback:
+            pending = self._ag_pending_replace
+            self._ag_pending_replace = None
+            self._ag_last_replace = time.monotonic()
+            self._show_sync_event(pending)
+        self._ag_playback.extend(items)
+        # 积压时丢最旧的，气泡追最新内容而不是慢慢补历史。
+        while len(self._ag_playback) > _SYNC_QUEUE_LIMIT:
+            self._ag_playback.popleft()
 
     def _play_antigravity_queue(self) -> None:
         """逐条播；你自己发的话不等节奏，立刻上气泡，其余按最小间隔排。"""
-        if not self._ag_playback:
-            return
         now = time.monotonic()
+        if not self._ag_playback:
+            if (
+                self._ag_pending_replace is not None
+                and (not self._ag_last_replace or now - self._ag_last_replace >= _SYNC_REPLACE_INTERVAL)
+            ):
+                pending = self._ag_pending_replace
+                self._ag_pending_replace = None
+                self._ag_last_replace = now
+                self._show_sync_event(pending)
+            return
         head = self._ag_playback[0]
         if (
             head.role != "user"
@@ -5032,6 +5304,200 @@ class PetWindow(QWidget):
         event = self._ag_playback.popleft()
         self._show_sync_event(event)
         AppLogger.info("ChatSync", f"播报：{event.role}/{event.kind} {event.text[:24]}")
+
+    def _can_apply_sync_pose(self) -> bool:
+        """仅在不与打盹、贴边、普通对话、拖拽及锁定交互动作冲突时允许同步联动动作。"""
+        if (
+            not self.isVisible()
+            or self._settings.doze_mode
+            or self._settings.docked_side != DockSide.NONE
+            or self._mouse_down
+            or self._is_dragging
+            or self._is_falling
+            or self._is_sulk
+            or bool(self._waiting_chat_workers)
+            or self._is_action_playback_locked()
+        ):
+            return False
+        # 聊天面板打开但用户正在查看普通聊天时，不抢占普通聊天的角色动作。
+        if self._is_chat_open and not self._ag_viewing_sync:
+            return False
+        return True
+
+    def _pick_sync_busy_pose(self) -> PetState:
+        candidates = [pose for pose in _SYNC_BUSY_POSES if pose != self._sync_last_busy_pose]
+        pick = random.choice(candidates or _SYNC_BUSY_POSES)
+        self._sync_last_busy_pose = pick
+        return pick
+
+    def _apply_sync_pose(self, state: PetState, duration_sec: Optional[float]) -> None:
+        """应用反重力同步联动动作，不触发额外台词气泡以免干扰实时消息。"""
+        self._is_walking = False
+        self._is_sleeping = False
+        self._override_pose = state
+        self._override_is_autonomous = False
+        self._override_is_sync = True
+        self._override_locked = False
+        self._pending_sulk_after_pose = False
+        self._override_until_utc = (
+            datetime.max.replace(tzinfo=timezone.utc)
+            if duration_sec is None
+            else datetime.now(timezone.utc) + timedelta(seconds=duration_sec)
+        )
+        self._refresh_sprite_visual()
+        self._update_sprite_transforms()
+        self._stage_canvas.update()
+        # 不同动作立绘宽度略有差异，气泡已显示时同步刷新贴合位置。
+        if self._speech_bubble.isVisible() and not self._is_chat_open:
+            self._reposition_speech_bubble_on_move()
+
+    def _clear_sync_pose_state(self, *, release_pose: bool = True) -> None:
+        """清理反重力同步的本轮固定忙碌状态；仅回收由同步设置的动作，不打断正常交互动作。"""
+        self._sync_busy_active = False
+        self._sync_turn_pose = None
+        self._sync_working_sessions.clear()
+        if release_pose and self._override_is_sync and self._override_pose is not None:
+            self._override_pose = None
+            self._override_is_autonomous = False
+            self._override_is_sync = False
+            self._override_locked = False
+            self._pending_sulk_after_pose = False
+            self._refresh_sprite_visual()
+            self._update_sprite_transforms()
+            self._stage_canvas.update()
+            self._restart_ai_timer()
+
+    def _apply_sync_working_snapshot(
+        self,
+        active_ids: set[str],
+        *,
+        completed: bool,
+        has_pending_events: bool,
+    ) -> None:
+        """按采集器汇总的多会话工作状态同步当前活跃会话集合，等全部完成才释放工作态。"""
+        was_working = self._sync_busy_active or bool(self._sync_working_sessions)
+        self._sync_working_sessions = set(active_ids)
+        if active_ids:
+            if self._sync_turn_pose is None:
+                self._sync_turn_pose = self._pick_sync_busy_pose()
+            self._sync_busy_active = True
+            if self._can_apply_sync_pose():
+                can_take_pose = (
+                    self._override_pose is None
+                    or self._override_is_autonomous
+                    or self._override_is_sync
+                    or (
+                        self._is_chat_open
+                        and self._ag_viewing_sync
+                        and self._override_pose == PetState.LISTENING
+                    )
+                )
+                if can_take_pose and not (
+                    self._override_is_sync and self._override_pose == self._sync_turn_pose
+                ):
+                    self._apply_sync_pose(self._sync_turn_pose, None)
+            return
+
+        if has_pending_events:
+            # 本拍还有待播的完成事件，交给事件出队时同步切开心动作并刷新气泡。
+            return
+
+        if was_working:
+            self._sync_busy_active = False
+            self._sync_turn_pose = None
+            if self._sync_bubble_active and self._sync_waiting_for_reply:
+                self._sync_waiting_for_reply = False
+                self._restart_sync_bubble_timeout()
+            if completed:
+                if self._can_apply_sync_pose():
+                    self._apply_sync_pose(_SYNC_DONE_POSE, _SYNC_DONE_POSE_DURATION_S)
+            else:
+                self._clear_sync_pose_state(release_pose=True)
+
+    def _update_sync_pose_for_event(self, event: SyncEvent) -> None:
+        """每轮新对话随机选定前 4 个忙碌动作之一并在全部工作会话完成前固定，全部完成后切开心（hum）；取消则回归常态。"""
+        session_key = event.source_id or self._ag_current_source_id or "_default"
+        is_stopped = bool(event.stopped)
+        is_completion = (
+            not is_stopped
+            and event.role == "assistant"
+            and event.kind == "message"
+            and not event.in_progress
+        )
+        is_user_turn = not is_stopped and event.role == "user" and event.kind == "message"
+        is_working_stage = not is_stopped and (
+            event.kind in ("thinking", "tool", "error") or event.in_progress
+        )
+
+        still_working = False
+        if is_stopped:
+            self._sync_working_sessions.discard(session_key)
+            still_working = bool(self._sync_working_sessions)
+            if still_working:
+                self._sync_busy_active = True
+                if self._sync_turn_pose is None:
+                    self._sync_turn_pose = self._pick_sync_busy_pose()
+            else:
+                # 全部工作会话已被取消或终止：直接回归正常待机并释放交互，不切开心动作。
+                self._clear_sync_pose_state(release_pose=True)
+                return
+        elif is_completion:
+            self._sync_working_sessions.discard(session_key)
+            still_working = bool(self._sync_working_sessions)
+            if still_working:
+                # 仍有其他并发对话正在工作：保持当前固定工作动作与交互屏蔽，不提前退出。
+                self._sync_busy_active = True
+                if self._sync_turn_pose is None:
+                    self._sync_turn_pose = self._pick_sync_busy_pose()
+            else:
+                self._sync_busy_active = False
+                self._sync_turn_pose = None
+        elif is_user_turn:
+            was_working = bool(self._sync_working_sessions)
+            self._sync_working_sessions.add(session_key)
+            # 仅在当前无其他进行中会话（全新一轮）或尚未选定动作时随机选定一个，并发加入时保持已固定的动作。
+            if (not was_working and not event.replace) or self._sync_turn_pose is None:
+                self._sync_turn_pose = self._pick_sync_busy_pose()
+            self._sync_busy_active = True
+            still_working = True
+        elif is_working_stage:
+            self._sync_working_sessions.add(session_key)
+            if self._sync_turn_pose is None:
+                self._sync_turn_pose = self._pick_sync_busy_pose()
+            self._sync_busy_active = True
+            still_working = True
+
+        if not self._can_apply_sync_pose():
+            # 全部完成时若当前处于贴边/拖拽/下落等无法切开心动作的场景，回收旧无限期工作动作避免永久卡态
+            if is_completion and not still_working and self._override_is_sync:
+                self._clear_sync_pose_state(release_pose=True)
+            return
+
+        can_take_pose = (
+            self._override_pose is None
+            or self._override_is_autonomous
+            or self._override_is_sync
+            or (
+                self._is_chat_open
+                and self._ag_viewing_sync
+                and self._override_pose == PetState.LISTENING
+            )
+        )
+
+        if is_completion and not still_working:
+            # 全部工作会话完成：切开心动作（hum）；流式续写分片期间保持开心动作并顺延展示时长。
+            if event.replace and not can_take_pose:
+                return
+            self._apply_sync_pose(_SYNC_DONE_POSE, _SYNC_DONE_POSE_DURATION_S)
+            return
+
+        if (still_working or is_user_turn or is_working_stage) and self._sync_turn_pose is not None:
+            if not can_take_pose:
+                return
+            if self._override_is_sync and self._override_pose == self._sync_turn_pose:
+                self._override_until_utc = datetime.max.replace(tzinfo=timezone.utc)
+                return
+            self._apply_sync_pose(self._sync_turn_pose, None)
 
     @staticmethod
     def _sync_event_text(event: SyncEvent) -> str:
@@ -5069,16 +5535,26 @@ class PetWindow(QWidget):
                         label.setText(message)
                 else:
                     self._append_sync_chat_event(event)
+        self._update_sync_pose_for_event(event)
         if self._is_chat_open or not self.isVisible():
             return
-        if event.role == "user":
+        is_completion = event.role == "assistant" and event.kind == "message"
+        if event.role == "user" or is_completion:
             self._sync_thinking_pinned = False
-        # 仅在思考或工具执行中保持常亮；新一轮用户消息、助手回复与错误提示按空闲倒计时自动关闭。
-        self._sync_waiting_for_reply = event.kind in ("thinking", "tool")
+        # 仅在思考、工具执行或流式生成未完成时保持常亮；新一轮用户消息、完成回复、取消及错误提示按空闲倒计时自动关闭。
+        self._sync_waiting_for_reply = (
+            not event.stopped
+            and (event.kind in ("thinking", "tool") or event.in_progress)
+        )
         if not self._sync_thinking_pinned or event.kind == "thinking":
+            preserve_scroll = bool(
+                event.replace or (event.kind == "thinking" and self._sync_thinking_visible)
+            )
             self._sync_thinking_visible = event.kind == "thinking"
             self._is_forced_bubble_active = False
-            self._show_non_chat_bubble(message, from_sync=True)
+            self._show_non_chat_bubble(
+                message, from_sync=True, preserve_scroll=preserve_scroll
+            )
         self._restart_sync_bubble_timeout()
 
     def _render_chat_messages(self, record: dict) -> None:
@@ -5128,7 +5604,13 @@ class PetWindow(QWidget):
         self._show_non_chat_bubble(message)
         self._bubble_timer.start(max(200, int(round(duration_sec * 1000.0))))
 
-    def _show_non_chat_bubble(self, message: str, *, from_sync: bool = False) -> None:
+    def _show_non_chat_bubble(
+        self,
+        message: str,
+        *,
+        from_sync: bool = False,
+        preserve_scroll: bool = False,
+    ) -> None:
         self._idle_speech_bubble_active = False
         already_showing_sync = (
             from_sync and self._sync_bubble_active and self._speech_bubble.isVisible()
@@ -5142,16 +5624,25 @@ class PetWindow(QWidget):
                 "color: #F6F3FF; font-size: 12.5px; padding: 1px 4px 2px 0px; background: transparent;"
             )
             self._bubble_text_lbl.setVisible(True)
-        if self._bubble_text_lbl.text() != message:
+        text_changed = self._bubble_text_lbl.text() != message
+        if text_changed:
             bar = self._bubble_scroll.verticalScrollBar()
-            saved_scroll = bar.value() if already_showing_sync else None
+            saved_scroll = bar.value() if (already_showing_sync and preserve_scroll) else None
             self._bubble_text_lbl.setText(message)
             if already_showing_sync:
-                # 同步消息在非聊天模式下沿用普通气泡自适应尺寸，同时保留用户滚动位置。
+                # 同步消息在非聊天模式下沿用普通气泡自适应尺寸；续写保留滚动位置，新消息回到顶部。
                 self._bubble_scroll.setWidgetResizable(True)
                 self._relayout_stage_top()
-                if saved_scroll is not None:
-                    bar.setValue(min(saved_scroll, bar.maximum()))
+                bar.setValue(
+                    min(saved_scroll, bar.maximum())
+                    if saved_scroll is not None
+                    else bar.minimum()
+                )
+        elif already_showing_sync:
+            self._relayout_stage_top()
+            if not preserve_scroll:
+                bar = self._bubble_scroll.verticalScrollBar()
+                bar.setValue(bar.minimum())
         if not already_showing_sync:
             self._speech_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
             self._relayout_stage_top(reveal_bubble=True)
@@ -5159,7 +5650,12 @@ class PetWindow(QWidget):
             bar.setValue(bar.minimum())
 
     def _restart_sync_bubble_timeout(self) -> None:
-        if self._sync_waiting_for_reply or self._ag_playback or self._speech_bubble.is_resizing():
+        if (
+            self._sync_waiting_for_reply
+            or self._ag_playback
+            or self._ag_pending_replace is not None
+            or self._speech_bubble.is_resizing()
+        ):
             self._bubble_timer.stop()
         else:
             self._bubble_timer.start(_SYNC_BUBBLE_IDLE_MS)
@@ -5170,7 +5666,9 @@ class PetWindow(QWidget):
             return
         if self._sync_bubble_active:
             if (
-                self._sync_waiting_for_reply or self._ag_playback
+                self._sync_waiting_for_reply
+                or self._ag_playback
+                or self._ag_pending_replace is not None
                 or self._bubble_scroll.verticalScrollBar().isSliderDown()
             ):
                 return
@@ -5251,7 +5749,8 @@ class PetWindow(QWidget):
         self._speech_bubble.raise_()
         self._speech_bubble.activateWindow()
         self._chat_input.setFocus()
-        self._set_temporary_pose(PetState.LISTENING, 10.0)
+        if not self._is_sync_working_locked():
+            self._set_temporary_pose(PetState.LISTENING, 10.0)
 
     def set_speech_bubble_enabled(self, enabled: bool) -> None:
         self._mark_pet_user_activity()
@@ -5272,10 +5771,14 @@ class PetWindow(QWidget):
     def _close_bubble_click(self) -> None:
         self._mark_pet_user_activity()
         was_chat_open = self._is_chat_open
+        was_sync_bubble = self._sync_bubble_active and not was_chat_open
         self._is_chat_open = False
         self._is_forced_bubble_active = False
         self._sync_chat_controls()
         self._hide_speech_bubble()
+        if was_sync_bubble and self._sync_busy_active:
+            # 用户手动关闭非聊天同步气泡时解除忙碌固定态，避免中断后的回合长期停在忙碌动作。
+            self._clear_sync_pose_state(release_pose=True)
         self._relayout_stage_top()
         if was_chat_open and self._override_pose is None:
             self._restart_ai_timer()
@@ -5337,7 +5840,8 @@ class PetWindow(QWidget):
         self._active_chat_workers.append(worker)
         self._waiting_chat_workers.add(worker)
         self._sync_chat_controls()
-        self._set_temporary_pose(PetState.THINKING, 90.0)
+        if not self._is_sync_working_locked():
+            self._set_temporary_pose(PetState.THINKING, 90.0)
         worker.reply_ready.connect(self._on_chat_reply_ready)
         worker.finished.connect(lambda w=worker: self._cleanup_chat_worker(w))
         worker.start()
@@ -5371,7 +5875,8 @@ class PetWindow(QWidget):
         elif target_pose == PetState.PAT:
             self.trigger_pat()
 
-        self._set_temporary_pose(target_pose, 7.0)
+        if not self._is_sync_working_locked():
+            self._set_temporary_pose(target_pose, 7.0)
         if self._is_chat_open:
             self._sync_chat_controls()
         now_str = datetime.now().strftime("%H:%M")
@@ -5522,12 +6027,15 @@ class PetWindow(QWidget):
         if doze == self._doze_applied:
             return
         self._doze_applied = doze
+        if doze:
+            self._clear_sync_pose_state(release_pose=False)
         self._is_walking = False
         self._is_sleeping = False
         self._current_state = self._resolve_resting_state()
         if self._settings.docked_side != DockSide.NONE:
             self._override_pose = None
             self._override_is_autonomous = False
+            self._override_is_sync = False
             self._pending_sulk_after_pose = False
             self._refresh_sprite_visual()
             return

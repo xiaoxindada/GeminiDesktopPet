@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -18,6 +19,10 @@ _CONVERSATION_DIRS = (
 )
 # 会话库里的步骤类型：14 是用户输入，15 是助手回复，132 是工具调用。
 _TOOL_STEP_TYPE = 132
+# steps.status 终态集合：0 未指定（精简库），3 已完成，4 错误终止，5 历史归档/清理，6 用户取消，7 跳过。
+# 其余非零状态（如 1 待执行、2 执行中、8 等待、9 流式生成中）均属于活跃运行中步骤。
+_TERMINAL_STEP_STATUSES = (0, 3, 4, 5, 6, 7)
+_STOPPED_STEP_STATUSES = (4, 6)
 # 一次追赶的步数上限：落后太多说明中间被大改过，重新全解比逐段拼更稳。
 _MAX_CATCHUP_STEPS = 64
 # 只读连接的等锁上限：采集跑在界面线程里，宁可这一拍读不到也不能卡住界面。
@@ -40,6 +45,9 @@ class SyncedConversation:
     db_path: Path
     mtime_ns: int
     size: int
+    is_working: bool = False
+    has_running_step: bool = False
+    is_completed: bool = False
 
 
 @dataclass
@@ -53,8 +61,8 @@ class ConversationCache:
     path: str
     rows: int  # 已解析的行数，用来判断中间是否被删改
     max_idx: int
-    # 每项：(idx, 该步产出的消息, 该步新增的思考文本)；思考文本供全局去重集合重建。
-    steps: list[tuple[int, list[SyncedMessage], tuple[str, ...]]] = field(default_factory=list)
+    # 每项：(idx, step_type, status, 该步产出的消息, 该步新增的思考文本)；思考文本供全局去重集合重建。
+    steps: list[tuple[int, int, int, list[SyncedMessage], tuple[str, ...]]] = field(default_factory=list)
 
 
 def _read_varint(data: bytes, index: int) -> tuple[int, int]:
@@ -211,18 +219,140 @@ def _decode_step(
     return produced, added
 
 
+def _payload_status(payload: object) -> int:
+    """从 step_payload 顶层 4 号 varint 字段读取步骤状态（兼容无 status 列的测试库）。"""
+    if not isinstance(payload, (bytes, bytearray)) or not payload:
+        return 0
+    try:
+        for field_no, wire, value in _iter_fields(bytes(payload)):
+            if field_no == 4 and wire == 0 and isinstance(value, int):
+                return value
+    except ValueError:
+        return 0
+    return 0
+
+
+def _is_running_step_status(status: int) -> bool:
+    """除明确终态与未指定外，其余状态（PENDING/RUNNING/GENERATING 等）均视为活跃运行中。"""
+    return status not in _TERMINAL_STEP_STATUSES
+
+
+def _compute_work_state(
+    steps: list[tuple[int, int, int, list[SyncedMessage], tuple[str, ...]]],
+    has_running_step: bool,
+) -> tuple[bool, bool]:
+    """判定会话工作状态，返回 (is_working, is_completed)。
+
+    优先依据数据库显式的活跃运行状态（涵盖流式思考、流式回答与并行工具）；
+    若无运行中步骤，则区分正常以助手回复结束（completed=True）、取消/错误终止（均 False）
+    以及步骤衔接间隙（is_working=True, is_completed=False）。
+    """
+    if has_running_step:
+        return True, False
+    if not steps:
+        return False, False
+    _idx, _last_type, last_status, last_produced, _added = steps[-1]
+    if last_status in _STOPPED_STEP_STATUSES:
+        return False, False
+    if any(msg.role == "assistant" and msg.kind == "message" for msg in last_produced):
+        return False, True
+    for _i, s_type, s_status, produced, _a in reversed(steps):
+        if s_status in _STOPPED_STEP_STATUSES:
+            return False, False
+        if produced:
+            last_msg = produced[-1]
+            if last_msg.role == "assistant" and last_msg.kind == "message":
+                return False, True
+            return True, False
+        # step_type=17/101 等无消息文本的上下文/元信息步骤既可能出现在提问后思考前，也可能追加在回复后，
+        # 因此不直接定性，继续向前追溯最近的有效对话或执行步骤。
+        if s_type in (14, 15, _TOOL_STEP_TYPE):
+            return True, False
+    return False, False
+
+
+def _query_steps(
+    connection: sqlite3.Connection, start_idx: Optional[int] = None
+) -> tuple[list[tuple[int, int, int, object, object]], bool, bool]:
+    """读取步骤行与是否存在活跃运行/生成中的步骤；自动兼容无 status 列的精简库结构。"""
+    try:
+        running_row = connection.execute(
+            "select count(*) from steps where status not in (0, 3, 4, 5, 6, 7)"
+        ).fetchone()
+        has_running = bool(running_row and int(running_row[0] or 0) > 0)
+        if start_idx is None:
+            raw_rows = connection.execute(
+                "select idx, step_type, status, metadata, step_payload from steps order by idx"
+            ).fetchall()
+        else:
+            raw_rows = connection.execute(
+                "select idx, step_type, status, metadata, step_payload from steps "
+                "where idx >= ? order by idx",
+                (start_idx,),
+            ).fetchall()
+        rows = [
+            (int(idx), int(st_type or 0), int(st_col or 0), meta, payload)
+            for idx, st_type, st_col, meta, payload in raw_rows
+        ]
+        return rows, has_running, True
+    except sqlite3.OperationalError:
+        if start_idx is None:
+            raw_rows = connection.execute(
+                "select idx, step_type, metadata, step_payload from steps order by idx"
+            ).fetchall()
+        else:
+            raw_rows = connection.execute(
+                "select idx, step_type, metadata, step_payload from steps "
+                "where idx >= ? order by idx",
+                (start_idx,),
+            ).fetchall()
+        rows = []
+        has_running = False
+        for idx, st_type, meta, payload in raw_rows:
+            st_val = _payload_status(payload)
+            if _is_running_step_status(st_val):
+                has_running = True
+            rows.append((int(idx), int(st_type or 0), st_val, meta, payload))
+        return rows, has_running, False
+
+
 def _build_conversation(
     path: Path,
-    steps: list[tuple[int, list[SyncedMessage], tuple[str, ...]]],
+    steps: list[tuple[int, int, int, list[SyncedMessage], tuple[str, ...]]],
     mtime_ns: int,
     size: int,
+    has_running_step: bool = False,
+    *,
+    authoritative_running: bool = False,
 ) -> SyncedConversation:
     messages: list[SyncedMessage] = []
-    for _idx, produced, _added in steps:
+    for _idx, _st_type, _st_status, produced, _added in steps:
         messages.extend(produced)
     first_user = next((message.text for message in messages if message.role == "user"), "")
     title = " ".join(first_user.split())[:40] or "Antigravity 对话"
-    return SyncedConversation(path.stem, title, messages, path, mtime_ns, size)
+    running = (
+        has_running_step
+        if authoritative_running
+        else (
+            has_running_step
+            or any(
+                _is_running_step_status(st_status)
+                for _i, _t, st_status, _p, _a in steps
+            )
+        )
+    )
+    is_working, is_completed = _compute_work_state(steps, running)
+    return SyncedConversation(
+        path.stem,
+        title,
+        messages,
+        path,
+        mtime_ns,
+        size,
+        is_working=is_working,
+        has_running_step=running,
+        is_completed=is_completed,
+    )
 
 
 class AntigravityChatSyncService:
@@ -241,22 +371,27 @@ class AntigravityChatSyncService:
             pass
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=_READ_TIMEOUT)
         try:
-            rows = connection.execute(
-                "select idx, step_type, metadata, step_payload from steps order by idx"
-            ).fetchall()
+            rows, has_running, has_status_col = _query_steps(connection)
         finally:
             connection.close()
 
         seen_thinking: set[str] = set()
-        steps: list[tuple[int, list[SyncedMessage], tuple[str, ...]]] = []
-        for idx, step_type, metadata, payload in rows:
+        steps: list[tuple[int, int, int, list[SyncedMessage], tuple[str, ...]]] = []
+        for idx, step_type, step_status, metadata, payload in rows:
             try:
                 produced, added = _decode_step(step_type, metadata, payload, seen_thinking)
             except ValueError:
                 # 半截写入的载荷解不开，跳过这一步，别让整个会话读不出来。
                 continue
-            steps.append((idx, produced, tuple(added)))
-        return _build_conversation(path, steps, mtime_ns, size)
+            steps.append((idx, step_type, step_status, produced, tuple(added)))
+        return _build_conversation(
+            path,
+            steps,
+            mtime_ns,
+            size,
+            has_running_step=has_running,
+            authoritative_running=has_status_col,
+        )
 
     @staticmethod
     def read_incremental(
@@ -288,21 +423,17 @@ class AntigravityChatSyncService:
             if reusable:
                 # 从最后一个已解析的 idx 开始重解：它可能就是被原地改写的助手回复。
                 start = cache.steps[-1][0]
-                rows = connection.execute(
-                    "select idx, step_type, metadata, step_payload from steps "
-                    "where idx >= ? order by idx",
-                    (start,),
-                ).fetchall()
+                rows, has_running, has_status_col = _query_steps(connection, start_idx=start)
             else:
-                rows = connection.execute(
-                    "select idx, step_type, metadata, step_payload from steps order by idx"
-                ).fetchall()
+                rows, has_running, has_status_col = _query_steps(connection)
         finally:
             connection.close()
 
         if not total:
             return (
-                _build_conversation(path, [], mtime_ns, size),
+                _build_conversation(
+                    path, [], mtime_ns, size, has_running_step=False, authoritative_running=True
+                ),
                 ConversationCache(str(path), 0, 0),
             )
 
@@ -310,24 +441,54 @@ class AntigravityChatSyncService:
         if reusable:
             prefix = cache.steps[:-1]
             # 重建「被重解区间之前」的去重集合，否则思考会被重复收进去。
-            for _idx, _produced, added in prefix:
+            for _idx, _st_type, _st_status, _produced, added in prefix:
                 seen_thinking.update(added)
         else:
             prefix = []
 
         steps = list(prefix)
-        for idx, step_type, metadata, payload in rows:
+        for idx, step_type, step_status, metadata, payload in rows:
             try:
                 produced, added = _decode_step(step_type, metadata, payload, seen_thinking)
             except ValueError:
                 # 同 read_conversation：单步损坏只丢这一步。
                 continue
-            steps.append((idx, produced, tuple(added)))
+            steps.append((idx, step_type, step_status, produced, tuple(added)))
 
         return (
-            _build_conversation(path, steps, mtime_ns, size),
+            _build_conversation(
+                path,
+                steps,
+                mtime_ns,
+                size,
+                has_running_step=has_running,
+                authoritative_running=has_status_col,
+            ),
             ConversationCache(str(path), total, max_idx, steps),
         )
+
+    @staticmethod
+    def probe_session_activity(path: Path) -> tuple[int, int, bool]:
+        """轻量探测会话库的 (总行数, 最大 idx, 是否存在活跃运行步骤)，绕过 NTFS WAL stat 缓存。"""
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro", uri=True, timeout=0.05
+        )
+        try:
+            total, max_idx = connection.execute(
+                "select count(*), max(idx) from steps"
+            ).fetchone()
+            total = int(total or 0)
+            max_idx = int(max_idx or 0)
+            try:
+                running_row = connection.execute(
+                    "select count(*) from steps where status not in (0, 3, 4, 5, 6, 7)"
+                ).fetchone()
+                has_running = bool(running_row and int(running_row[0] or 0) > 0)
+            except sqlite3.OperationalError:
+                has_running = False
+            return total, max_idx, has_running
+        finally:
+            connection.close()
 
     def _candidates(self) -> list[tuple[int, int, Path]]:
         candidates: list[tuple[int, int, Path]] = []
@@ -341,9 +502,39 @@ class AntigravityChatSyncService:
                     stat = path.stat()
                 except OSError:
                     continue
-                candidates.append((stat.st_mtime_ns, stat.st_size, path))
+                mtime_ns = stat.st_mtime_ns
+                size = stat.st_size
+                try:
+                    wal = os.stat(f"{path}-wal")
+                    if wal.st_mtime_ns > mtime_ns:
+                        mtime_ns = wal.st_mtime_ns
+                    size += wal.st_size
+                except OSError:
+                    pass
+                candidates.append((mtime_ns, size, path))
         candidates.sort(reverse=True)
         return candidates
+
+    def candidate_paths(self, limit: int = 12) -> list[Path]:
+        """按最近活跃时间倒序返回候选会话库路径，并额外保留非空 WAL 活跃库。"""
+        ranked = self._candidates()
+        result: list[Path] = []
+        seen: set[str] = set()
+        for _mtime, _size, path in ranked[: max(1, limit)]:
+            key = str(path)
+            seen.add(key)
+            result.append(path)
+        for _mtime, _size, path in ranked[max(1, limit) :]:
+            key = str(path)
+            if key in seen:
+                continue
+            try:
+                if os.stat(f"{path}-wal").st_size > 0:
+                    seen.add(key)
+                    result.append(path)
+            except OSError:
+                continue
+        return result
 
     def newest_path(self) -> Optional[Path]:
         candidates = self._candidates()
