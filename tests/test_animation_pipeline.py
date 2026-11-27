@@ -593,6 +593,190 @@ class TestActionClipAndStagePipeline(unittest.TestCase):
         self.assertLess(r_start.left(), 0.0)
         self.assertAlmostEqual(r_end.left(), 0.0, delta=0.1)
 
+    def test_normal_drag_does_not_trigger_bristle_while_sustained_shake_progresses(self) -> None:
+        mgr = SpriteManager()
+        try:
+            mgr.preload_all()
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = PetSettings(
+                    auto_walk=False,
+                    gravity_enabled=False,
+                    particles_enabled=False,
+                    chat_sync_enabled=False,
+                    show_speech_bubble=False,
+                )
+                service = Mock(settings_path=Path(tmp) / "settings.json")
+                pet = PetWindow(
+                    settings,
+                    service,
+                    mgr,
+                    SoundService(),
+                    SystemMonitorService(),
+                    GeminiChatService(),
+                )
+                pet._frame_timer.stop()
+                pet._ai_timer.stop()
+                pet._idle_speech_timer.stop()
+                pet.move(400, 300)
+                clock = [100.0]
+
+                def make_mouse(et: QEvent.Type, gpos: QPointF, btn: Qt.MouseButton) -> QMouseEvent:
+                    button = (
+                        btn
+                        if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease)
+                        else Qt.MouseButton.NoButton
+                    )
+                    buttons = btn if et != QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton
+                    return QMouseEvent(
+                        et,
+                        QPointF(100.0, 100.0),
+                        gpos,
+                        button,
+                        buttons,
+                        Qt.KeyboardModifier.NoModifier,
+                    )
+
+                def step_ticks(duration_sec: float, dt: float = 0.016) -> None:
+                    steps = max(1, int(round(duration_sec / dt)))
+                    for _ in range(steps):
+                        clock[0] += dt
+                        if (
+                            pet._override_pose is not None
+                            and pet._override_until_utc != datetime.max.replace(tzinfo=timezone.utc)
+                        ):
+                            pet._override_until_utc -= timedelta(seconds=dt)
+                        pet._last_tick_utc = datetime.now(timezone.utc) - timedelta(seconds=dt)
+                        pet._frame_timer_tick()
+
+                def drive_drag(
+                    points: list[tuple[float, float, float]],
+                    *,
+                    release: bool = True,
+                    stop_at_stage: int = 0,
+                ) -> int:
+                    max_stage = 0
+                    p0 = QPointF(points[0][0], points[0][1])
+                    pet._on_stage_mouse_press(
+                        make_mouse(QEvent.Type.MouseButtonPress, p0, Qt.MouseButton.LeftButton)
+                    )
+                    last_tick = clock[0]
+                    last_pt = p0
+                    for x, y, dt in points[1:]:
+                        clock[0] += dt
+                        last_pt = QPointF(x, y)
+                        pet._on_stage_mouse_move(
+                            make_mouse(QEvent.Type.MouseMove, last_pt, Qt.MouseButton.LeftButton)
+                        )
+                        max_stage = max(max_stage, pet._shake_stage)
+                        while clock[0] - last_tick >= 0.016:
+                            last_tick += 0.016
+                            if (
+                                pet._override_pose is not None
+                                and pet._override_until_utc != datetime.max.replace(tzinfo=timezone.utc)
+                            ):
+                                pet._override_until_utc -= timedelta(seconds=0.016)
+                            pet._last_tick_utc = datetime.now(timezone.utc) - timedelta(seconds=0.016)
+                            pet._frame_timer_tick()
+                            max_stage = max(max_stage, pet._shake_stage)
+                        if stop_at_stage and max_stage >= stop_at_stage:
+                            break
+                    if release:
+                        pet._on_stage_mouse_release(
+                            make_mouse(QEvent.Type.MouseButtonRelease, last_pt, Qt.MouseButton.LeftButton)
+                        )
+                    return max_stage
+
+                try:
+                    with patch("views.pet_window.time.monotonic", side_effect=lambda: clock[0]):
+                        # 1. 常见正常拖拽轨迹（含波浪横拖、弧线 U 弯、绕窗拖动、过冲微调与轻抛蓄力）绝不误触炸毛流程
+                        normal_paths = [
+                            [(400.0 + i * 18.0, 300.0 + 30.0 * math.sin(i * 0.65), 0.016) for i in range(55)],
+                            [
+                                (500.0 + 90.0 * math.cos(math.pi * i / 24.0), 350.0 + 90.0 * math.sin(math.pi * i / 24.0), 0.016)
+                                for i in range(25)
+                            ],
+                            (
+                                [(400.0 + i * 13.0, 200.0, 0.016) for i in range(31)]
+                                + [(790.0, 200.0 + i * 13.0, 0.016) for i in range(1, 24)]
+                                + [(790.0 - i * 13.0, 499.0, 0.016) for i in range(1, 31)]
+                                + [(400.0, 499.0 - i * 13.0, 0.016) for i in range(1, 24)]
+                            ),
+                            (
+                                [(300.0 + i * 20.0, 300.0, 0.016) for i in range(26)]
+                                + [(800.0 - i * 15.0, 300.0, 0.016) for i in range(1, 11)]
+                                + [(650.0 + i * 10.0, 300.0, 0.016) for i in range(1, 9)]
+                                + [(730.0 - i * 6.0, 300.0, 0.016) for i in range(1, 6)]
+                            ),
+                            (
+                                [(500.0 - i * 16.0, 300.0, 0.016) for i in range(6)]
+                                + [(420.0 + i * 25.0, 300.0, 0.016) for i in range(1, 13)]
+                            ),
+                        ]
+                        for path in normal_paths:
+                            clock[0] += 0.5
+                            max_stage = drive_drag(path, release=True)
+                            self.assertEqual(max_stage, 0)
+                            self.assertIsNone(pet._override_pose)
+                            self.assertFalse(pet._is_sulk)
+
+                        # 2. 触发烦恼后立即停手静置：不得借残余能量自动升级鼓嘴/炸毛，应平滑回落到 FLOAT
+                        shake_pts = [
+                            (500.0 + 100.0 * math.sin(2.0 * math.pi * 2.5 * (i * 0.016)), 300.0, 0.016)
+                            for i in range(190)
+                        ]
+                        clock[0] += 0.5
+                        stage_reached = drive_drag(shake_pts, release=False, stop_at_stage=1)
+                        self.assertEqual(stage_reached, 1)
+                        self.assertEqual(pet._override_pose, PetState.ANNOYED)
+                        step_ticks(1.2)
+                        self.assertEqual(pet._shake_stage, 0)
+                        self.assertEqual(pet._override_pose, PetState.FLOAT)
+                        pet._on_stage_mouse_release(
+                            make_mouse(QEvent.Type.MouseButtonRelease, pet._last_move_global, Qt.MouseButton.LeftButton)
+                        )
+
+                        # 3. 持续高速往返摇晃按 烦恼 -> 鼓嘴 -> 炸毛 顺阶触发，炸毛松手进入眩晕并衔接生气
+                        clock[0] += 0.5
+                        stage_reached = drive_drag(shake_pts, release=False)
+                        self.assertEqual(stage_reached, 3)
+                        self.assertEqual(pet._override_pose, PetState.REDHOT)
+                        pet._on_stage_mouse_release(
+                            make_mouse(QEvent.Type.MouseButtonRelease, pet._last_move_global, Qt.MouseButton.LeftButton)
+                        )
+                        self.assertEqual(pet._override_pose, PetState.DIZZY)
+                        self.assertTrue(pet._is_sulk)
+                        self.assertTrue(pet._pending_sulk_after_pose)
+
+                        # 清理眩晕/生气状态后校验持续快速画圈同样能顺阶触发炸毛，且停晃 2 秒恢复 FLOAT
+                        pet._override_pose = None
+                        pet._override_locked = False
+                        pet._is_sulk = False
+                        pet._pending_sulk_after_pose = False
+                        spin_pts = [
+                            (
+                                500.0 + 75.0 * math.cos(2.0 * math.pi * 1.8 * (i * 0.016)),
+                                350.0 + 75.0 * math.sin(2.0 * math.pi * 1.8 * (i * 0.016)),
+                                0.016,
+                            )
+                            for i in range(190)
+                        ]
+                        clock[0] += 0.5
+                        stage_reached = drive_drag(spin_pts, release=False)
+                        self.assertEqual(stage_reached, 3)
+                        self.assertEqual(pet._override_pose, PetState.REDHOT)
+                        step_ticks(2.2)
+                        self.assertEqual(pet._override_pose, PetState.FLOAT)
+                        self.assertEqual(pet._shake_stage, 0)
+                        pet._on_stage_mouse_release(
+                            make_mouse(QEvent.Type.MouseButtonRelease, pet._last_move_global, Qt.MouseButton.LeftButton)
+                        )
+                        self.assertIsNone(pet._override_pose)
+                        self.assertFalse(pet._is_sulk)
+                finally:
+                    pet.close()
+        finally:
+            mgr.dispose()
+
     def test_throw_bounces_at_visible_sprite_screen_edges(self) -> None:
         mgr = SpriteManager()
         try:

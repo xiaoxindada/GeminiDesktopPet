@@ -159,29 +159,37 @@ _PUFFED_POSE_DURATION_S = 2.0
 _REDHOT_POSE_DURATION_S = 2.6
 _SULK_POSE_DURATION_S = 5.0
 
-# 拖拽摇晃/画圈炸毛检测：融合双轴快速折返甩动与连续同向画圈角位移，
-# 完整流程：摇晃 -> 烦恼(ANNOYED) -> 鼓嘴(PUFFED) -> 炸毛(REDHOT) -> 松手下落眩晕(DIZZY) -> 生气(SULK)
-_SHAKE_STROKE_MIN_PX = 10.0
-_SHAKE_MIN_SPEED_PX_S = 240.0
-_SHAKE_STROKE_MAX_AGE_S = 0.45
-_SHAKE_REVERSAL_COOLDOWN_S = 0.045
-_SHAKE_IDLE_RESET_S = 0.32
-_SHAKE_WHIP_GAIN = 0.85
-_SHAKE_SPIN_SEG_MIN_PX = 14.0
-_SHAKE_SPIN_MIN_SPEED_PX_S = 180.0
-_SHAKE_SPIN_WARMUP_RAD = math.radians(60.0)
-_SHAKE_SPIN_GAIN_PER_RAD = 0.60
-_SHAKE_DECAY_PER_SEC = 0.65
-_SHAKE_ENERGY_MAX = 5.0
+# 拖拽摇晃/画圈炸毛检测：融合 2D 高速往返折返甩动与连续高速画圈角位移，
+# 通过步段降噪、反向夹角、连续热身与分阶段能量上限过滤普通拖拽、弧线绕行、微幅抖动与落点微调；
+# 完整流程：持续摇晃/画圈 -> 烦恼(ANNOYED) -> 鼓嘴(PUFFED) -> 炸毛(REDHOT) -> 松手下落眩晕(DIZZY) -> 生气(SULK)
+_SHAKE_MICRO_SEG_PX = 10.0
+_SHAKE_STROKE_MIN_PX = 36.0
+_SHAKE_MIN_SPEED_PX_S = 520.0
+_SHAKE_STROKE_MAX_AGE_S = 0.40
+_SHAKE_REVERSAL_MAX_DOT = -0.42
+_SHAKE_REVERSAL_COOLDOWN_S = 0.065
+_SHAKE_WHIP_STREAK_RESET_S = 0.46
+_SHAKE_WHIP_WARMUP_REVERSALS = 2
+_SHAKE_IDLE_RESET_S = 0.30
+_SHAKE_WHIP_GAIN = 0.52
+_SHAKE_SPIN_SEG_MIN_PX = 24.0
+_SHAKE_SPIN_MIN_SPEED_PX_S = 440.0
+_SHAKE_SPIN_MIN_ANGULAR_RAD_S = 4.2
+_SHAKE_SPIN_WARMUP_RAD = math.radians(270.0)
+_SHAKE_SPIN_GAIN_PER_RAD = 0.22
+_SHAKE_SPIN_MAX_STRAIGHT_SEGS = 1
+_SHAKE_DECAY_DELAY_S = 0.22
+_SHAKE_DECAY_PER_SEC = 1.15
+_SHAKE_ENERGY_MAX = 3.6
 _SHAKE_ANNOYED_THRESHOLD = 1.0
 _SHAKE_PUFFED_THRESHOLD = 2.0
 _SHAKE_REDHOT_THRESHOLD = 3.0
-_SHAKE_ANNOYED_DURATION_S = 0.70
-_SHAKE_PUFFED_DURATION_S = 0.75
+_SHAKE_ANNOYED_DURATION_S = 0.80
+_SHAKE_PUFFED_DURATION_S = 0.85
 _SHAKE_STOP_RECOVER_S = 2.0
 _SHAKE_REDHOT_DURATION_S = _SHAKE_STOP_RECOVER_S
-_SHAKE_HOLD_ACTIVE_S = 0.65
-_SHAKE_RELEASE_GRACE_S = 1.0
+_SHAKE_HOLD_ACTIVE_S = 0.48
+_SHAKE_RELEASE_GRACE_S = 0.85
 _DIZZY_POSE_DURATION_S = 2.8
 _POST_DIZZY_PAT_GRACE_S = 0.75
 _HOVER_PAT_COOLDOWN_S = 0.40
@@ -710,7 +718,6 @@ class PetWindow(QWidget):
         self._is_dragging = False
         self._is_shaking = False
         self._shake_stage = 0
-        self._shake_peak_energy = 0.0
         self._drag_start_global = QPointF()
         self._win_start_left = 0.0
         self._win_start_top = 0.0
@@ -722,10 +729,18 @@ class PetWindow(QWidget):
         self._shake_last_active_mono = 0.0
         self._dizzy_last_particle_mono = 0.0
         self._last_move_mono = 0.0
-        # 轴向甩动状态：[已确立方向(-1/0/1), 当前方向累计位移, 当前方向起点时间戳, 最近活跃时间戳]
-        self._shake_axis_x: list[float | int] = [0, 0.0, 0.0, 0.0]
-        self._shake_axis_y: list[float | int] = [0, 0.0, 0.0, 0.0]
-        # 画圈转角状态：按最小位移步段累计连续同向偏转弧度，兼容高回报率鼠标
+        # 2D 折返甩动状态：先聚合降噪微步段，再累计同向高速行程并校验反向折返节奏
+        self._whip_micro_dx = 0.0
+        self._whip_micro_dy = 0.0
+        self._whip_micro_start_mono = 0.0
+        self._whip_stroke_dx = 0.0
+        self._whip_stroke_dy = 0.0
+        self._whip_stroke_start_mono = 0.0
+        self._whip_last_dir: Optional[tuple[float, float]] = None
+        self._whip_last_fast_mono = 0.0
+        self._whip_perp_dist = 0.0
+        self._whip_streak = 0
+        # 画圈转角状态：按最小位移步段累计连续高速同向偏转弧度，兼容高回报率鼠标
         self._spin_seg_dx = 0.0
         self._spin_seg_dy = 0.0
         self._spin_seg_start_mono = 0.0
@@ -733,6 +748,7 @@ class PetWindow(QWidget):
         self._spin_last_vec_mono = 0.0
         self._spin_curve_dir = 0
         self._spin_curve_rad = 0.0
+        self._spin_straight_segs = 0
         self._is_falling = False
         self._throw_vx = 0.0
         self._fall_velocity_y = 0.0
@@ -1485,9 +1501,7 @@ class PetWindow(QWidget):
         self._motion_engine.reset_transient_effects(clear_drag_tilt=True)
         self._motion_engine.bristle_burst.reset()
         self._particle_system.clear()
-        self._is_shaking = False
-        self._shake_stage = 0
-        self._shake_peak_energy = 0.0
+        self._reset_drag_shake_tracking()
         self._press_is_double_click = False
         self._press_started_while_locked = False
         if hasattr(self, "_quota_double_click_timer"):
@@ -2171,19 +2185,42 @@ class PetWindow(QWidget):
             dt,
             walking=self._is_walking and not self._mouse_down and not self._is_dragging,
         )
-        if self._whip_energy > 0.0:
-            self._whip_energy = max(0.0, self._whip_energy - dt * _SHAKE_DECAY_PER_SEC)
-        if self._spin_energy > 0.0:
-            self._spin_energy = max(0.0, self._spin_energy - dt * _SHAKE_DECAY_PER_SEC)
+        now_mono = time.monotonic()
+        shake_idle_s = (
+            now_mono - self._shake_last_active_mono
+            if self._shake_last_active_mono > 0.0
+            else float("inf")
+        )
+        if shake_idle_s > _SHAKE_DECAY_DELAY_S:
+            if self._whip_energy > 0.0:
+                self._whip_energy = max(0.0, self._whip_energy - dt * _SHAKE_DECAY_PER_SEC)
+            if self._spin_energy > 0.0:
+                self._spin_energy = max(0.0, self._spin_energy - dt * _SHAKE_DECAY_PER_SEC)
+        if (
+            self._whip_streak > 0
+            and self._shake_last_reversal_mono > 0.0
+            and (now_mono - self._shake_last_reversal_mono) > _SHAKE_WHIP_STREAK_RESET_S
+        ):
+            self._whip_streak = 0
         self._motion_engine.decay_drag_tilt(dt)
 
-        # 鼠标抓握看门狗：防止气泡弹出或切动作导致 Qt 丢失 grabMouse 时拖拽卡死或句柄脱离
+        # 鼠标抓握看门狗：防止气泡弹出或切动作导致 Qt 丢失 grabMouse 时拖拽卡死或句柄脱离；
+        # 正常持握期间优先信任高精度 mouseMoveEvent，仅失抓或事件停滞时回退轮询整数光标坐标。
         if self._mouse_down and self._mouse_pressed_physically:
             left_held = self._is_primary_mouse_button_held()
             if not left_held:
                 self._recover_lost_mouse_release()
             elif self._is_dragging:
-                self._sync_drag_to_global_pos(QPointF(QCursor.pos()))
+                grab_lost = self._stage_canvas.mouseGrabber() is not self._stage_canvas
+                if grab_lost or (now_mono - self._last_move_mono) >= 0.032:
+                    cur_g = QPointF(QCursor.pos())
+                    if grab_lost and self.isVisible():
+                        self._stage_canvas.grabMouse()
+                    if grab_lost or math.hypot(
+                        cur_g.x() - self._last_move_global.x(),
+                        cur_g.y() - self._last_move_global.y(),
+                    ) >= 2.0:
+                        self._sync_drag_to_global_pos(cur_g)
             elif self._stage_canvas.mouseGrabber() is not self._stage_canvas:
                 cur_g = QPointF(QCursor.pos())
                 if math.hypot(
@@ -2210,7 +2247,7 @@ class PetWindow(QWidget):
             and self._is_shaking
             and self._override_pose == PetState.REDHOT
             and self._shake_last_active_mono > 0.0
-            and (time.monotonic() - self._shake_last_active_mono) >= _SHAKE_STOP_RECOVER_S
+            and (now_mono - self._shake_last_active_mono) >= _SHAKE_STOP_RECOVER_S
         ):
             # 完全炸毛后中途停止晃动满 2 秒：消退摇晃状态并回到正常反重力拖拽流程（松手正常下落 Q 弹）
             self._reset_drag_shake_tracking()
@@ -2236,12 +2273,16 @@ class PetWindow(QWidget):
             finished_pose = self._override_pose
             was_sync_pose = self._override_is_sync
             if self._is_dragging:
-                now_mono = time.monotonic()
                 # 当前阶段动作刚播完且仍在持续摇晃时，在同一帧顺阶推进 烦恼 -> 鼓嘴 -> 炸毛
                 if self._advance_drag_shake_stage_if_ready(now_mono):
                     pass
                 elif not self._is_drag_float_allowed(now_mono):
-                    self._override_until_utc = now + timedelta(seconds=1.2)
+                    if self._override_pose == PetState.REDHOT:
+                        self._override_until_utc = now + timedelta(seconds=_SHAKE_STOP_RECOVER_S)
+                    else:
+                        # 烦恼/鼓嘴刚播完但仍在摇晃期：保持当前表情不闪回 FLOAT，并解除锁定等待达标立即晋阶
+                        self._override_locked = False
+                        self._override_until_utc = now + timedelta(seconds=_SHAKE_HOLD_ACTIVE_S)
                 else:
                     self._reset_drag_shake_tracking()
                     if self._override_pose != PetState.FLOAT:
@@ -3149,18 +3190,39 @@ class PetWindow(QWidget):
     def _current_shake_energy(self) -> float:
         return max(self._whip_energy, self._spin_energy)
 
+    def _max_shake_energy_for_stage(self) -> float:
+        """按当前摇晃阶段限制能量上限，防止单次短促甩动跨阶段预充并自动连升炸毛。"""
+        if self._shake_stage <= 0:
+            return _SHAKE_ANNOYED_THRESHOLD + 0.25
+        if self._shake_stage == 1:
+            return _SHAKE_PUFFED_THRESHOLD + 0.25
+        if self._shake_stage == 2:
+            return _SHAKE_REDHOT_THRESHOLD + 0.35
+        return _SHAKE_ENERGY_MAX
+
+    def _reset_whip_stroke_state(self, *, keep_last_dir: bool = False) -> None:
+        self._whip_micro_dx = 0.0
+        self._whip_micro_dy = 0.0
+        self._whip_micro_start_mono = 0.0
+        self._whip_stroke_dx = 0.0
+        self._whip_stroke_dy = 0.0
+        self._whip_stroke_start_mono = 0.0
+        if not keep_last_dir:
+            self._whip_last_dir = None
+            self._whip_last_fast_mono = 0.0
+            self._whip_perp_dist = 0.0
+            self._whip_streak = 0
+
     def _reset_drag_shake_tracking(self) -> None:
         self._is_shaking = False
         self._shake_stage = 0
-        self._shake_peak_energy = 0.0
         self._motion_engine.drag_tilt_vx = 0.0
         self._whip_energy = 0.0
         self._spin_energy = 0.0
         self._shake_last_reversal_mono = 0.0
         self._shake_last_active_mono = 0.0
         self._dizzy_last_particle_mono = 0.0
-        self._shake_axis_x = [0, 0.0, 0.0, 0.0]
-        self._shake_axis_y = [0, 0.0, 0.0, 0.0]
+        self._reset_whip_stroke_state()
         self._reset_spin_segment_state()
 
     def _reset_spin_segment_state(self) -> None:
@@ -3171,6 +3233,7 @@ class PetWindow(QWidget):
         self._spin_last_vec_mono = 0.0
         self._spin_curve_dir = 0
         self._spin_curve_rad = 0.0
+        self._spin_straight_segs = 0
 
     def _is_action_playback_locked(self) -> bool:
         """判断当前是否处于不可中断的交互动作播放期（烦恼/鼓嘴/炸毛/眩晕/生气）。"""
@@ -3212,63 +3275,120 @@ class PetWindow(QWidget):
             return False
         return True
 
-    @staticmethod
-    def _update_drag_whip_axis(
-        axis_state: list[float | int],
-        step: float,
+    def _update_drag_whip_step(
+        self,
+        step_x: float,
+        step_y: float,
         now_mono: float,
         prev_move_mono: float,
     ) -> bool:
-        """识别单轴高速折返摇晃：新方向行程需达到有效位移与速度，兼容高回报率鼠标且抗微噪。"""
-        if abs(step) < 1e-6:
+        """识别 2D 高速往返折返甩动：仅真正反向折返（≥115°）的高速长行程才计为折返。"""
+        # 拐点反向瞬间清空残余微步段与旧时间戳，避免正弦甩动折返峰值的减速步污染新方向测速
+        if (self._whip_micro_dx * step_x + self._whip_micro_dy * step_y) < 0.0:
+            self._whip_micro_dx = 0.0
+            self._whip_micro_dy = 0.0
+            self._whip_micro_start_mono = 0.0
+        if self._whip_micro_start_mono <= 0.0:
+            if prev_move_mono > 0.0 and (now_mono - prev_move_mono) <= _SHAKE_IDLE_RESET_S:
+                self._whip_micro_start_mono = max(prev_move_mono, now_mono - 0.05)
+            else:
+                self._whip_micro_start_mono = now_mono
+
+        self._whip_micro_dx += step_x
+        self._whip_micro_dy += step_y
+        micro_len = math.hypot(self._whip_micro_dx, self._whip_micro_dy)
+        if micro_len < _SHAKE_MICRO_SEG_PX:
             return False
 
-        last_fast_dir = int(axis_state[0])
-        accum = float(axis_state[1])
-        stroke_start = float(axis_state[2])
-        last_fast_mono = float(axis_state[3])
-        step_dir = 1 if step > 0.0 else -1
+        mdx = self._whip_micro_dx
+        mdy = self._whip_micro_dy
+        micro_start = self._whip_micro_start_mono
+        self._whip_micro_dx = 0.0
+        self._whip_micro_dy = 0.0
+        self._whip_micro_start_mono = now_mono
 
-        if accum == 0.0 or (accum > 0.0 and step_dir < 0) or (accum < 0.0 and step_dir > 0):
-            accum = step
-            stroke_start = (
-                prev_move_mono
-                if prev_move_mono > 0.0
-                and (now_mono - prev_move_mono) <= _SHAKE_IDLE_RESET_S
-                else now_mono
-            )
+        micro_dt = max(0.008, now_mono - micro_start)
+        if (micro_len / micro_dt) < _SHAKE_MIN_SPEED_PX_S * 0.45:
+            # 局部已明显减速时清空当前行程，防止慢速微调借用先前高速段拼出伪折返
+            self._whip_stroke_dx = 0.0
+            self._whip_stroke_dy = 0.0
+            self._whip_stroke_start_mono = 0.0
+            return False
+
+        mux = mdx / micro_len
+        muy = mdy / micro_len
+        cur_stroke_len = math.hypot(self._whip_stroke_dx, self._whip_stroke_dy)
+        if cur_stroke_len <= 1e-6:
+            self._whip_stroke_dx = mdx
+            self._whip_stroke_dy = mdy
+            self._whip_stroke_start_mono = micro_start
         else:
-            accum += step
+            sux = self._whip_stroke_dx / cur_stroke_len
+            suy = self._whip_stroke_dy / cur_stroke_len
+            if (sux * mux + suy * muy) < 0.25:
+                # 方向大幅偏转时立即切分新行程，避免反向折返被前段余量抵消
+                self._whip_stroke_dx = mdx
+                self._whip_stroke_dy = mdy
+                self._whip_stroke_start_mono = micro_start
+            else:
+                self._whip_stroke_dx += mdx
+                self._whip_stroke_dy += mdy
 
-        axis_state[1] = accum
-        axis_state[2] = stroke_start
-
-        if abs(accum) < _SHAKE_STROKE_MIN_PX:
+        stroke_len = math.hypot(self._whip_stroke_dx, self._whip_stroke_dy)
+        if stroke_len < _SHAKE_STROKE_MIN_PX:
             return False
 
-        elapsed = max(0.012, now_mono - stroke_start)
-        stroke_speed = abs(accum) / elapsed
+        stroke_elapsed = max(0.012, now_mono - self._whip_stroke_start_mono)
+        stroke_speed = stroke_len / stroke_elapsed
         if stroke_speed < _SHAKE_MIN_SPEED_PX_S:
-            axis_state[1] = 0.0
-            axis_state[2] = now_mono
+            self._whip_stroke_dx = 0.0
+            self._whip_stroke_dy = 0.0
+            self._whip_stroke_start_mono = 0.0
             return False
 
-        is_reversal = (
-            last_fast_dir != 0
-            and step_dir != last_fast_dir
-            and (now_mono - last_fast_mono) <= _SHAKE_STROKE_MAX_AGE_S
-        )
-        axis_state[0] = step_dir
-        axis_state[3] = now_mono
+        ux = self._whip_stroke_dx / stroke_len
+        uy = self._whip_stroke_dy / stroke_len
+        is_reversal = False
+        if (
+            self._whip_last_dir is None
+            or (now_mono - self._whip_last_fast_mono) > _SHAKE_STROKE_MAX_AGE_S
+        ):
+            self._whip_last_dir = (ux, uy)
+            self._whip_last_fast_mono = now_mono
+            self._whip_perp_dist = 0.0
+        else:
+            align = self._whip_last_dir[0] * ux + self._whip_last_dir[1] * uy
+            if align <= _SHAKE_REVERSAL_MAX_DOT:
+                is_reversal = True
+                self._whip_last_dir = (ux, uy)
+                self._whip_last_fast_mono = now_mono
+                self._whip_perp_dist = 0.0
+            elif align >= 0.35:
+                self._whip_last_dir = (ux, uy)
+                self._whip_last_fast_mono = now_mono
+                self._whip_perp_dist = 0.0
+            else:
+                # 仅当横向拐弯持续较长距离（如绕窗口直角拖动）才替换主方向，
+                # 保留 8 字/弧形急甩拐点前的来向以便识别随后的反向回甩
+                self._whip_perp_dist += micro_len
+                if self._whip_perp_dist >= _SHAKE_STROKE_MIN_PX * 2.5:
+                    self._whip_last_dir = (ux, uy)
+                    self._whip_last_fast_mono = now_mono
+                    self._whip_perp_dist = 0.0
+
         if is_reversal:
-            axis_state[1] = 0.0
-            axis_state[2] = now_mono
+            self._whip_stroke_dx = 0.0
+            self._whip_stroke_dy = 0.0
+            self._whip_stroke_start_mono = 0.0
             return True
 
-        if abs(accum) >= _SHAKE_STROKE_MIN_PX * 2.0:
-            axis_state[1] = step_dir * _SHAKE_STROKE_MIN_PX
-            axis_state[2] = now_mono - (
-                _SHAKE_STROKE_MIN_PX / max(stroke_speed, _SHAKE_MIN_SPEED_PX_S)
+        # 长距离单向拖拽仅保留尾段行程，避免前段高速掩盖末段减速
+        if stroke_len >= _SHAKE_STROKE_MIN_PX * 1.8:
+            keep_len = _SHAKE_STROKE_MIN_PX * 0.8
+            self._whip_stroke_dx = ux * keep_len
+            self._whip_stroke_dy = uy * keep_len
+            self._whip_stroke_start_mono = now_mono - (
+                keep_len / max(stroke_speed, _SHAKE_MIN_SPEED_PX_S)
             )
         return False
 
@@ -3279,21 +3399,19 @@ class PetWindow(QWidget):
         now_mono: float,
         prev_move_mono: float,
     ) -> bool:
-        """按最小位移步段累计连续同向画圈弧度，超过热身角后转为摇晃能量。"""
+        """按最小位移步段累计连续高速同向画圈弧度，满热身转角且角速度达标才转为摇晃能量。"""
         if self._spin_seg_start_mono <= 0.0:
-            self._spin_seg_start_mono = (
-                prev_move_mono
-                if prev_move_mono > 0.0
-                and (now_mono - prev_move_mono) <= _SHAKE_IDLE_RESET_S
-                else now_mono
-            )
+            if prev_move_mono > 0.0 and (now_mono - prev_move_mono) <= _SHAKE_IDLE_RESET_S:
+                self._spin_seg_start_mono = max(prev_move_mono, now_mono - 0.05)
+            else:
+                self._spin_seg_start_mono = now_mono
         self._spin_seg_dx += step_x
         self._spin_seg_dy += step_y
         seg_len = math.hypot(self._spin_seg_dx, self._spin_seg_dy)
         if seg_len < _SHAKE_SPIN_SEG_MIN_PX:
             return False
 
-        elapsed = max(0.012, now_mono - self._spin_seg_start_mono)
+        elapsed = max(0.010, now_mono - self._spin_seg_start_mono)
         speed = seg_len / elapsed
         ux = self._spin_seg_dx / seg_len
         uy = self._spin_seg_dy / seg_len
@@ -3305,6 +3423,7 @@ class PetWindow(QWidget):
             self._spin_prev_vec = None
             self._spin_curve_dir = 0
             self._spin_curve_rad = 0.0
+            self._spin_straight_segs = 0
             return False
 
         gained = False
@@ -3316,8 +3435,14 @@ class PetWindow(QWidget):
             cross = px * uy - py * ux
             dot = max(-1.0, min(1.0, px * ux + py * uy))
             dtheta = math.atan2(cross, dot)
-            # 过滤直线抖动（<4.5°）和 180° 急折返（交给双轴摇晃分支处理，避免重复计分）
-            if 0.08 <= abs(dtheta) <= 2.15:
+            seg_dt = max(0.010, now_mono - self._spin_last_vec_mono)
+            angular_rate = abs(dtheta) / seg_dt
+            # 同时校验有效转角与最低角速度，排除大半径慢弧线、贴窗绕边和 180° 急折返
+            if (
+                0.10 <= abs(dtheta) <= 2.15
+                and angular_rate >= _SHAKE_SPIN_MIN_ANGULAR_RAD_S
+            ):
+                self._spin_straight_segs = 0
                 turn_dir = 1 if dtheta > 0.0 else -1
                 if self._spin_curve_dir != turn_dir:
                     self._spin_curve_dir = turn_dir
@@ -3326,34 +3451,44 @@ class PetWindow(QWidget):
                     prev_rad = self._spin_curve_rad
                     self._spin_curve_rad += abs(dtheta)
                     if self._spin_curve_rad > _SHAKE_SPIN_WARMUP_RAD:
-                        effective_rad = self._spin_curve_rad - max(prev_rad, _SHAKE_SPIN_WARMUP_RAD)
+                        effective_rad = self._spin_curve_rad - max(
+                            prev_rad, _SHAKE_SPIN_WARMUP_RAD
+                        )
                         if effective_rad > 0.0:
+                            cap = self._max_shake_energy_for_stage()
                             self._spin_energy = min(
-                                _SHAKE_ENERGY_MAX,
-                                self._spin_energy + effective_rad * _SHAKE_SPIN_GAIN_PER_RAD,
+                                cap,
+                                self._spin_energy
+                                + effective_rad * _SHAKE_SPIN_GAIN_PER_RAD,
                             )
                             gained = True
             elif abs(dtheta) > 2.15:
                 self._spin_curve_dir = 0
                 self._spin_curve_rad = 0.0
+                self._spin_straight_segs = 0
+            else:
+                # 连续直线段视为普通绕行拖拽而非画圈，清零已累积的偏转角
+                self._spin_straight_segs += 1
+                if self._spin_straight_segs > _SHAKE_SPIN_MAX_STRAIGHT_SEGS:
+                    self._spin_curve_dir = 0
+                    self._spin_curve_rad = 0.0
         else:
             self._spin_curve_dir = 0
             self._spin_curve_rad = 0.0
+            self._spin_straight_segs = 0
 
         self._spin_prev_vec = (ux, uy)
         self._spin_last_vec_mono = now_mono
         return gained
 
     def _target_drag_shake_stage(self, now_mono: float) -> int:
-        recent = (
-            self._shake_last_active_mono > 0.0
-            and (now_mono - self._shake_last_active_mono) <= _SHAKE_HOLD_ACTIVE_S
-        )
-        effective_energy = (
-            max(self._current_shake_energy(), self._shake_peak_energy)
-            if recent
-            else self._current_shake_energy()
-        )
+        # 仅当近期仍有真实摇晃/画圈输入时才允许推进阶段，停晃后绝不借残余能量自动升级
+        if (
+            self._shake_last_active_mono <= 0.0
+            or (now_mono - self._shake_last_active_mono) > _SHAKE_HOLD_ACTIVE_S
+        ):
+            return 0
+        effective_energy = self._current_shake_energy()
         if effective_energy >= _SHAKE_REDHOT_THRESHOLD:
             return 3
         if effective_energy >= _SHAKE_PUFFED_THRESHOLD:
@@ -3366,8 +3501,12 @@ class PetWindow(QWidget):
         """进入指定的拖拽摇晃炸毛阶段，每个阶段播放完前均锁定不可中途打断。"""
         self._is_shaking = True
         self._shake_stage = stage
-        self._shake_last_active_mono = now_mono
+        self._poke_count = 0
+        self._poke_stage = 0
+        self._poke_stage_until_mono = 0.0
         if stage == 3:
+            # 进入完全炸毛后从当前时刻起算 2 秒停晃恢复窗口
+            self._shake_last_active_mono = now_mono
             self._motion_engine.bristle_burst.trigger(1.0)
             self._set_temporary_pose(
                 PetState.REDHOT,
@@ -3431,39 +3570,33 @@ class PetWindow(QWidget):
             prev_move_mono > 0.0
             and (now_mono - prev_move_mono) > _SHAKE_IDLE_RESET_S
         ):
-            self._shake_axis_x = [0, 0.0, 0.0, 0.0]
-            self._shake_axis_y = [0, 0.0, 0.0, 0.0]
+            self._reset_whip_stroke_state()
             self._reset_spin_segment_state()
 
-        rev_x = self._update_drag_whip_axis(
-            self._shake_axis_x, step_x, now_mono, prev_move_mono
-        )
-        rev_y = self._update_drag_whip_axis(
-            self._shake_axis_y, step_y, now_mono, prev_move_mono
-        )
+        rev = self._update_drag_whip_step(step_x, step_y, now_mono, prev_move_mono)
         spin_gained = self._update_drag_spin_step(
             step_x, step_y, now_mono, prev_move_mono
         )
 
         whip_gained = False
-        if rev_x or rev_y:
-            self._shake_last_active_mono = now_mono
-            if (now_mono - self._shake_last_reversal_mono) >= _SHAKE_REVERSAL_COOLDOWN_S:
-                self._shake_last_reversal_mono = now_mono
-                self._whip_energy = min(
-                    _SHAKE_ENERGY_MAX, self._whip_energy + _SHAKE_WHIP_GAIN
-                )
+        if rev and (now_mono - self._shake_last_reversal_mono) >= _SHAKE_REVERSAL_COOLDOWN_S:
+            if (
+                self._shake_last_reversal_mono > 0.0
+                and (now_mono - self._shake_last_reversal_mono) <= _SHAKE_WHIP_STREAK_RESET_S
+            ):
+                self._whip_streak += 1
+            else:
+                self._whip_streak = 1
+            self._shake_last_reversal_mono = now_mono
+            if self._whip_streak > _SHAKE_WHIP_WARMUP_REVERSALS:
+                cap = self._max_shake_energy_for_stage()
+                self._whip_energy = min(cap, self._whip_energy + _SHAKE_WHIP_GAIN)
                 whip_gained = True
 
-        if spin_gained:
+        if whip_gained or spin_gained:
             self._shake_last_active_mono = now_mono
 
-        if whip_gained or spin_gained:
-            self._shake_peak_energy = max(
-                self._shake_peak_energy, self._current_shake_energy()
-            )
-
-        if self._is_shaking and (rev_x or rev_y or spin_gained):
+        if self._is_shaking and (whip_gained or spin_gained):
             if self._override_pose == PetState.REDHOT:
                 self._override_until_utc = max(
                     self._override_until_utc,
@@ -3535,16 +3668,6 @@ class PetWindow(QWidget):
     def _begin_left_press_tracking(self, event: QMouseEvent, *, is_double_click: bool = False) -> None:
         now_mono = time.monotonic()
         self._quota_double_click_timer.stop()
-        last_shake_mono = max(
-            self._shake_last_reversal_mono, self._shake_last_active_mono
-        )
-        continuing_shake = (
-            self._override_pose in (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT)
-            and not self._override_is_sync
-            and datetime.now(timezone.utc) < self._override_until_utc
-            and last_shake_mono > 0.0
-            and (now_mono - last_shake_mono) <= _SHAKE_RELEASE_GRACE_S
-        )
 
         self._mouse_down = True
         self._mouse_pressed_physically = self._is_primary_mouse_button_held()
@@ -3560,15 +3683,8 @@ class PetWindow(QWidget):
             self._throw_pos_y = None
         self._is_sleeping = False
         self._pat_travel = 0.0
-        if not continuing_shake:
-            self._reset_drag_shake_tracking()
-        else:
-            # 刚处于摇晃生气/炸毛状态又立即点按续晃时保留阶段，避免起步闪回反重力动作
-            self._is_shaking = True
-            self._drag_tilt_vx = 0.0
-            self._shake_axis_x = [0, 0.0, 0.0, 0.0]
-            self._shake_axis_y = [0, 0.0, 0.0, 0.0]
-            self._reset_spin_segment_state()
+        # 每次新按下都清空上次拖拽的摇晃轨迹与能量，防止跨拖拽残留误触炸毛
+        self._reset_drag_shake_tracking()
 
         gpos = event.globalPosition()
         self._drag_start_global = QPointF(gpos.x(), gpos.y())
@@ -3902,10 +4018,7 @@ class PetWindow(QWidget):
         if self._stage_canvas.mouseGrabber() is self._stage_canvas:
             self._stage_canvas.releaseMouse()
         if not self._is_dragging:
-            self._is_shaking = False
-            self._shake_stage = 0
-            self._shake_peak_energy = 0.0
-            self._drag_tilt_vx = 0.0
+            self._reset_drag_shake_tracking()
             self._drag_trail.clear()
             return
         self._finish_drag_release(time.monotonic())
@@ -3963,10 +4076,7 @@ class PetWindow(QWidget):
             self._try_edge_dock_or_gravity_drop(release_vel=release_vel)
             self._restart_ai_timer()
 
-        self._is_shaking = False
-        self._shake_stage = 0
-        self._shake_peak_energy = 0.0
-        self._drag_tilt_vx = 0.0
+        self._reset_drag_shake_tracking()
         self._settings.last_left = float(self.x())
         self._settings.last_top = float(self.y())
         # 防抖延迟落盘，避免抛掷松手起飞第一帧同步磁盘写阻塞主渲染线程
@@ -3990,10 +4100,7 @@ class PetWindow(QWidget):
 
         now_mono = time.monotonic()
         if not self._is_dragging:
-            self._is_shaking = False
-            self._shake_stage = 0
-            self._shake_peak_energy = 0.0
-            self._drag_tilt_vx = 0.0
+            self._reset_drag_shake_tracking()
             was_walking = self._is_walking
             self._is_walking = False
             # 当前交互动作尚未播完（或按下时仍处于锁定状态）及同步工作期，点击不中断或偷跑触发动作
