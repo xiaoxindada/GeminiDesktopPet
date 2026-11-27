@@ -1,11 +1,11 @@
-"""立绘与骨骼部件精灵资源管理器（使用 PySide6 QPixmap 缓存）。"""
+"""立绘、动作片段（静态 PNG / 透明动态 WebP）与骨骼部件资源管理器。"""
 
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
 import os
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QRect, QRectF, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap
@@ -13,9 +13,26 @@ from PySide6.QtGui import QImage, QPainter, QPixmap
 from models.app_version import get_bundled_resource_dir
 from models.pet_settings import PetStyleMode
 from models.pet_state import PetState
+from services.action_clip import (
+    ActionClip,
+    AnimatedClipCache,
+    AnimatedWebpClip,
+    ClipMetadata,
+    StaticSpriteClip,
+    load_manifest_entries,
+    parse_clip_metadata,
+    probe_animated_webp,
+)
+
 
 _SMOOTH_DOWNSCALE_CACHE_MAX = 96
 _smooth_downscale_cache: OrderedDict[tuple[int, int, int, int, int, int, int], QPixmap] = OrderedDict()
+
+# 标准立绘内置归一化默认参数（可通过 manifest.json 覆盖），仅对蹲坐等低重心姿态缩放高度
+_DEFAULT_STANDARD_METADATA: dict[str, ClipMetadata] = {
+    PetState.SULK.value: ClipMetadata(render_scale=0.68),
+    PetState.COMPACT.value: ClipMetadata(render_scale=0.82),
+}
 
 
 def _get_smooth_downscaled_pixmap(
@@ -90,32 +107,126 @@ class WalkRigAssets:
 
     @property
     def chibi_complete(self) -> bool:
-        return all(getattr(self, name) is not None for name in (
-            "chibi_body", "chibi_arm_l", "chibi_arm_r", "chibi_leg_l", "chibi_leg_r",
-        ))
+        return all(
+            getattr(self, name) is not None
+            for name in ("chibi_body", "chibi_arm_l", "chibi_arm_r", "chibi_leg_l", "chibi_leg_r")
+        )
 
     @property
     def standard_complete(self) -> bool:
-        return all(getattr(self, name) is not None for name in (
-            "std_body", "std_front_thigh", "std_front_shin",
-        ))
+        return all(
+            getattr(self, name) is not None
+            for name in ("std_body", "std_front_thigh", "std_front_shin")
+        )
+
+
+_SEMANTIC_FALLBACK_GROUPS: tuple[tuple[PetState, ...], ...] = (
+    (PetState.PAT, PetState.HAPPY, PetState.COAXED, PetState.FORGIVEN, PetState.PROUD),
+    (PetState.THINKING, PetState.READING, PetState.WRITING, PetState.DRAWING, PetState.LISTENING),
+    (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP, PetState.TIRED, PetState.YAWN),
+    (PetState.RUNNING, PetState.SEARCHING),
+    (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT, PetState.SULK),
+    (PetState.EDGE_LEFT_PEEK, PetState.EDGE_LEFT),
+    (PetState.EDGE_RIGHT_PEEK, PetState.EDGE_RIGHT),
+)
 
 
 class SpriteManager:
-    """加载原版动作贴图与两种比例的骨架资源。"""
+    """加载静态立绘、透明动态 WebP 片段、manifest 归一化元数据与步行骨架。"""
 
     def __init__(self, assets_root: Optional[str] = None) -> None:
         base = assets_root or os.path.join(get_bundled_resource_dir(), "Assets")
+        self._assets_root = base
         self._sprites_dir = os.path.join(base, "Sprites")
         self._standard_dir = os.path.join(base, "Standard")
+        self._animations_dir = os.path.join(base, "Animations")
         self._walkrig_dir = os.path.join(base, "WalkRig")
+
+        # 静态 QPixmap 缓存（保持与原有调用方完全兼容）
         self._cache: dict[PetState, QPixmap] = {}
         self._standard_cache: dict[str, QPixmap] = {}
         self._fallback: Optional[QPixmap] = None
         self._standard_fallback: Optional[QPixmap] = None
         self.walk_rig = WalkRigAssets()
 
+        # 动作片段（ActionClip）与动态 WebP 有界 LRU 缓存
+        self._anim_cache = AnimatedClipCache()
+        self._chibi_clips: dict[str, ActionClip] = {}
+        self._standard_clips: dict[str, ActionClip] = {}
+        self._chibi_manifest: dict[str, dict[str, Any]] = {}
+        self._standard_manifest: dict[str, dict[str, Any]] = {}
+        self._clip_ready_callbacks: list[Callable[[], None]] = []
+
+    def add_clip_ready_listener(self, callback: Callable[[], None]) -> None:
+        """注册动态 WebP 后台解码完成通知（回调可能在后台线程触发，调用方需线程安全转发）。"""
+        if callback not in self._clip_ready_callbacks:
+            self._clip_ready_callbacks.append(callback)
+
+    def remove_clip_ready_listener(self, callback: Callable[[], None]) -> None:
+        if callback in self._clip_ready_callbacks:
+            self._clip_ready_callbacks.remove(callback)
+
+    def _notify_clip_ready(self) -> None:
+        for cb in tuple(self._clip_ready_callbacks):
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def dispose(self) -> None:
+        """释放后台动态解码线程与帧缓存。"""
+        self._clip_ready_callbacks.clear()
+        self._anim_cache.dispose()
+
+    def warm_render_cache(
+        self,
+        style_mode: PetStyleMode,
+        sprite_height_px: float,
+        dpr: float = 1.0,
+    ) -> None:
+        """预热当前画风核心交互动作的 Alpha 包围盒与物理分辨率缩图缓存，消除首次切图掉帧。"""
+        from services.action_clip import analyze_pixmap_metrics
+
+        hot_states = (
+            PetState.IDLE,
+            PetState.FLOAT,
+            PetState.DIZZY,
+            PetState.ANNOYED,
+            PetState.PUFFED,
+            PetState.REDHOT,
+            PetState.SULK,
+            PetState.HAPPY,
+            PetState.PAT,
+        )
+        eff_dpr = max(1.0, float(dpr))
+        for state in hot_states:
+            clip = self.get_clip(state, style_mode)
+            if clip is None or clip.is_animated:
+                continue
+            pm = clip.preview_pixmap()
+            if pm is None or pm.isNull():
+                continue
+            metrics = analyze_pixmap_metrics(pm)
+            src = metrics.content_rect
+            cw = float(src.width())
+            ch = float(src.height())
+            if cw <= 0.0 or ch <= 0.0:
+                continue
+            render_scale = clip.metadata.render_scale
+            rh = (
+                sprite_height_px * render_scale
+                if (render_scale == 1.0 or style_mode == PetStyleMode.STANDARD or (cw / ch) > 0.68)
+                else sprite_height_px
+            )
+            rw = rh * (cw / ch)
+            phys_w = max(1, int(round(rw * eff_dpr)))
+            phys_h = max(1, int(round(rh * eff_dpr)))
+            if src.width() > phys_w or src.height() > phys_h:
+                _get_smooth_downscaled_pixmap(pm, src, phys_w, phys_h)
+
     def preload_all(self) -> None:
+        self._load_manifests()
+
         self._fallback = self._load_pixmap(os.path.join(self._sprites_dir, "idle.png"))
         for state in PetState:
             key = state.to_sprite_key()
@@ -158,15 +269,146 @@ class SpriteManager:
         )
         self._ensure_base_poses()
 
+        # 轻量探测已存在的动态 WebP 片段（仅读头信息，不预解码全部帧）
+        self._chibi_clips.clear()
+        self._standard_clips.clear()
+        for state in PetState:
+            key = state.to_sprite_key()
+            chibi_clip = self._build_clip_for_key(key, PetStyleMode.CHIBI, self._cache.get(state))
+            if chibi_clip is not None:
+                self._chibi_clips[key] = chibi_clip
+            std_clip = self._build_clip_for_key(
+                key,
+                PetStyleMode.STANDARD,
+                self._standard_cache.get(key),
+            )
+            if std_clip is not None:
+                self._standard_clips[key] = std_clip
+
+    def _load_manifests(self) -> None:
+        self._chibi_manifest = {}
+        self._standard_manifest = {}
+
+        root_manifest_path = os.path.join(self._assets_root, "manifest.json")
+        if os.path.isfile(root_manifest_path):
+            root_entries = load_manifest_entries(root_manifest_path)
+            if isinstance(root_entries.get("chibi"), dict):
+                self._chibi_manifest.update(
+                    {
+                        str(k).strip().lower(): v
+                        for k, v in root_entries["chibi"].items()
+                        if isinstance(v, dict)
+                    }
+                )
+            if isinstance(root_entries.get("standard"), dict):
+                self._standard_manifest.update(
+                    {
+                        str(k).strip().lower(): v
+                        for k, v in root_entries["standard"].items()
+                        if isinstance(v, dict)
+                    }
+                )
+
+        self._chibi_manifest.update(
+            load_manifest_entries(os.path.join(self._sprites_dir, "manifest.json"))
+        )
+        self._standard_manifest.update(
+            load_manifest_entries(os.path.join(self._standard_dir, "manifest.json"))
+        )
+
+    def _resolve_animated_path(
+        self,
+        key: str,
+        style_mode: PetStyleMode,
+        entry: Optional[dict[str, Any]],
+    ) -> Optional[str]:
+        style_dir = self._standard_dir if style_mode == PetStyleMode.STANDARD else self._sprites_dir
+        anim_sub = "Standard" if style_mode == PetStyleMode.STANDARD else "Sprites"
+        candidates: list[str] = []
+
+        if isinstance(entry, dict):
+            raw_file = entry.get("file") or entry.get("webp")
+            if isinstance(raw_file, str) and raw_file.strip():
+                rel = raw_file.strip()
+                if os.path.isabs(rel):
+                    candidates.append(rel)
+                else:
+                    candidates.append(os.path.join(style_dir, rel))
+                    candidates.append(os.path.join(self._animations_dir, anim_sub, rel))
+                    candidates.append(os.path.join(self._assets_root, rel))
+
+        candidates.append(os.path.join(self._animations_dir, anim_sub, f"{key}.webp"))
+        candidates.append(os.path.join(style_dir, f"{key}.webp"))
+
+        for path in candidates:
+            if path.lower().endswith(".webp") and os.path.isfile(path):
+                return path
+        return None
+
+    def _metadata_for_key(self, key: str, style_mode: PetStyleMode) -> ClipMetadata:
+        norm_key = key.strip().lower()
+        base = (
+            _DEFAULT_STANDARD_METADATA.get(norm_key, ClipMetadata())
+            if style_mode == PetStyleMode.STANDARD
+            else ClipMetadata()
+        )
+        manifest = self._standard_manifest if style_mode == PetStyleMode.STANDARD else self._chibi_manifest
+        entry = manifest.get(norm_key)
+        return parse_clip_metadata(entry, base) if entry else base
+
+    def _build_clip_for_key(
+        self,
+        key: str,
+        style_mode: PetStyleMode,
+        static_pixmap: Optional[QPixmap],
+    ) -> Optional[ActionClip]:
+        norm_key = key.strip().lower()
+        manifest = self._standard_manifest if style_mode == PetStyleMode.STANDARD else self._chibi_manifest
+        entry = manifest.get(norm_key)
+        meta = self._metadata_for_key(norm_key, style_mode)
+        clip_id = f"{style_mode.value.lower()}:{norm_key}"
+
+        webp_path = self._resolve_animated_path(key, style_mode, entry)
+        if webp_path is not None:
+            probed = probe_animated_webp(webp_path)
+            if probed is not None:
+                frame_count, natural_size = probed
+                if frame_count > 1:
+                    return AnimatedWebpClip(
+                        clip_id=clip_id,
+                        file_path=webp_path,
+                        cache=self._anim_cache,
+                        frame_count=frame_count,
+                        natural_size=natural_size,
+                        fallback_pixmap=static_pixmap,
+                        metadata=meta,
+                        on_decoded=self._notify_clip_ready,
+                    )
+                # 单帧 .webp 按静态贴图加载
+                single_pm = self._load_pixmap(webp_path)
+                if single_pm is not None:
+                    return StaticSpriteClip(clip_id, single_pm, meta)
+
+        if static_pixmap is not None and not static_pixmap.isNull():
+            return StaticSpriteClip(clip_id, static_pixmap, meta)
+        return None
+
     def _ensure_base_poses(self) -> None:
         rig = self.walk_rig
         if self._fallback is None and rig.chibi_complete:
-            self._fallback = self._compose((rig.chibi_arm_l, rig.chibi_leg_r,
-                rig.chibi_leg_l, rig.chibi_body, rig.chibi_arm_r))
+            self._fallback = self._compose(
+                (rig.chibi_arm_l, rig.chibi_leg_r, rig.chibi_leg_l, rig.chibi_body, rig.chibi_arm_r)
+            )
         if self._standard_fallback is None and rig.standard_complete:
-            self._standard_fallback = self._compose((
-                rig.std_back_thigh or rig.std_front_thigh, rig.std_back_shin or rig.std_front_shin,
-                rig.std_front_thigh, rig.std_front_shin, rig.std_body))
+            self._standard_fallback = self._compose(
+                (
+                    rig.std_back_thigh or rig.std_front_thigh,
+                    rig.std_back_shin or rig.std_front_shin,
+                    rig.std_front_thigh,
+                    rig.std_front_shin,
+                    rig.std_body,
+                )
+            )
         # 单风格资源包也保持原版形象，允许后续只提供一张基础图。
         self._fallback = self._fallback or self._standard_fallback
         self._standard_fallback = self._standard_fallback or self._fallback
@@ -181,60 +423,116 @@ class SpriteManager:
         painter.end()
         return result
 
-    def get(self, state: PetState, style_mode: PetStyleMode = PetStyleMode.CHIBI) -> Optional[QPixmap]:
-        if style_mode == PetStyleMode.STANDARD:
-            std_pix = self._get_standard_for_state(state)
-            if std_pix is not None:
-                return std_pix
-        # 缺图按动作语义复用原版，再回落基础姿态；新增动作自然覆盖此路径。
-        groups = (
-            (PetState.PAT, PetState.HAPPY, PetState.COAXED, PetState.FORGIVEN, PetState.PROUD),
-            (PetState.THINKING, PetState.READING, PetState.WRITING, PetState.DRAWING, PetState.LISTENING),
-            (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP, PetState.TIRED, PetState.YAWN),
-            (PetState.RUNNING, PetState.SEARCHING),
-            (PetState.ANNOYED, PetState.PUFFED, PetState.REDHOT, PetState.SULK),
-            (PetState.EDGE_LEFT_PEEK, PetState.EDGE_LEFT),
-            (PetState.EDGE_RIGHT_PEEK, PetState.EDGE_RIGHT),
-        )
-        for candidate in (state,) + next((group for group in groups if state in group), ()):
-            pix = self._cache.get(candidate)
-            if pix is not None:
-                return pix
-        return self._fallback
+    def has_animated_clip(
+        self,
+        state: PetState,
+        style_mode: PetStyleMode = PetStyleMode.CHIBI,
+    ) -> bool:
+        """判断指定状态在当前画风下是否拥有多帧动态素材（用于覆盖默认 WalkRig 等）。"""
+        clip = self._get_exact_clip(state, style_mode)
+        return clip is not None and clip.is_animated
 
-    def _get_standard_for_state(self, state: PetState) -> Optional[QPixmap]:
-        exact = self._standard_cache.get(state.value)
-        if exact is None:
-            exact = self._load_pixmap(os.path.join(self._standard_dir, state.value + ".png"))
-            if exact is not None:
-                self._standard_cache[state.value] = exact
+    def _get_exact_clip(
+        self,
+        state: PetState,
+        style_mode: PetStyleMode,
+    ) -> Optional[ActionClip]:
+        key = state.to_sprite_key()
+        if style_mode == PetStyleMode.STANDARD:
+            clip = self._standard_clips.get(key)
+            if clip is not None:
+                return clip
+            pix = self._standard_cache.get(key)
+            if pix is None:
+                pix = self._load_pixmap(os.path.join(self._standard_dir, f"{key}.png"))
+                if pix is not None:
+                    self._standard_cache[key] = pix
+            clip = self._build_clip_for_key(key, PetStyleMode.STANDARD, pix)
+            if clip is not None:
+                self._standard_clips[key] = clip
+            return clip
+
+        clip = self._chibi_clips.get(key)
+        if clip is not None:
+            return clip
+        pix = self._cache.get(state)
+        clip = self._build_clip_for_key(key, PetStyleMode.CHIBI, pix)
+        if clip is not None:
+            self._chibi_clips[key] = clip
+        return clip
+
+    def get_clip(
+        self,
+        state: PetState,
+        style_mode: PetStyleMode = PetStyleMode.CHIBI,
+    ) -> Optional[ActionClip]:
+        """按语义回落链返回统一 ActionClip（优先透明动态 WebP，其次精确静态图，再按语义兜底）。"""
+        if style_mode == PetStyleMode.STANDARD:
+            std_clip = self._get_standard_clip_for_state(state)
+            if std_clip is not None:
+                return std_clip
+
+        group = next((g for g in _SEMANTIC_FALLBACK_GROUPS if state in g), ())
+        for candidate in (state,) + group:
+            clip = self._get_exact_clip(candidate, PetStyleMode.CHIBI)
+            if clip is not None:
+                return clip
+
+        if self._fallback is not None:
+            fallback_key = "fallback:chibi"
+            cached = self._chibi_clips.get(fallback_key)
+            if cached is None:
+                cached = StaticSpriteClip(fallback_key, self._fallback, ClipMetadata())
+                self._chibi_clips[fallback_key] = cached
+            return cached
+        return None
+
+    def _get_standard_clip_for_state(self, state: PetState) -> Optional[ActionClip]:
+        exact = self._get_exact_clip(state, PetStyleMode.STANDARD)
         if exact is not None:
             return exact
+
         if state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP):
-            # 睡眠只能优先复用原版的闭眼素材，背面图不代表睡眠。
-            for key in ("sleeping", "edge_left_sleep", "edge_right_sleep"):
-                sleeping = self._standard_cache.get(key)
-                if sleeping is None:
-                    sleeping = self._load_pixmap(os.path.join(self._standard_dir, key + ".png"))
-                    if sleeping is not None:
-                        self._standard_cache[key] = sleeping
-                if sleeping is not None:
-                    return sleeping
-            # 缺少睡姿素材时保留当前比例的基础图。
-            return self._standard_fallback
+            for sleep_state in (PetState.SLEEPING, PetState.EDGE_LEFT_SLEEP, PetState.EDGE_RIGHT_SLEEP):
+                clip = self._get_exact_clip(sleep_state, PetStyleMode.STANDARD)
+                if clip is not None:
+                    return clip
+            if self._standard_fallback is not None:
+                return self._wrap_standard_named_clip("standee", self._standard_fallback)
+            return None
+
+        fallback_key = self._standard_fallback_key(state)
+        pix = self._standard_cache.get(fallback_key) or self._standard_fallback
+        if pix is not None:
+            return self._wrap_standard_named_clip(fallback_key, pix)
+        return None
+
+    def _wrap_standard_named_clip(self, key: str, pixmap: QPixmap) -> ActionClip:
+        cache_key = f"__std_named__:{key}"
+        clip = self._standard_clips.get(cache_key)
+        if clip is not None and clip.preview_pixmap() is pixmap:
+            return clip
+        built = self._build_clip_for_key(key, PetStyleMode.STANDARD, pixmap)
+        if built is None:
+            built = StaticSpriteClip(f"standard:{key}", pixmap, self._metadata_for_key(key, PetStyleMode.STANDARD))
+        self._standard_clips[cache_key] = built
+        return built
+
+    @staticmethod
+    def _standard_fallback_key(state: PetState) -> str:
         if state == PetState.EDGE_LEFT:
-            key = "edge_left"
-        elif state == PetState.EDGE_LEFT_PEEK:
-            key = "edge_left_peek"
-        elif state == PetState.EDGE_RIGHT:
-            key = "edge_right"
-        elif state == PetState.EDGE_RIGHT_PEEK:
-            key = "edge_right_peek"
-        elif state in (PetState.RUNNING, PetState.SEARCHING):
-            key = "side"
-        elif state in (PetState.SULK, PetState.BYE, PetState.TIRED):
-            key = "back"
-        elif state in (
+            return "edge_left"
+        if state == PetState.EDGE_LEFT_PEEK:
+            return "edge_left_peek"
+        if state == PetState.EDGE_RIGHT:
+            return "edge_right"
+        if state == PetState.EDGE_RIGHT_PEEK:
+            return "edge_right_peek"
+        if state in (PetState.RUNNING, PetState.SEARCHING):
+            return "side"
+        if state in (PetState.SULK, PetState.BYE, PetState.TIRED):
+            return "back"
+        if state in (
             PetState.IDLE2,
             PetState.IDLE3,
             PetState.THINKING,
@@ -246,10 +544,17 @@ class SpriteManager:
             PetState.REDHOT,
             PetState.COMPACT,
         ):
-            key = "front"
-        else:
-            key = "standee"
-        return self._standard_cache.get(key) or self._standard_fallback
+            return "front"
+        return "standee"
+
+    def get(self, state: PetState, style_mode: PetStyleMode = PetStyleMode.CHIBI) -> Optional[QPixmap]:
+        """向后兼容接口：统一经由 ActionClip 语义回落链返回代表静态 QPixmap，消除双轨解析。"""
+        clip = self.get_clip(state, style_mode)
+        if clip is not None:
+            pm = clip.preview_pixmap()
+            if pm is not None and not pm.isNull():
+                return pm
+        return self._standard_fallback if style_mode == PetStyleMode.STANDARD else self._fallback
 
     @staticmethod
     def _load_pixmap(path: str) -> Optional[QPixmap]:

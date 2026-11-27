@@ -577,6 +577,9 @@ class PetApplicationCoordinator(QObject):
 
             self._tray.dispose()
             self._sound.dispose()
+            sprites = getattr(self, "_sprites", None)
+            if sprites is not None and hasattr(sprites, "dispose"):
+                sprites.dispose()
         finally:
             self._follow_service.clear_main_pid(os.getpid())
             # 必须先释放主实例互斥体再交接后台守护，避免新守护误判主程序仍在运行而立即退出。

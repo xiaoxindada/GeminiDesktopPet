@@ -899,23 +899,12 @@ class TestSyncBubbleChatIsolation(unittest.TestCase):
                 # 工作屏蔽期放行贴边吸附：拖至屏幕左侧松手进入贴边态，同步事件不覆盖贴边形象，拖回桌面恢复工作动作。
                 from models.pet_settings import DockSide
 
-                area = pet._get_work_area(pet.x() + pet.width() * 0.5, pet.y() + pet.height() * 0.5)
-                srect = pet._get_local_sprite_rect()
-                floor_top = float(area.bottom() + 1 - pet.height())
+                area, srect, _, _, _, floor_top = pet._visible_sprite_work_bounds()
                 pet._settings.edge_dock_enabled = True
                 dock_y = int(round(floor_top))
-                pet.move(int(round(area.left() - (pet.width() - srect.width()) * 0.5 + 8.0)), dock_y)
-                pet._mouse_down = True
+                pet.move(int(round(area.left() - srect.left() + 8.0)), dock_y)
                 pet._is_dragging = True
-                rel_ev = QMouseEvent(
-                    QEvent.Type.MouseButtonRelease,
-                    QPointF(100.0, 100.0),
-                    QPointF(float(area.left() + 40), float(dock_y + 120)),
-                    Qt.MouseButton.LeftButton,
-                    Qt.MouseButton.NoButton,
-                    Qt.KeyboardModifier.NoModifier,
-                )
-                pet._on_stage_mouse_release(rel_ev)
+                pet._finish_drag_release(time.monotonic())
                 self.assertEqual(pet._settings.docked_side, DockSide.LEFT)
                 self.assertIsNone(pet._override_pose)
                 self.assertIn(pet._visual_state, (PetState.EDGE_LEFT, PetState.EDGE_LEFT_PEEK))
@@ -926,24 +915,14 @@ class TestSyncBubbleChatIsolation(unittest.TestCase):
                 self.assertIsNone(pet._override_pose)
                 self.assertEqual(pet._bubble_text_lbl.text(), "⚙ 贴边中工具调用")
                 # 从侧边拖回桌面松手：恢复本轮固定工作动作。
-                pet._mouse_down = True
-                pet._is_dragging = False
                 pet._drag_start_global = QPointF(float(area.left() + 40), float(dock_y + 120))
                 pet._last_move_global = QPointF(float(area.left() + 40), float(dock_y + 120))
                 pet._win_start_left = float(pet.x())
                 pet._win_start_top = float(pet.y())
-                move_ev = QMouseEvent(
-                    QEvent.Type.MouseMove,
-                    QPointF(100.0, 100.0),
-                    QPointF(float(area.left() + 280), float(dock_y + 120)),
-                    Qt.MouseButton.NoButton,
-                    Qt.MouseButton.LeftButton,
-                    Qt.KeyboardModifier.NoModifier,
-                )
-                pet._on_stage_mouse_move(move_ev)
+                pet._start_drag_at_global_pos(QPointF(float(area.left() + 280), float(dock_y + 120)))
                 self.assertEqual(pet._settings.docked_side, DockSide.NONE)
                 self.assertEqual(pet._override_pose, turn2_pose)
-                pet._on_stage_mouse_release(rel_ev)
+                pet._finish_drag_release(time.monotonic())
                 self.assertEqual(pet._settings.docked_side, DockSide.NONE)
                 self.assertEqual(pet._override_pose, turn2_pose)
                 self.assertFalse(pet._is_falling)
